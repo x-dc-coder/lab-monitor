@@ -1,0 +1,12 @@
+# lab-monitor bundle patch（V2 正式插件）
+#
+# 本文件是包的 `dsh.bundle.patch` 层：通过官方 CLI 安装后——
+#
+#   dsh plugin --profile web add link:/home/dc/projects/lab-monitor
+#
+# ——命令会校对 dsh.profile.bundles 与已装包，看到本声明即把 lab-monitor
+# 追加进 bundle 栈；profile 启动时合并本 patch（插件行 insert），
+# 无需手改 profile 的 cordis.patch.yml，一条命令完成安装 + 挂载。
+- insert:
+    - id: lab-monitor
+      name: 'lab-monitor'

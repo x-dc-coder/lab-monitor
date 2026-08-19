@@ -82,11 +82,23 @@ function groupActive(gs: SamplePoint['group']): boolean {
   return false
 }
 
-/** 进程证据（告警触发时附 Top 相关进程；实验组内优先，其他占用补充） */
+/** 进程证据（告警触发时附 Top 相关进程；实验组内优先，系统其他补充）
+ * 1.2 增强：WSL 双 pid 空间下，SamplePoint.procs 是 backend procs（tasklist，Windows 侧）——
+ * 补充 Windows 侧 GPU 占卡进程（llama-server.exe/vmmemWSL 等）到 evidence，弥补 system.topN 的 Linux 侧局限 */
 function evidenceOf(w: SamplePoint, preferGroup: boolean): { procs: ProcStat[] } | undefined {
   const list: ProcStat[] = []
   if (preferGroup && w.group && w.group.members.length) list.push(...w.group.members.slice(0, 3))
   if (w.system && w.system.topN.length) list.push(...w.system.topN.slice(0, preferGroup ? 2 : 5))
+  // 补充：backend procs（tasklist）按内存 Top——WSL 下即系统其他进程（GPU 占卡者多为 Windows 侧）
+  const gp = w.group ? w.group.members : []
+  const others = (w.procs || [])
+    .filter((p) => !gp.some((m) => m.pid === p.pid))
+    .sort((a, b) => (b.memMiB ?? 0) - (a.memMiB ?? 0))
+    .slice(0, preferGroup ? 2 : 3)
+  for (let i = 0; i < others.length; i++) {
+    const p = others[i]
+    list.push({ pid: p.pid, cmd: p.cmd ?? null, cpuPct: typeof p.cpuPct === 'number' ? p.cpuPct : null, memMiB: typeof p.memMiB === 'number' ? p.memMiB : null, gpuUtilPct: typeof p.gpuUtilPct === 'number' ? p.gpuUtilPct : null })
+  }
   return list.length ? { procs: list.slice(0, 5) } : undefined
 }
 

@@ -498,8 +498,9 @@ function sidebarBadge(): number | null {
 function registerSidebarAdapter(ctx: CtxLike, disposeViewRef: () => (() => void) | null) {
   let bs: unknown = null
   // 重探：ctx.get 是即时查询，apply 可能早于 better-sidebar 服务发布（M4）
+  // 1.2 修复（t1 诊断）：better-sidebar 是大 bundle，apply 可能 >6s；3 次重探不足 → 10 次（20s 窗口）
   let attempts = 0
-  const MAX_ATTEMPTS = 3
+  const MAX_ATTEMPTS = 10
   const tryProbe = () => {
     try {
       const visible = !(last && last.ui && last.ui.betterSidebarVisible === false) // 双检查 2/2
@@ -511,6 +512,7 @@ function registerSidebarAdapter(ctx: CtxLike, disposeViewRef: () => (() => void)
       if (!bs) {
         attempts += 1
         if (attempts < MAX_ATTEMPTS) ctx.setTimeout(tryProbe, 2000)
+        else console.warn(`[lab-monitor] ${MAX_ATTEMPTS} 次重探（${MAX_ATTEMPTS * 2}s）未获 betterSidebar 服务，保持 conversation.view 兜底（检查 better-sidebar 是否启用/加载）`)
         return
       }
       // 服务在 + 可见 → 注册 ③（替代 ②）

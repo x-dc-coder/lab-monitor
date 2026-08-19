@@ -298,8 +298,6 @@ function res(listener, cmd, opts) { return listener({ name: 'bash', arguments: {
   const oom2 = await waitForRule('oom', 45000)
   console.log('  [T4] oom(实验不活跃) alert=', oom2 && JSON.stringify({ level: oom2.level, rule: oom2.rule, msg: oom2.msg }))
   assert(!!oom2 && oom2.level === 'warn' && oom2.msg.indexOf('疑似他人') !== -1, '实验不活跃 + 显存高 → oom 降级 warn（疑似他人占用）', oom2 && oom2.level)
-  const dbgS2 = await G('snapshot')({})
-  console.log('  [T4] DBG oom 后 experiment=', JSON.stringify(dbgS2.experiment && { pid: dbgS2.experiment.pid, procGroup: dbgS2.experiment.procGroup, gs: dbgS2.experiment.groupStats && { mc: dbgS2.experiment.groupStats.memberCount, mem: dbgS2.experiment.groupStats.memMiB } }))
   assert(oom2 && oom2.evidence && expPid4 && oom2.evidence.procs.some((p) => p.pid === expPid4), 'oom evidence 含实验 pid（1.2）', { expPid: expPid4, ev: oom2 && oom2.evidence })
   // 清理实验（kill ps 回填的真实 pid；spawn 句柄在 WSL 下可能指中间层）
   try { process.kill(cp4.pid, 'SIGKILL') } catch (e) {}

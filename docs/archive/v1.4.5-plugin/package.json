@@ -1,0 +1,24 @@
+{
+  "name": "dsh-lab-monitor",
+  "version": "0.1.0",
+  "description": "Lab Monitor 科研实验监控助手（本机秒级：采样/状态机/平衡引擎/告警/Agent 工具/prompt 注入 + conversation.view 兜底 UI + better-sidebar 可选出口）",
+  "type": "module",
+  "main": "lib/host.js",
+  "exports": {
+    ".": { "default": "./lib/host.js" },
+    "./client": { "default": "./lib/client.js" },
+    "./package.json": "./package.json"
+  },
+  "files": ["lib", "cordis.patch.yml"],
+  "scripts": {
+    "build": "node scripts/build-v2.js",
+    "test": "../scripts/verify.sh"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-runtime"] }
+  },
+  "keywords": ["dsh-plugin", "lab-monitor", "gpu", "monitoring"],
+  "license": "MIT"
+}
+

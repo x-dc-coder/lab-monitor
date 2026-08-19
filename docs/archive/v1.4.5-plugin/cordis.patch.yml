@@ -1,0 +1,6 @@
+# Lab Monitor v2 正式插件挂载行（★MVP 动态插件阶段不生效——T3-2；v2 生产化时
+# 由 "dsh plugin --profile <name> add dsh-lab-monitor" 的 bundle 协调自动写入
+# dsh.profile.bundles；跨会话常驻需 cordis:group + isolate: true 包服务）
+- insert:
+    - id: lab-monitor
+      name: dsh-lab-monitor

@@ -29,10 +29,13 @@ const FAKE = {
   version: 'Linux version 6.6.87.2-microsoft-standard-WSL2',
   // V2 QUERY_ARGS 格式：index,name,utilization.gpu(%),memory.used(MiB),memory.total(MiB),temperature.gpu(C),power.draw(W)
   gpuCsv: '0, NVIDIA GeForce RTX 5060 Ti, 92, 19200, 24576, 80, 350.00',
-  cimLine: '92;30480;12560',          // cpuLoad;totalKB;freeKB（→ totalMiB≈29.7 / avail≈12.3）
-  tasklist: '"python.exe","1234","Console","1","12,345 K"',
-  psLines: [],                         // 状态机进程表（实验进程视角）
-  aionui: undefined,                   // { rightPanel: 'aionui-panel' } 触发互斥
+  // CIM：首行 cpuLoad;totalKB;freeKB + 每进程 pid;ppid;name（1.2 进程树）
+  cimLine: '92;30480;12560\n1234;1;python.exe\n5678;1234;python.exe\n9999;1;chrome.exe',
+  tasklist: '"python.exe","1234","Console","1","12,345 K"\n"python.exe","5678","Console","1","8,000 K"\n"chrome.exe","9999","Console","1","20,000 K"',
+  pmon: '', // 1.2：pmon -c 3 输出（空 = 无活动进程，gpuUtilPct 不填）
+  // 状态机进程表（实验进程视角；1.2 格式 pid ppid pcpu rssKB args；含非实验进程供 system 差集）
+  psLines: ['8888 1 0.5 300000 node server.js', '7777 1 0.2 200000 /usr/lib/firefox/firefox'],
+  aionui: undefined, // { rightPanel: 'aionui-panel' } 触发互斥
 }
 
 function fakeShellResult(text, code) {
@@ -68,6 +71,7 @@ function makeCtx() {
     },
     async run(request) {
       const cmd = request.command || ''
+      if (cmd.includes('pmon')) return fakeShellResult(FAKE.pmon + '\r')
       if (cmd.includes('nvidia-smi') && cmd.includes('driver_version')) return fakeShellResult('596.49, 1\r')
       if (cmd.includes('nvidia-smi')) return fakeShellResult(FAKE.gpuCsv + '\r')
       if (cmd.includes('powershell') && cmd.includes('chcp')) return fakeShellResult(FAKE.cimLine)
@@ -211,6 +215,10 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   assert(snap.callCount === 1, 'callCount=1（T4-2 断言手段）', snap.callCount)
   assert(snap.ui && snap.ui.betterSidebarVisible === true, 'ui.betterSidebarVisible=true（无互斥）', snap.ui)
   assert(snap.procs && snap.procs.length >= 1, 'procs 来自 tasklist', snap.procs.length)
+  assert(snap.system && Array.isArray(snap.system.topN), '1.2 system 存在（无实验时 topN 数组）', snap.system)
+  assert(snap.system && snap.system.topN.some((p) => p.pid === 8888), 'system.topN 含 node(8888)（非实验进程明细）', snap.system && snap.system.topN)
+  const wPpid = snap.procs.find((p) => p.pid === 1234)
+  assert(wPpid && wPpid.ppid === 1, 'procs[].ppid 合并（CIM 进程树）', wPpid)
 
   console.log('\n[B] 生命周期：pre-execute → running → pid 关联 → done（T1-1/T1-2）')
   const pre = C.events['tools/pre-execute'][0]
@@ -219,11 +227,23 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   assert(snap.experiment && snap.experiment.state === 'running', '训练命令命中 → running', snap.experiment)
   assert(snap.experiment.cmd === 'python train_demo.py --epochs 10', 'experiment.cmd 记录', snap.experiment.cmd)
 
-  // pid 关联：ps 出现候选进程
-  FAKE.psLines = ['1234 python train_demo.py --epochs 10 2>&1 | tee /tmp/t.log']
+  // pid 关联：ps 出现候选进程（1.2：5 列 pid ppid pcpu rssKB args）
+  FAKE.psLines = ['1234 1 55.0 12000 python train_demo.py --epochs 10', '8888 1 0.5 300000 node server.js', '7777 1 0.2 200000 /usr/lib/firefox/firefox']
   await tick(3) // 15s 虚拟 → ps 周期触发 ≥1
   snap = await G('snapshot')({})
   assert(snap.experiment && snap.experiment.pid === 1234, 'ps 关联回填 pid=1234', snap.experiment && snap.experiment.pid)
+  assert(snap.experiment && Array.isArray(snap.experiment.procGroup) && snap.experiment.procGroup.includes(1234), 'procGroup 含主进程 1234', snap.experiment && snap.experiment.procGroup)
+
+  // 1.2 进程组扩张：子进程（ppid=主）→ procGroup + groupStats（B2/B3；聚合输入 = ps 表同源）
+  FAKE.psLines = ['1234 1 55.0 12000 python train_demo.py --epochs 10', '5678 1234 30.0 8000 python train_demo.py --epochs 10', '8888 1 0.5 300000 node server.js', '7777 1 0.2 200000 /usr/lib/firefox/firefox']
+  await tick(3) // 下一个 ps 周期 → 组扩张
+  snap = await G('snapshot')({})
+  assert(snap.experiment && Array.isArray(snap.experiment.procGroup) && snap.experiment.procGroup.includes(5678), 'procGroup 含子进程 5678（ppid 递归扩张）', snap.experiment && snap.experiment.procGroup)
+  assert(snap.experiment && snap.experiment.groupStats && snap.experiment.groupStats.memberCount === 2, 'groupStats.memberCount=2（ps 主+子）', snap.experiment && snap.experiment.groupStats)
+  assert(snap.experiment && snap.experiment.groupStats && snap.experiment.groupStats.cpuPct === 85, 'groupStats.cpuPct=85（55+30 求和）', snap.experiment && snap.experiment.groupStats && snap.experiment.groupStats.cpuPct)
+  assert(snap.experiment && snap.experiment.groupStats && snap.experiment.groupStats.members.every((m) => m.pid !== 8888), 'groupStats.members 不含非实验进程(8888)', snap.experiment && snap.experiment.groupStats && snap.experiment.groupStats.members)
+  assert(snap.system && snap.system.topN.some((p) => p.pid === 8888), 'system.topN 含 node(8888)', snap.system && snap.system.topN)
+  assert(snap.system && snap.system.topN.every((p) => p.pid !== 1234 && p.pid !== 5678), 'system.topN 不含实验成员（pid 差集）', snap.system && snap.system.topN)
 
   // done 双确认：配对 result + 进程消失
   const res = C.events['tools/result'][0]
@@ -246,18 +266,64 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   assert(snap.alertsCriticalCount >= 1, 'crashed 触发 critical 告警（alertsCriticalCount>=1）', snap.alertsCriticalCount)
   assert(Array.isArray(snap.alerts) && snap.alerts.some((a) => a.rule === 'experiment-crash'), '告警列表含 experiment-crash', snap.alerts && snap.alerts[0])
 
-  console.log('\n[C] 平衡引擎：OOM 场景（持续 10s → critical，5 分钟防重）')
-  FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 95 %, 24000 MiB, 24576 MiB, 81, 350.00 W'
-  await tick(5) // util 95 ≥ utilWarn 90，mem 97.6% ≥ memWarn 95 → 连续 5 个 2s 窗口 = 10s
+  console.log('\n[C] 平衡引擎 1.2：归属仲裁三分支（防误报核心）')
+  // 分支③：无实验 + 整卡显存高 → other-occupancy(info)，不误报实验 oom
+  FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 95 %, 24000 MiB, 24576 MiB, 81, 350.00 W' // mem 97.6% ≥ memWarn 95
+  FAKE.psLines = ['8888 1 0.5 300000 node server.js', '7777 1 0.2 200000 /usr/lib/firefox/firefox']
+  const c0 = (await G('snapshot')({})).alertsCriticalCount // [C] 入口（含 [B2] crashed 累计）
+  await tick(5) // 连续 5 个 2s 窗口 = 10s 持续
   snap = await G('snapshot')({})
-  assert(snap.alertsCriticalCount >= 1, 'OOM 告警触发（alertsCriticalCount>=1）', snap.alertsCriticalCount)
-  const oom = snap.alerts.find((a) => a.rule === 'oom')
-  assert(oom && oom.level === 'critical', 'oom 告警 level=critical', oom)
-  assert(oom && Array.isArray(oom.actions) && oom.actions.length >= 1, 'oom 建议动作', oom && oom.actions)
+  const occ = snap.alerts.find((a) => a.rule === 'other-occupancy')
+  assert(!!occ && occ.level === 'info', '无实验 + 整卡高 → other-occupancy(info)（不误报实验 oom）', occ)
+  assert(!snap.alerts.some((a) => a.rule === 'oom'), '无实验时不触发 oom 规则', snap.alerts && snap.alerts[0])
+  assert(snap.alertsCriticalCount === c0, 'other-occupancy 不新增 critical（计数不变）', c0 + '→' + snap.alertsCriticalCount)
+  assert(occ && occ.evidence && occ.evidence.procs.some((p) => p.pid === 8888), 'other-occupancy evidence 含占卡进程(8888)', occ && occ.evidence)
+
+  // 分支①：实验活跃（组 CPU 95 ≥30）+ 整卡高 → oom critical + evidence 含实验 pid
+  await pre({ name: 'bash', arguments: { command: 'python train_demo.py --epochs 10' } }, async () => ({ kind: 'allow' }))
+  FAKE.psLines = ['1234 1 95.0 3000000 python train_demo.py --epochs 10', '8888 1 0.5 300000 node server.js', '7777 1 0.2 200000 /usr/lib/firefox/firefox']
+  await tick(3) // ps 周期：组关联（cpuPct 95 ≥ 30 → 活跃）
+  await tick(5) // 10s 持续命中
+  snap = await G('snapshot')({})
+  const oom1 = snap.alerts.find((a) => a.rule === 'oom')
+  assert(!!oom1 && oom1.level === 'critical', '实验活跃 + 整卡高 → oom critical', oom1 && oom1.level)
+  assert(oom1 && Array.isArray(oom1.actions) && oom1.actions.length >= 1, 'oom 建议动作', oom1 && oom1.actions)
+  assert(oom1 && oom1.evidence && oom1.evidence.procs.some((p) => p.pid === 1234), 'oom evidence 含实验 pid 1234', oom1 && oom1.evidence)
   const countAfterFirst = snap.alertsCriticalCount
-  await tick(6) // 继续命中 10s → 防抖（5 分钟最小间隔）不应新增
+  await tick(6) // 继续命中 → 同类 5 分钟防重（计数不变）
   snap = await G('snapshot')({})
   assert(snap.alertsCriticalCount === countAfterFirst, '同类告警 5 分钟防重（计数不变）', countAfterFirst + '→' + snap.alertsCriticalCount)
+
+  // 分支②：实验不活跃（组 CPU 0.5 <30、内存 120MiB <2048）+ 整卡高 → 降级 warn（疑似他人占用）
+  advance(5 * 60 * 1000 + 100) // 跳过 5min 防重窗口
+  FAKE.psLines = ['1234 1 0.5 120 python train_demo.py --epochs 10', '8888 1 0.5 300000 node server.js', '7777 1 0.2 200000 /usr/lib/firefox/firefox']
+  await tick(5)
+  snap = await G('snapshot')({})
+  const oom2 = snap.alerts.find((a) => a.rule === 'oom')
+  assert(!!oom2 && oom2.level === 'warn', '实验不活跃 + 整卡高 → 降级 warn（疑似他人占用）', oom2 && oom2.level)
+  assert(!!oom2 && oom2.msg.indexOf('疑似他人') !== -1, 'warn msg 标注疑似他人负载', oom2 && oom2.msg)
+
+  // C2：io-bottleneck——实验组 CPU 满载 + GPU 低（主判据分支）
+  FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 5 %, 19200 MiB, 24576 MiB, 80, 350.00 W' // util 5 < 30；显存 78% < memWarn 95 → oom 不干扰
+  FAKE.psLines = ['1234 1 95.0 3000000 python train_demo.py --epochs 10', '8888 1 0.5 300000 node server.js', '7777 1 0.2 200000 /usr/lib/firefox/firefox']
+  advance(6000) // 强制下一 ps 周期在本次 tick(5) 首拍发生 → 5 次命中 ≥ MIN_HITS
+  await tick(5)
+  snap = await G('snapshot')({})
+  const io = snap.alerts.find((a) => a.rule === 'io-bottleneck')
+  assert(!!io && io.level === 'warn' && io.msg.indexOf('实验进程组 CPU 95%') !== -1, 'io-bottleneck（实验组 CPU 满载 + GPU 低）', io && io.msg)
+
+  // C3：thermal——整卡物理量 + G 活跃度上下文
+  FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 5 %, 19200 MiB, 24576 MiB, 86, 350.00 W' // temp 86 ≥ tempWarn 85
+  await tick(5)
+  snap = await G('snapshot')({})
+  const th = snap.alerts.find((a) => a.rule === 'thermal')
+  assert(!!th && th.level === 'warn' && th.msg.indexOf('实验进程组') !== -1, 'thermal msg 含实验进程组上下文', th && th.msg)
+
+  // 结束实验（配对 result + 进程消失 → done），复位 GPU
+  const res2 = C.events['tools/result'][0]
+  FAKE.psLines = ['8888 1 0.5 300000 node server.js', '7777 1 0.2 200000 /usr/lib/firefox/firefox']
+  res2({ name: 'bash', arguments: { command: 'python train_demo.py --epochs 10' } }, { isError: false, content: [] })
+  await tick(3)
   FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 92 %, 19200 MiB, 24576 MiB, 80, 350.00 W'
 
   console.log('\n[D] 阈值：直连即时生效 + 携带 last-write-wins（M3）')

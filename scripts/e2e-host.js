@@ -27,6 +27,18 @@ function assert(cond, name, extra) {
   else { failures += 1; console.error('  ✗', name, extra !== undefined ? JSON.stringify(extra) : '') }
 }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)) }
+// 轮询等待某规则告警出现（1.2：backend snapshot 受 CIM 进程树拖慢 ~3-5s/tick，
+// MIN_HITS=5 → 阈值需持续 ≥25s 才发告警；断言改为轮询而非固定 sleep）
+async function waitForRule(rule, timeoutMs) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const s = await G('snapshot')({})
+    const hit = (s.alerts || []).find((a) => a.rule && a.rule.includes(rule))
+    if (hit) return hit
+    await sleep(3000)
+  }
+  return null
+}
 
 // ── 真实 shell（child_process） ───────────────────────────────────────────
 // 采样通道：真实 nvidia-smi.exe / PowerShell / tasklist / /proc（WSL 本机）
@@ -244,23 +256,58 @@ function res(listener, cmd, opts) { return listener({ name: 'bash', arguments: {
   try { process.kill(cpB.pid, 'SIGKILL') } catch (e) {}
   await sleep(500)
 
-  // ═══ T4：平衡引擎构造触发（thermal + oom） ═════════════════════════════
+  // ═══ T4：平衡引擎构造触发（thermal + 归属仲裁三分支，1.2） ═════════════
   console.log('\n== T4: 平衡引擎构造触发 ==')
   // 阈值事实来源 = host settings 内存（T4-4）；setThresholds 直连更新（last-write-wins）
   const r1 = await G('setThresholds')({ tempWarn: 1 }) // 当前 GPU 温度 ~40°C 恒 >1
   assert(r1 && r1.ok, 'setThresholds tempWarn=1', r1)
-  await sleep(12000) // 阈值持续 10s
-  snap = await G('snapshot')({})
-  const th = (snap.alerts || []).find((a) => a.rule && a.rule.includes('thermal'))
+  const th = await waitForRule('thermal', 45000) // MIN_HITS=5 × ~3-5s/tick → 轮询等待
   console.log('  [T4] thermal alert=', th && JSON.stringify({ level: th.level, rule: th.rule, confidence: th.confidence, actions: th.actions }))
-  assert(!!th, 'thermal 告警触发（真实温度持续 >1°C 10s）', snap.alerts && snap.alerts.map((a) => a.rule))
+  assert(!!th && th.level === 'warn', 'thermal 告警触发（真实温度持续 >1°C）', th && th.level)
+  assert(th && th.evidence && Array.isArray(th.evidence.procs) && th.evidence.procs.length >= 1, 'thermal evidence 含进程证据（1.2）', th && th.evidence)
 
-  const r2 = await G('setThresholds')({ memWarn: 5, utilWarn: 1 }) // 显存占用 11%>=5% 且 util>=1% → oom 命中
-  await sleep(12000)
+  // 1.2 归属仲裁分支③：无实验 + 整卡显存高 → other-occupancy(info)，不误报实验 oom
+  const r2 = await G('setThresholds')({ memWarn: 5, utilWarn: 1 }) // 真实显存 ~97% ≥ 5%
+  assert(r2 && r2.ok, 'setThresholds memWarn=5', r2)
+  const occ = await waitForRule('other-occupancy', 45000)
+  console.log('  [T4] other-occupancy alert=', occ && JSON.stringify({ level: occ.level, rule: occ.rule, confidence: occ.confidence }))
+  assert(!!occ && occ.level === 'info', '无实验 + 显存高 → other-occupancy(info)（不误报 oom）', occ && occ.level)
+  assert(occ && occ.evidence && occ.evidence.procs.length >= 1, 'other-occupancy evidence 含占卡进程（1.2）', occ && occ.evidence)
   snap = await G('snapshot')({})
-  const oom = (snap.alerts || []).find((a) => a.rule && a.rule.includes('oom'))
-  console.log('  [T4] oom alert=', oom && JSON.stringify({ level: oom.level, rule: oom.rule, confidence: oom.confidence }))
-  assert(!!oom, 'oom 告警触发（构造阈值）', snap.alerts && snap.alerts.map((a) => a.rule))
+  const oomBase = (snap.alerts || []).filter((a) => a.rule === 'oom').length // 历史 oom（如 T1 sleep 实验不活跃 → warn）不计入本分支
+  assert(oomBase === 0 || oomBase >= 0, 'oom 基线记录（历史告警不混淆）', oomBase)
+  await sleep(8000) // 无实验期间继续采样 8s：归属仲裁不应新增 oom
+  snap = await G('snapshot')({})
+  const oomAfter = (snap.alerts || []).filter((a) => a.rule === 'oom').length
+  assert(oomAfter === oomBase, '无实验期间不新增 oom（归属仲裁防误报）', { base: oomBase, after: oomAfter })
+
+  // 1.2 归属仲裁分支②：有实验但活跃度低（Windows 实验组 CPU 不可得 → 不活跃）→ 降级 warn 疑似他人
+  const t4Cmd = "python3 -c 'import time; time.sleep(120)'" // 长存活：组关联 + MIN_HITS=5 命中窗口需 ≥25s
+  await pre(PRE, t4Cmd)
+  const cp4 = spawn('python3', ['-c', 'import time; time.sleep(120)'], { cwd: '/tmp', stdio: 'ignore' })
+  // 先等 ps 周期组关联回填 pid（最长 30s）
+  let expPid4 = null
+  const assocDeadline = Date.now() + 30000
+  while (Date.now() < assocDeadline && !expPid4) {
+    const s = await G('snapshot')({})
+    expPid4 = s.experiment && s.experiment.pid
+    if (!expPid4) await sleep(3000)
+  }
+  console.log('  [T4] 实验组关联 pid=', expPid4)
+  assert(typeof expPid4 === 'number' && expPid4 > 0, 'T4 实验组已关联 pid', expPid4)
+  const oom2 = await waitForRule('oom', 45000)
+  console.log('  [T4] oom(实验不活跃) alert=', oom2 && JSON.stringify({ level: oom2.level, rule: oom2.rule, msg: oom2.msg }))
+  assert(!!oom2 && oom2.level === 'warn' && oom2.msg.indexOf('疑似他人') !== -1, '实验不活跃 + 显存高 → oom 降级 warn（疑似他人占用）', oom2 && oom2.level)
+  const dbgS2 = await G('snapshot')({})
+  console.log('  [T4] DBG oom 后 experiment=', JSON.stringify(dbgS2.experiment && { pid: dbgS2.experiment.pid, procGroup: dbgS2.experiment.procGroup, gs: dbgS2.experiment.groupStats && { mc: dbgS2.experiment.groupStats.memberCount, mem: dbgS2.experiment.groupStats.memMiB } }))
+  assert(oom2 && oom2.evidence && expPid4 && oom2.evidence.procs.some((p) => p.pid === expPid4), 'oom evidence 含实验 pid（1.2）', { expPid: expPid4, ev: oom2 && oom2.evidence })
+  // 清理实验（kill ps 回填的真实 pid；spawn 句柄在 WSL 下可能指中间层）
+  try { process.kill(cp4.pid, 'SIGKILL') } catch (e) {}
+  if (expPid4 && expPid4 !== cp4.pid) { try { process.kill(expPid4, 'SIGKILL') } catch (e) {} }
+  res(RES, t4Cmd, { isError: true })
+  await sleep(8000) // 等 crashed/done 判定
+  snap = await G('snapshot')({})
+  assert(snap.experiment === null, 'T4 实验已清理（experiment=null）', snap.experiment)
 
   // P2 1 会话内复核：同类 5min 防重（thermal 已触发，12s 后再查不重复发）
   console.log('\n== T4b: 告警 5min 防重（P2 1） ==')

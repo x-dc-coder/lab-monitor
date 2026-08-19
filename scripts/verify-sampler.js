@@ -72,7 +72,41 @@ const runner = {
 }
 
 // ————— V2：直接 import tsc 编译产物（lib/types/sampler） —————
+
 import { detectPlatform, LinuxBackend, WindowsBackend } from '../lib/types/sampler/index.js'
+
+// ————— Phase A 验收（进程级采集：ppid / gpuUtilPct / memMiB） —————
+
+let aFails = 0
+function acheck(cond, name, extra) {
+  if (cond) { console.log('  ✓ [A]', name) }
+  else { aFails += 1; console.error('  ✗ [A]', name, extra !== undefined ? JSON.stringify(extra) : '') }
+}
+
+/** pmon 输出解析验证（真实 nvidia-smi pmon -c 3 -s u）：跳过 # 行、`-` 视 0、多帧取 max */
+function checkPmonParser() {
+  const sample = [
+    '# pid      type   sm   mem   enc   dec   command',
+    '  1234     C       87    45    0     0   python.exe',
+    '  1234     C        -    50    0     0   python.exe',
+    '  5678     G       45    12    0     0   browser.exe',
+  ]
+  const byPid = new Map()
+  for (const line of sample) {
+    const t = line.trim()
+    if (!t || t.startsWith('#')) continue
+    const f = t.split(/\s+/)
+    if (f.length < 6) continue
+    const pid = parseInt(f[0], 10)
+    const sm = f[2] === '-' || f[2] === undefined ? 0 : parseFloat(f[2])
+    if (!Number.isFinite(pid) || !Number.isFinite(sm)) continue
+    const prev = byPid.get(pid)
+    if (prev === undefined || sm > prev) byPid.set(pid, sm)
+  }
+  acheck(byPid.get(1234) === 87, 'pmon 多帧取 max（- 视 0）：1234 → 87', [...byPid.entries()])
+  acheck(byPid.get(5678) === 45, 'pmon 活动进程有值：5678 → 45', [...byPid.entries()])
+  return byPid
+}
 
 // ————— 测试主流程 —————
 
@@ -80,6 +114,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 async function main() {
   const report = { platform: null, linux: null, windows: null, sample3: null, closeNoOrphan: null, at: new Date().toISOString() }
+
+  // 0. pmon 解析单测（静态样例）
+  console.log('[0] pmon 解析单测（-c 3 多帧 / `-` 视 0 / 多帧取 max）')
+  checkPmonParser()
 
   // 1. 平台探测
   const platform = await detectPlatform(runner)
@@ -102,6 +140,12 @@ async function main() {
   }
   console.log('[2] LinuxBackend probe=', JSON.stringify(lp))
   console.log('[2] LinuxBackend mem=', JSON.stringify(ls1.mem), 'cpu(首帧/二帧)=', ls1.cpu.percent, '/', ls2.cpu.percent, 'procs=', ls2.procs.length)
+  // Phase A：Linux 主通道（ppid + memMiB + cpuPct）
+  const lWithPpid = ls2.procs.filter((p) => typeof p.ppid === 'number')
+  const lWithMem = ls2.procs.filter((p) => typeof p.memMiB === 'number')
+  acheck(lWithPpid.length > 0, 'Linux procs[].ppid 存在（ps ppid 列）', { withPpid: lWithPpid.length, total: ls2.procs.length })
+  acheck(lWithMem.length > 0, 'Linux procs[].memMiB 补齐（rss kB→MiB）', { withMem: lWithMem.length, total: ls2.procs.length })
+  acheck(typeof ls2.sources.procs === 'string' && ls2.sources.procs.indexOf('ps') === 0, 'Linux sources.procs=ps（±pmon）', ls2.sources.procs)
   await linux.close()
 
   // 3. WindowsBackend
@@ -114,6 +158,14 @@ async function main() {
   console.log('[3] WindowsBackend probe=', JSON.stringify(wp.detail))
   console.log('[3] WindowsBackend snapshot 总耗时=', wMs, 'ms  platform=', ws.platform, ' sources=', JSON.stringify(ws.sources))
   console.log('[3] gpu=', JSON.stringify(ws.gpu), 'cpu=', JSON.stringify(ws.cpu), 'mem=', JSON.stringify(ws.mem), 'procs=', ws.procs.length)
+  // Phase A：Windows 主通道（ppid 来自 CIM 进程树 + memMiB + pmon 合并）
+  const wWithPpid = ws.procs.filter((p) => typeof p.ppid === 'number')
+  const wWithMem = ws.procs.filter((p) => typeof p.memMiB === 'number')
+  const wWithGpu = ws.procs.filter((p) => typeof p.gpuUtilPct === 'number')
+  acheck(wWithPpid.length > 0, 'Windows procs[].ppid 存在（CIM Win32_Process 进程树）', { withPpid: wWithPpid.length, total: ws.procs.length })
+  acheck(wWithMem.length > 0, 'Windows procs[].memMiB 存在（tasklist）', { withMem: wWithMem.length, total: ws.procs.length })
+  acheck(typeof ws.sources.procs === 'string' && ws.sources.procs.indexOf('tasklist') === 0, 'Windows sources.procs=tasklist（±pmon）', ws.sources.procs)
+  acheck(wWithGpu.length === 0 || wWithGpu.every((p) => typeof p.gpuUtilPct === 'number' && p.gpuUtilPct >= 0 && p.gpuUtilPct <= 100), 'Windows gpuUtilPct 若填充必为 0-100（pmon 辅助；空闲态可不填）', { withGpu: wWithGpu.length })
 
   // 4. 样例③（D1-2 回填）：dmon 流 vs query 快照同秒偏差（稳定负载）
   if (ws.gpu && ws.gpu.length) {
@@ -193,6 +245,8 @@ async function main() {
 
   console.log('\n===== 报告 =====')
   console.log(JSON.stringify(report, null, 2))
+  console.log('\n==== Phase A 验收:', aFails === 0 ? 'ALL PASS' : aFails + ' FAILED', '====')
+  if (aFails > 0) process.exitCode = 1
 }
 
 main().catch((e) => { console.error('verify-sampler 失败:', e); process.exit(1) })

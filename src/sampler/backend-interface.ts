@@ -35,12 +35,19 @@ export interface GpuSample {
   degraded?: boolean
 }
 
-/** 进程条目 */
+/** 进程条目（lab-protocol/1.2：+ppid/+gpuUtilPct/+gpuMemMiB 预留） */
 export interface ProcSample {
   pid: number
   cmd: string
   cpuPct?: number | null
   memMiB?: number | null
+  /** 每进程 GPU 利用率 %（pmon sm 列，辅助证据；仅活动进程有值，`-` 视 0） */
+  gpuUtilPct?: number | null
+  /** 父进程 id（进程树骨架；Windows 来自 CIM，Linux 来自 ps ppid 列） */
+  ppid?: number | null
+  /** 每进程显存 MiB —— 预留字段，当前不启用（Windows/WSL 受限于 [N/A]，恒 null） */
+  gpuMemMiB?: number | null
+  /** v1.1 遗留字段：语义定稿为 GPU 利用率 %（与 gpuUtilPct 同值，兼容保留） */
   gpu?: number | null
 }
 

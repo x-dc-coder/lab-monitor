@@ -4,7 +4,7 @@
 
 ## 1. 版本与变更规则
 
-- 契约版本：`lab-protocol/1.1`（v1.4：+platform/sources，指标命名规范化 utilPct/memUsedMiB/tempC/powerW，mem 单位改 MiB）；
+- 契约版本：`lab-protocol/1.2`（v1.4：+platform/sources，指标命名规范化；**1.2：进程级跟踪（2026-08-20）**——`procs[].ppid/gpuUtilPct`、`experiment.procGroup/groupStats`、`snapshot.system`、`alerts[].evidence`、`history[].groupCpu/groupMem`；**纯增量追加字段，老 client 照常工作**）；
 - JSON schema 追加字段向后兼容；**删除/改型字段 = 破坏性变更**，须先更新本文件与计划，再通知 D-A/D-B1；
 - 所有载荷为**纯 JSON**（host.call 只驮 JSON；函数/undefined/类实例会被 codec 拒收，t5 结论②）。
 
@@ -22,13 +22,13 @@
 
 - `thresholds` **可选**；携带值视作「**建议更新**」——仅当到达时间晚于 host 生效时间戳才覆盖（M3，见 docs/02-data-model.md §6）；不携带则 host 用当前持有值。
 
-**响应**（字段全部必填，值为 null 时表示不可用；v1.4：新增 `platform`/`sources`，指标命名规范化，mem 单位 MiB）：
+**响应**（字段全部必填，值为 null 时表示不可用；v1.4：新增 `platform`/`sources`，指标命名规范化，mem 单位 MiB；**1.2：新增 `procs[].ppid/gpuUtilPct`、`experiment.procGroup/groupStats`、`snapshot.system`、`alerts[].evidence`**）：
 
 ```json
 {
   "ts": 1787030000000,
   "platform": "wsl",
-  "sources": { "gpu": "dmon", "cpu": "cim", "mem": "cim", "procs": "tasklist" },
+  "sources": { "gpu": "dmon", "cpu": "cim", "mem": "cim", "procs": "tasklist+pmon" },
   "gpu": [
     { "id": 0, "name": "NVIDIA GeForce RTX 5060 Ti", "utilPct": 92, "memUsedMiB": 19200,
       "memTotalMiB": 24576, "tempC": 78, "powerW": 350, "degraded": false }
@@ -36,12 +36,16 @@
   "gpuState": "ok | unavailable",
   "cpu": { "percent": 340, "cores": 8 },
   "mem": { "totalMiB": 14310, "availableMiB": 6297 },
-  "procs": [ { "pid": 1234, "cmd": "python train_demo.py", "gpu": 0 } ],
-  "alerts": [ { "level": "critical", "rule": "oom", "msg": "显存余量 <10%",
-                "confidence": 0.9, "actions": ["降 batch size"], "ts": 1787030005000, "runId": null } ],
+  "procs": [ { "pid": 1234, "cmd": "python train_demo.py", "gpu": 87, "ppid": 1200, "gpuUtilPct": 87, "gpuMemMiB": null } ],
+  "system": { "cpuPct": 12, "memMiB": 8500, "gpuUtilPct": null, "topN": [ { "pid": 9999, "cmd": "chrome.exe", "cpuPct": null, "memMiB": 1024, "gpuUtilPct": null } ] },
+  "alerts": [ { "level": "critical", "rule": "oom", "msg": "整卡显存 98% 达阈值；实验进程组活跃（1 进程，CPU -%，内存 2930MiB）",
+                "confidence": 0.85, "actions": ["降低 batch size", "检查实验进程内存占用"],
+                "evidence": { "procs": [ { "pid": 1234, "cmd": "python train_demo.py", "cpuPct": null, "memMiB": 2930, "gpuUtilPct": 87 } ] },
+                "ts": 1787030005000, "runId": "run-20260818-001" } ],
   "alertsCriticalCount": 1,
   "experiment": { "runId": "run-20260818-001", "state": "running", "cmd": "python train_demo.py",
-                  "pid": 1234, "startTs": 1787030000000, "summary": null },
+                  "pid": 1234, "procGroup": [1234, 5678], "groupStats": { "cpuPct": null, "memMiB": 2938, "memberCount": 2, "alive": true, "gpuUtilPct": null, "gpuMemMiB": null, "members": [] },
+                  "startTs": 1787030000000, "summary": null },
   "callCount": 42,
   "ui": { "betterSidebarVisible": true }
 }
@@ -51,12 +55,13 @@
 |---|---|
 | `ts` | 快照生成时间（epoch ms） |
 | `platform` | **`'linux' \| 'wsl' \| 'windows-native'`（v1.4）**——采样视角平台；**WSL 与 Windows 内存视图语义不同**（WSL 14.3GB vs Windows 31.7GB，实证 docs/research/08-sampling-empirical.md），消费方必须据此解释 mem 字段 |
-| `sources` | **（v1.4）各指标来源通道**：`gpu: 'dmon'\|'query'\|'unavailable'`、`cpu/mem: 'procfs'\|'cim'`、`procs: 'ps'\|'tasklist'`——差分 vs 瞬时语义标注 |
+| `sources` | **（v1.4/1.2）各指标来源通道**：`gpu: 'dmon'\|'query'\|'unavailable'`、`cpu/mem: 'procfs'\|'cim'`、`procs: 'ps'\|'tasklist'\|'ps+pmon'\|'tasklist+pmon'\|'pmon'`（**1.2：+pmon 后缀**，pmon 可用时标注每进程 GPU 利用率来源）——差分 vs 瞬时语义标注 |
 | `gpu[]` | 每卡 { id, name?, utilPct, memUsedMiB, memTotalMiB, tempC?, powerW? }——**指标命名规范化（v1.4）**，通道差异封死在 sampler 后端内；`degraded`（T1-4 dmon 降级标记）随 gpu[] 携带 |
 | `gpuState` | `'ok'` / `'unavailable'`（probe 失败 / 无 nvidia-smi.exe） |
 | `cpu` | { percent, cores? }（多核归一，差分或 CIM 瞬时由 sources 标注）；`mem` { totalMiB, availableMiB }（**单位 MiB，v1.4**） |
-| `procs[]` | 进程表（ps 或 tasklist，5s 快照） |
-| `alerts[]` | 最近告警列表（含分级/规则/建议动作） |
+| `procs[]` | 进程表（ps 或 tasklist，5s 快照；**1.2：`ppid` 进程树骨架、`gpuUtilPct` 每进程 GPU 利用率（pmon 辅助证据，仅活动进程有值）、`gpuMemMiB` 预留恒 null**；`gpu` 遗留字段语义定稿 = GPU 利用率 %） |
+| `system` | **（1.2）非实验组统计**：`{ cpuPct, memMiB, gpuUtilPct, gpuMemMiB(预留), topN[5] }`——系统其他进程聚合（实验成员按 pid 差集排除） |
+| `alerts[]` | 最近告警列表（含分级/规则/建议动作；**1.2：`evidence.procs[]` 进程级证据，CPU/内存为主、GPU 每进程辅助**） |
 | `alertsCriticalCount` | **host 预算的 CRITICAL 计数**（badge 直读，T2-2） |
 | `experiment` | 当前实验（状态机输出；idle 时为 null） |
 | `callCount` | **host 侧 RPC 调用计数器**（P0 验收 2 断言手段，T4-2） |
@@ -65,7 +70,7 @@
 ### 2.2 `labMonitor.history` —— 降采样历史
 
 - 请求：`{ sinceMs: number, bucketMs: number }`
-- 响应：`{ points: [{ ts, gpuUtil, gpuMem, cpu, memUsed }], truncated: boolean }`（≤500 点）
+- 响应：`{ points: [{ ts, gpuUtil, gpuMem, cpu, memUsed, groupCpu, groupMem }], truncated: boolean }`（≤500 点；**1.2：`groupCpu/groupMem` 实验进程组 CPU/内存（5s 周期聚合，无实验时 null）**）
 
 ### 2.3 `labMonitor.setThresholds` —— 直连更新阈值
 
@@ -85,12 +90,13 @@
 
 - 输入：`{}`（可选 `{ brief: true }` 取一行摘要）
 - 输出（JSON）：同 `labMonitor.snapshot` 响应结构；`brief: true` 时输出字符串：
-  `"GPU0 92% · 20.1/24G · CPU 340% · 实验 run-... (running 12min) · 告警: 无"`
+  `"GPU0 92% · 20.1/24G · CPU 340% · 实验 run-... (running 12min) · 实验组 45%CPU/3.2G · 5 进程 · 他占 chrome.exe 1G · 告警: 无"`
+  （**1.2：摘要增加实验组 CPU/内存/进程数与系统其他进程 Top 占卡提示**）
 
 ### 3.2 `lab_advice` —— 平衡引擎建议
 
 - 输入：`{}`
-- 输出：`{ advice: [{ level, rule, msg, confidence, actions[] }], generatedAt }`（无告警时 `advice: []`）
+- 输出：`{ advice: [{ level, rule, msg, confidence, actions[], evidence? }], generatedAt }`（无告警时 `advice: []`；**1.2：`evidence.procs[]` 进程级证据**）
 
 ### 3.3 `lab_ctl` —— 启停/阈值控制（可选，护栏 T2-5）
 
@@ -135,3 +141,16 @@
 - 本文件内容在 V2 保持不变（数据模型/协议/验收语义与形态无关）。
 - V2 差异：client 数据面由 `host.call('labMonitor.*')` 改为 **HTTP `/lab-monitor/api/*`**（协议字段不变）；工具注册走官方 `ctx.tools.register(defineTool(...))`；prompt 注入默认关闭（KV 缓存友好，`lab_status` 工具替代）。
 - 完整迁移设计：`docs/research/12-v2-migration.md`；架构差异：`docs/01-architecture.md` §8-11。
+
+## 1.2 变更记录（进程级跟踪，2026-08-20）
+
+- **版本**：`lab-protocol/1.1` → `1.2`（纯增量，向后兼容）。
+- **新增字段**：`procs[].ppid`（进程树骨架；Windows 来自 CIM Win32_Process，Linux 来自 ps ppid 列）、
+  `procs[].gpuUtilPct`（pmon 每进程 GPU 利用率，辅助证据，仅活动进程有值）、`procs[].gpuMemMiB`（预留恒 null，
+  本机 compute-apps 受 WDDM 限制全 [N/A] 不启用）、`experiment.procGroup[]`（实验进程组 pid 集合）、
+  `experiment.groupStats`（实验组聚合：cpuPct/memMiB/memberCount/alive/gpuUtilPct）、`snapshot.system`（非实验组统计：
+  cpuPct/memMiB/gpuUtilPct/topN[5]）、`alerts[].evidence.procs[]`（进程级证据）、`history[].groupCpu/groupMem`（实验组曲线）。
+- **`sources.procs` 枚举扩展**：`'ps' | 'tasklist' | 'ps+pmon' | 'tasklist+pmon' | 'pmon'`（pmon 可用时标注）。
+- **语义澄清**：`procs[].gpu`（v1.1 遗留字段）定稿 = GPU 利用率 %（与 gpuUtilPct 同值）。
+- **告警规则（Phase C，归属仲裁）**：oom 三分支（实验组活跃 → critical / 实验组不活跃 → 降级 warn「疑似他人占用」/ 无实验 → other-occupancy info）；io-bottleneck 以实验组 CPU 判据为主、Windows 降级整机并标注；thermal 消息携带实验组活跃度上下文。
+- **设计文档**：`docs/research/14-process-tracking-design.md`（§5 分阶段清单）。

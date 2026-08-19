@@ -33,14 +33,21 @@ export const QUERY_ARGS = [
 /** GPU 长驻流（dmon）：1s 行流，-s pucvmet；列：pwr gtemp mtemp sm mem enc dec clocks ... */
 export const DMON_ARGS = ['dmon', '-d', '1', '-s', 'pucvmet']
 
-/** Windows CPU/内存（CIM）：输出 "cpuLoadPct;totalMemKB;freeMemKB"（UTF8，chcp 已设） */
+/** 每进程 GPU 利用率（pmon）：-c 3 多帧窗口（R2 防单帧 `-` 低估）；-s u 只取 util 列，输出更短 */
+export const PMON_ARGS = ['pmon', '-c', '3', '-s', 'u']
+
+/**
+ * Windows CPU/内存/进程树（CIM，TTL 5s）：输出 "cpuLoadPct;totalMemKB;freeMemKB" 首行
+ * + 每进程 "pid;ppid;name" 行（Win32_Process.ProcessId/ParentProcessId，进程树骨架，实证 55884→47680）
+ */
 export const PS_SYSMEM = [
   '-NoProfile',
   '-Command',
   'chcp 65001|Out-Null; [Console]::OutputEncoding=[Text.Encoding]::UTF8; ' +
     '$p=Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average; ' +
     '$m=Get-CimInstance Win32_OperatingSystem; ' +
-    '"{0};{1};{2}" -f $p.Average,$m.TotalVisibleMemorySize,$m.FreePhysicalMemory',
+    '"{0};{1};{2}" -f $p.Average,$m.TotalVisibleMemorySize,$m.FreePhysicalMemory; ' +
+    'Get-CimInstance Win32_Process | ForEach-Object { "{0};{1};{2}" -f $_.ProcessId,$_.ParentProcessId,$_.Name }',
 ]
 
 /** Windows 进程表（tasklist）：CSV 含头部 */

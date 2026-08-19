@@ -18,10 +18,12 @@ import type { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import { createBackend, collectSnapshot, probeBackend } from './sampler/index.js'
-import type { Runner, SamplerBackend, Snapshot } from './sampler/backend-interface.js'
+import type { ProcSample, Runner, SamplerBackend, Snapshot } from './sampler/backend-interface.js'
 import { createRing } from './core/ring.js'
 import { createStateMachine, parsePs } from './core/state-machine.js'
 import { createBalancer, createThresholds } from './core/balancer.js'
+import { aggregateProcStats } from './core/proc-aggregator.js'
+import type { GroupStats, SystemStats } from './core/types.js'
 import {
   SAMPLE_MS,
   PS_INTERVAL_MS,
@@ -135,6 +137,9 @@ function toSamplePoint(snap: RawSnapshot): SamplePoint {
     memUsedMiB: memUsed,
     memTotalMiB: total,
     procs: snap.procs || [],
+    group: null, // ps 5s 周期回填（B3 聚合）
+    system: null,
+    experimentActive: false,
     degraded: snap.degraded || null,
   } satisfies SamplePoint
 }
@@ -158,6 +163,13 @@ function promptLine(snap: MonitorSnapshot): string {
   if (snap.experiment) {
     const mins = Math.max(0, Math.round((Date.now() - snap.experiment.startTs) / 60000))
     parts.push('实验 ' + snap.experiment.runId + ' (' + snap.experiment.state + ' ' + mins + 'min)')
+    const gs = snap.experiment.groupStats
+    if (gs) {
+      parts.push('实验组 ' + (gs.cpuPct ?? '-') + '%CPU/' + fmtGiBx(gs.memMiB) + 'G · ' + gs.memberCount + ' 进程')
+    }
+  }
+  if (snap.system && snap.system.topN.length) {
+    parts.push('他占 ' + (snap.system.topN[0].cmd || '?') + ' ' + fmtGiBx(snap.system.topN[0].memMiB) + 'G')
   }
   parts.push('告警: ' + (snap.alertsCriticalCount ? snap.alertsCriticalCount + '条' : '无'))
   return '[Lab Monitor] ' + parts.join(' · ')
@@ -186,6 +198,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     stopped: boolean
     psAt: number
   } = { backend: null, platform: 'unknown', lastSnap: null, stopped: false, psAt: 0 }
+  // 最近一次 5s 周期聚合（Phase B3；snapshot RPC 在两次周期之间时取最近值，5s 粒度近似）
+  let lastGroupStats: GroupStats | null = null
+  let lastSystemStats: SystemStats | null = null
 
   // 内部事件分发
   const labListeners: ((ev: { type: string; ts: number; runId: string | null; data: Record<string, unknown> }) => void)[] = []
@@ -251,14 +266,49 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         }
         if (g0 && typeof g0.memUsedMiB === 'number' && g0.memUsedMiB > st.memPeakMiB) st.memPeakMiB = g0.memUsedMiB
       }
-      // ps 周期（5s）→ 状态机 tick
+      // ps 周期（5s）→ 状态机 tick + 进程组聚合（Phase B2/B3）
       if (Date.now() - backendState.psAt >= PS_INTERVAL_MS) {
         backendState.psAt = Date.now()
-        const psOut = await runner.exec('ps -eo pid=,args= --no-headers 2>/dev/null')
+        // 1.2：5 列增强表（pid ppid pcpu rss args）——状态机组集合与聚合输入同源
+        // （WSL：Linux pid 空间；backend procs 表是 Windows tasklist pid，不可做组差集）
+        const psOut = await runner.exec('ps -eo pid=,ppid=,pcpu=,rss=,args= --no-headers 2>/dev/null')
         const procs = parsePs(psOut)
         machine.tick(procs)
         const curRun = machine.cur()
+        // B3：实验进程组 vs 非实验组拆分聚合（挂 ps 周期；输入 = 同源 ps 增强表）
+        const aggProcs: ProcSample[] = procs.map((p) => ({
+          pid: p.pid,
+          cmd: p.cmd ?? null,
+          ppid: p.ppid ?? null,
+          cpuPct: typeof p.cpuPct === 'number' ? p.cpuPct : null,
+          memMiB: typeof p.memMiB === 'number' ? p.memMiB : null,
+        }))
+        const agg = aggregateProcStats({
+          procs: aggProcs,
+          group: curRun ? curRun.procGroup : null,
+          runActive: !!curRun,
+        })
+        lastGroupStats = agg.group
+        lastSystemStats = agg.system
+        pt.group = agg.group
+        pt.system = agg.system
+        pt.experimentActive = !!curRun
+        // summary 扩展（1.2）：实验组 vs 其他进程峰值（5s 粒度）
+        if (curRun) {
+          const st = curRun.sampleStats || (curRun.sampleStats = { utilSum: 0, utilN: 0, utilMax: 0, memPeakMiB: 0 })
+          if (agg.group && typeof agg.group.memMiB === 'number' && agg.group.memMiB > (st.groupMemPeakMiB ?? 0)) st.groupMemPeakMiB = agg.group.memMiB
+          if (agg.group && typeof agg.group.cpuPct === 'number' && agg.group.cpuPct > (st.groupCpuMax ?? 0)) st.groupCpuMax = agg.group.cpuPct
+          if (agg.system && typeof agg.system.memMiB === 'number' && agg.system.memMiB > (st.otherMemPeakMiB ?? 0)) st.otherMemPeakMiB = agg.system.memMiB
+        }
         if (curRun && curRun.resultSeen) machine.tickGrace(curRun)
+      }
+      // evaluate 前 refresh 最近点：group/system 只在 ps 周期 tick 写入，
+      // 非 ps 周期 tick 的点回退最近一次 5s 聚合；experimentActive 实时判定（事件驱动 start/end）
+      if (recentWindow.length) {
+        const wLast = recentWindow[recentWindow.length - 1]
+        wLast.group = lastGroupStats
+        wLast.system = lastSystemStats
+        wLast.experimentActive = !!machine.cur()
       }
       balancer.evaluate(recentWindow, run ? run.runId : null)
     } catch (e) {
@@ -341,6 +391,11 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     }
     const gpu = base.gpu || []
     const gpuState = gpu.length ? 'ok' : (base.sources && base.sources.gpu === 'unavailable' ? 'unavailable' : 'ok')
+    const exp = machine.snapshot()
+    // 1.2：实验进程组统计回填（最近一次 5s 聚合；快照 RPC 与 ps 周期解耦）
+    if (exp) {
+      exp.groupStats = lastGroupStats
+    }
     const snap: MonitorSnapshot = {
       ts: Date.now(),
       platform: base.platform || 'linux',
@@ -355,9 +410,10 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       cpu: base.cpu ? { percent: base.cpu.percent, cores: base.cpu.cores !== undefined ? base.cpu.cores : null } : { percent: null, cores: null },
       mem: base.mem ? { totalMiB: base.mem.totalMiB, availableMiB: base.mem.availableMiB } : { totalMiB: null, availableMiB: null },
       procs: (base.procs || []).slice(0, 15),
+      system: lastSystemStats,
       alerts: balancer.snapshotAlerts(),
       alertsCriticalCount: balancer.count(),
-      experiment: machine.snapshot(),
+      experiment: exp,
       callCount,
       ui: { betterSidebarVisible: uiVisible() },
     }
@@ -559,7 +615,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                   const v = a.thresholds && (a.thresholds as Record<string, unknown>)[k]
                   if (typeof v === 'number' && isFinite(v)) thr[k] = v
                 }
-                return { ok: true, applied: rpcSetThresholds(thr).applied } as never
+                // 1.2：写阈值时返回当前拆分统计（快照语义，Agent 设置前可见证据）
+                return { ok: true, applied: rpcSetThresholds(thr).applied, system: lastSystemStats } as never
               }
               return { ok: true, state: rpcControl({ action: a.action }).state } as never
             },

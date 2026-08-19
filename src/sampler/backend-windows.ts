@@ -22,9 +22,10 @@ export class WindowsBackend implements SamplerBackend {
 
   private runner: Runner
   private spawned: { kill(): void }[] = [] // spawn 记录（close 清理，D2-1）
-  private cimCache: CacheEntry<{ ok: boolean; cpuPercent: number | null; totalMiB: number; availableMiB: number; reason?: string }> | null = null
+  private cimCache: CacheEntry<{ ok: boolean; cpuPercent: number | null; totalMiB: number; availableMiB: number; ppidMap: Record<number, number>; reason?: string }> | null = null
   private taskCache: CacheEntry<{ ok: boolean; procs: ProcSample[]; reason?: string }> | null = null
   private gpuQueryCache: CacheEntry<{ ok: boolean; gpus: GpuSample[]; reason?: string }> | null = null
+  private pmonCache: CacheEntry<{ ok: boolean; byPid: Map<number, number>; reason?: string }> | null = null
   private restarts = 0
   private lastRestartAt = 0
   private fallbackMode = false // dmon 连续失败回退 query 模式
@@ -44,7 +45,7 @@ export class WindowsBackend implements SamplerBackend {
     return undefined
   }
 
-  private cacheSet<T>(slot: '_cimCache' | '_taskCache' | '_gpuQueryCache', data: T): void {
+  private cacheSet<T>(slot: '_cimCache' | '_taskCache' | '_gpuQueryCache' | '_pmonCache', data: T): void {
     ;(this as unknown as Record<string, CacheEntry<T> | null>)[slot] = { at: this.now(), data }
   }
 
@@ -128,21 +129,67 @@ export class WindowsBackend implements SamplerBackend {
     return res
   }
 
-  /** CPU/内存（CIM，TTL 5s；interop 断 → 回退 /proc，D1-1） */
-  private async sysMemCim(): Promise<{ ok: boolean; cpuPercent: number | null; totalMiB: number; availableMiB: number; reason?: string }> {
+  /**
+   * CPU/内存/进程树（CIM，TTL 5s；interop 断 → 回退 /proc，D1-1）
+   * 输出：首行 "cpuLoad;totalKB;freeKB"，随后每进程 "pid;ppid;name" 行 → ppidMap（进程树骨架，A4）
+   */
+  private async sysMemCim(): Promise<{ ok: boolean; cpuPercent: number | null; totalMiB: number; availableMiB: number; ppidMap: Record<number, number>; reason?: string }> {
     const cached = this.cacheGet(this.cimCache, WIN.TTL.CIM)
     if (cached !== undefined) return cached
     const r = await this.runner.execArgs(WIN.POWERSHELL, WIN.PS_SYSMEM)
-    if (r.code !== 0) return { ok: false, cpuPercent: null, totalMiB: 0, availableMiB: 0, reason: 'CIM 失败 code=' + r.code }
-    const parts = (r.stdout || '').trim().split(';')
-    if (parts.length < 3) return { ok: false, cpuPercent: null, totalMiB: 0, availableMiB: 0, reason: 'CIM 输出格式异常: ' + r.stdout }
+    if (r.code !== 0) return { ok: false, cpuPercent: null, totalMiB: 0, availableMiB: 0, ppidMap: {}, reason: 'CIM 失败 code=' + r.code }
+    const lines = (r.stdout || '').trim().split('\n')
+    const parts = lines.length ? lines[0].trim().split(';') : []
+    if (parts.length < 3) return { ok: false, cpuPercent: null, totalMiB: 0, availableMiB: 0, ppidMap: {}, reason: 'CIM 输出格式异常: ' + r.stdout }
+    const ppidMap: Record<number, number> = {}
+    for (let i = 1; i < lines.length; i++) {
+      const f = lines[i].trim().split(';')
+      if (f.length >= 3) {
+        const pid = parseInt(f[0], 10)
+        const ppid = parseInt(f[1], 10)
+        if (Number.isFinite(pid) && Number.isFinite(ppid)) ppidMap[pid] = ppid
+      }
+    }
     const res = {
       ok: true,
       cpuPercent: parseFloat(parts[0]), // Win32_Processor.LoadPercentage 瞬时快照值（非差分）
       totalMiB: Math.round(parseInt(parts[1], 10) / 1024),
       availableMiB: Math.round(parseInt(parts[2], 10) / 1024),
+      ppidMap,
     }
     this.cacheSet('_cimCache', res)
+    return res
+  }
+
+  /**
+   * 每进程 GPU 利用率（pmon，TTL 5s 低频，辅助证据——A1）
+   * `nvidia-smi pmon -c 3 -s u` 多帧窗口：跳过 # 注释行，列 pid/type/sm/mem/enc/dec/command；
+   * sm（compute%）`-` 视 0；同 pid 多帧取 max（R2：防单帧 `-` 低估）。
+   * 失败/驱动不支持 → { ok:false }，上层 gpuUtilPct 留空（整卡指标不受影响）。
+   */
+  private async queryPmon(): Promise<{ ok: boolean; byPid: Map<number, number>; reason?: string }> {
+    const cached = this.cacheGet(this.pmonCache, WIN.TTL.CIM)
+    if (cached !== undefined) return cached
+    const r = await this.runner.execArgs(WIN.NVIDIA_SMI, WIN.PMON_ARGS)
+    if (r.code !== 0) {
+      this.pmonCache = null
+      return { ok: false, byPid: new Map(), reason: 'pmon 失败 code=' + r.code + ' ' + (r.stderr || '') }
+    }
+    const byPid = new Map<number, number>()
+    for (const line of (r.stdout || '').split('\n')) {
+      const t = line.trim()
+      if (!t || t.startsWith('#')) continue
+      const f = t.split(/\s+/)
+      // pmon -s u 行: pid type sm mem enc dec command
+      if (f.length < 6) continue
+      const pid = parseInt(f[0], 10)
+      const sm = f[2] === '-' || f[2] === undefined ? 0 : parseFloat(f[2])
+      if (!Number.isFinite(pid) || !Number.isFinite(sm)) continue
+      const prev = byPid.get(pid)
+      if (prev === undefined || sm > prev) byPid.set(pid, sm)
+    }
+    const res = { ok: true, byPid }
+    this.cacheSet('_pmonCache', res)
     return res
   }
 
@@ -243,18 +290,40 @@ export class WindowsBackend implements SamplerBackend {
       if (degraded === null) degraded = { reason: 'CIM 不可用回退 /proc' }
     }
 
-    // 进程表（tasklist；失败 → 空数组 + sources 标注，不拖垮整次 snapshot）
+    // 进程表（tasklist；失败 → ps 回退，不拖垮整次 snapshot）
     let procs: ProcSample[] = []
     const procsRes = await this.procsTasklist()
     if (procsRes.ok) {
       procs = procsRes.procs
     } else {
       sources.procs = 'ps'
-      const psOut = await this.runner.exec('ps -eo pid=,pcpu=,pmem=,args= --no-headers 2>/dev/null | head -100')
+      const psOut = await this.runner.exec('ps -eo pid=,ppid=,pcpu=,rss=,args= --no-headers 2>/dev/null | head -100')
       if (psOut.code === 0) {
         for (const line of (psOut.stdout || '').split('\n')) {
-          const mm = line.trim().match(/^(\d+)\s+([\d.]+)\s+([\d.]+)\s+(.*)$/)
-          if (mm) procs.push({ pid: parseInt(mm[1], 10), cmd: mm[4], cpuPct: parseFloat(mm[2]), memMiB: null })
+          const mm = line.trim().match(/^(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(.*)$/)
+          if (mm) procs.push({ pid: parseInt(mm[1], 10), ppid: parseInt(mm[2], 10), cmd: mm[5], cpuPct: parseFloat(mm[3]), memMiB: Math.round(parseInt(mm[4], 10) / 1024) })
+        }
+      }
+    }
+
+    // 合并器（A1/A4）：CIM ppid 进程树 + pmon 每进程 GPU 利用率按 pid 归并；sources 标注
+    const pmon = await this.queryPmon()
+    if (pmon.ok) {
+      sources.procs = (sources.procs === 'tasklist' ? 'tasklist' : 'ps') + '+pmon'
+      if (procs.length === 0 && pmon.byPid.size > 0) sources.procs = 'pmon'
+    }
+    if (sys.ok && Object.keys(sys.ppidMap).length > 0) {
+      for (let i = 0; i < procs.length; i++) {
+        const pp = sys.ppidMap[procs[i].pid]
+        if (pp !== undefined) procs[i].ppid = pp
+      }
+    }
+    if (pmon.byPid.size > 0) {
+      for (let i = 0; i < procs.length; i++) {
+        const sm = pmon.byPid.get(procs[i].pid)
+        if (sm !== undefined) {
+          procs[i].gpuUtilPct = sm
+          procs[i].gpu = sm // v1.1 遗留字段：语义定稿 = GPU 利用率 %（1.2 首次填充）
         }
       }
     }
@@ -365,6 +434,7 @@ export class WindowsBackend implements SamplerBackend {
     this.cimCache = null
     this.taskCache = null
     this.gpuQueryCache = null
+    this.pmonCache = null
     this.lastCpuTimes = null
     this.fallbackMode = false
     this.restarts = 0

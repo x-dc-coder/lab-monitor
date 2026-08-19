@@ -1,6 +1,8 @@
 # 14 进程级资源跟踪设计（防误报）
 
-> 状态：设计定稿（2026-08-20，tracking-designer）。输入：src/core/state-machine.ts、src/core/balancer.ts、
+> 状态：设计定稿 + 队长预研补充并入（2026-08-20，tracking-designer；**二版：队长最终约束**
+> ——GPU 每进程数据源不可靠，防误报以 CPU/内存/存在性为主、GPU 整卡交叉验证，每进程 GPU
+> 显存为预留字段当前不启用）。输入：src/core/state-machine.ts、src/core/balancer.ts、
 > src/core/types.ts、src/sampler/*（backend-interface/backend-linux/backend-windows/windows-paths）、
 > src/index.ts、src/client.ts、docs/02-data-model.md、docs/03-protocol.md、docs/research/08-sampling-empirical.md。
 > 全部关键能力经本机（WSL2 + RTX 5060 Ti）实测，实证记录见 §1.3/§2.1/§6。
@@ -12,13 +14,22 @@
   （`w.gpu[0]`），实验进程与系统其他进程混用同一 GPU——他人占卡被误报成实验 OOM；
   实测本机 GPU 显存占用 93%（15184/16311 MiB）但无实验进程（explorer/chrome/WeChat 等占满），
   oom 规则必然误报。
-- **方案四层**：①采集层加「进程级指标通道」（pmon 每进程 GPU 利用率 + compute-apps 每进程显存
-  + ps/procfs/CIM 每进程 CPU/内存 + PPID 进程树）；②统计层引入「实验进程组」（实验 pid 递归扩张
-  含子进程/worker，按组 vs 非实验组拆分聚合）；③告警层规则重写为「以实验进程组自身指标为准 +
-  系统其他进程占用作上下文」；④提醒层把阈值触达升级为「带进程级证据的可执行建议」。
-- **实证关键**：Windows 侧 `--query-compute-apps=used_memory` **全部返回 [N/A]**（WDDM 限制，
-  含真实 CUDA 进程 llama-server.exe），**每进程 GPU 显存在 Windows 不可直接获取**——必须降级
-  为「实验组显存未知 + 整卡显存 + 其他进程显存占用量」组合呈现；Linux 原生侧 compute-apps 有效。
+- **方案四层**：①采集层加「进程级指标通道」（**主：tasklist/ps 每进程 CPU/内存 + 进程存在性 +
+  PPID 进程树；辅：pmon 每进程 GPU 利用率**；compute-apps 每进程显存 **预留不启用**）；
+  ②统计层引入「实验进程组」（实验 pid 递归扩张含子进程/worker，按组 vs 非实验组拆分聚合）；
+  ③告警层规则重写为「**实验进程组自身 CPU/内存/存在性 + GPU 整卡指标交叉验证**为主，
+  系统其他进程占用作上下文标注，归属仲裁降级（疑似他人占用→降级而非误报）」；④提醒层把阈值
+  触达升级为「带进程级证据的可执行建议」。
+- **实证关键（队长最终版，2026-08-20）**：
+  - **GPU 每进程数据源在本机不可靠**：① `--query-compute-apps=used_memory` **全部 [N/A]**
+    （WDDM 限制，含真实 CUDA 进程 llama-server.exe）→ 每进程 GPU 显存 **不可获取**，
+    字段预留但当前不启用；② pmon 每进程 GPU 利用率**仅活动进程有值**（空闲态全 `-`），
+    且本机 torch 无 CUDA（`torch.cuda.is_available()=False`），**无法构造真实 GPU 负载验证
+    pmon 峰值行为**——Ollama llama-server 压测观察到持续负载 sm=98 vs query 99 偏差 ≤2
+    可作为参考，但**不构成硬判定依据**；
+  - **因此防误报主信号 = 每进程 CPU/内存（tasklist/ps 已有）+ 进程存在性 + 实验状态机**，
+    GPU 整卡指标作交叉验证，每进程 GPU 利用率仅作辅助证据；
+  - pid 会变化（Ollama 推理时 llama-server 55884→51968）——进程组需 cmd 指纹血缘重关联。
 - **协议**：lab-protocol/1.1 → **1.2（向后兼容增量）**：只加字段不改语义，老 client 照常工作。
 - **落地顺序**：Phase A 采集（backend）→ Phase B 统计（core）→ Phase C 告警+提醒，每阶段独立可验收。
 
@@ -61,14 +72,15 @@
 | 进程表 | `ps -eo pid,ppid,pcpu,pmem,args`（~10ms）✅ | tasklist GBK→iconv（~230ms，TTL 5s）✅ | tasklist ✅ |
 | 每进程 CPU% | ps pcpu ✅ | tasklist **无** → CIM LoadPercentage 是整机值 ✗ | typeperf/CIM |
 | 每进程内存 | `/proc/<pid>/status` VmRSS ✅ | tasklist「内存使用 K」✅（含 WSL 外的 Windows 进程） | tasklist ✅ |
-| 每进程 GPU 利用率 | `nvidia-smi pmon -c 1` ✅ | **pmon 跨 interop 可用（本机实测）** ✅ | pmon ✅ |
-| 每进程 GPU 利用率实证 | 稳定负载精确（sm=98 vs query 99，偏差 ≤2）；**突发负载单帧低估**（`-`/0，见 R2） | 同左（Ollama llama-server 推理实测：持续负载 sm=98~99 稳定；prompt 处理间隙单帧 `-`） | 同左 |
-| 每进程 GPU 显存 | `nvidia-smi --query-compute-apps=pid,used_memory` ✅ | **used_memory 全 N/A（WDDM）** ✗（含真实 CUDA 进程） | 同 WSL ✗ |
+| 每进程 GPU 利用率 | `nvidia-smi pmon -c 1`（**仅活动进程有值**；空闲全 `-`；峰值行为未验证——本机 torch 无 CUDA 无法构造负载） | 同左（Ollama llama-server 压测参考：持续负载 sm=98~99 稳定；prompt 间隙单帧 `-`） | 同左 |
+| 每进程 GPU 显存 | `nvidia-smi --query-compute-apps=pid,used_memory`（Linux 有效，但**本机无法验证**） | **used_memory 全 N/A（WDDM）** ✗（含真实 CUDA 进程）→ **预留字段，当前不启用** | 同 WSL ✗ |
 | 进程树 | ps ppid 列 ✅ | **CIM Win32_Process.ProcessId/ParentProcessId（本机实测 55884→47680）** ✅（TTL 5s 并入现有 CIM 通道） | 同 WSL ✅ |
 | 整卡指标 | query-gpu ✅ | query-gpu（40-60ms，TTL 500ms）✅ | query-gpu ✅ |
 
-> **Windows 每进程 GPU 显存 N/A 是本方案最大的平台约束**（§6.1 展开），决定了 oom 规则在
-> Windows 侧只能「整卡 + 尽力归属」；Linux 原生侧可全量精确归属。
+> **队长最终约束（2026-08-20）**：GPU 每进程数据源在本机**不可靠**（显存 [N/A]、利用率仅活动
+> 进程有值）。**防误报设计以「tasklist/ps 每进程 CPU/内存 + 进程存在性 + 实验状态机」为主，
+> GPU 整卡指标交叉验证，每进程 GPU 为辅助证据**；每进程 GPU 显存标注「受限于 [N/A]，
+> 预留字段但当前不启用」。
 
 ---
 
@@ -76,61 +88,57 @@
 
 ```
 ┌─ 采集层（Phase A, backend）─────────────────────────────────────────────┐
-│ 通道A1 pmon 每进程GPU利用率(sm/mem%)  通道A2 compute-apps 每进程显存MiB    │
-│ 通道A3 ps/procfs|tasklist 每进程CPU/内存  通道A4 PPID 进程树（ps|CIM）      │
-│        ↓ 按 pid 归并 → ProcSample 增强 { gpuUtilPct?, gpuMemMiB?, ppid?,   │
-│          cpuPct?, memMiB? }（整表 ≤ 低频 5s）                              │
+│ 主：通道A3 ps/procfs|tasklist 每进程CPU/内存 + 存在性                    │
+│     通道A4 PPID 进程树（ps|CIM）                                          │
+│ 辅：通道A1 pmon 每进程GPU利用率（仅活动进程有值，辅助证据）                │
+│     通道A2 compute-apps 每进程显存 MiB（**预留字段，当前不启用**）         │
+│        ↓ 按 pid 归并 → ProcSample 增强 { gpuUtilPct?, gpuMemMiB?(预留),   │
+│          ppid?, cpuPct?, memMiB? }（整表 ≤ 低频 5s）                      │
 ├─ 统计层（Phase B, core）─────────────────────────────────────────────────┐
 │ 实验进程组 G = 主pid ∪ 子进程/worker（PPID 递归，新生 pid 动态纳入）        │
-│ 按组聚合：G.gpuUtilPct / G.gpuMemMiB / G.cpuPct / G.memMiB                │
-│ 非实验组 O = Σ(其他进程占用) + Top-N 明细                                  │
+│ 主聚合：G.cpuPct / G.memMiB / 存在性（memberCount/alive）                 │
+│ 辅聚合：G.gpuUtilPct（pmon 辅助）/ G.gpuMemMiB（预留 null）                │
+│ 非实验组 O = Σ(其他进程 CPU/内存) + Top-N 明细                             │
 ├─ 告警层（Phase C, balancer）─────────────────────────────────────────────┐
-│ oom/io-bottleneck 改判「G 自身指标」；整卡/温度仅作约束与上下文；            │
-│ 新增「他人占卡」提示规则；告警 msg 带拆分证据（实验 X G + 其他 Y G）          │
+│ 主判据：G 自身 CPU/内存/存在性 + GPU 整卡指标交叉验证                       │
+│ 上下文：整卡显存 X% 中实验进程占 Y MiB（估算）+ 其他 N 进程占卡              │
+│ 归属仲裁降级：疑似他人占用 → warn 而非 critical；新增「他人占卡」提示         │
 └─ 提醒层（Phase C, balancer/tools）───────────────────────────────────────┘
    lab_advice/lab_ctl 升级：阈值触达 → 可执行建议 + 进程级证据（pid/cmd/占用）
 ```
 
 ### 2.1 采集层：进程级指标通道设计
 
-#### 通道 A1：每进程 GPU 利用率（pmon）——双平台可用 ★实证
+#### 通道 A1：每进程 GPU 利用率（pmon）——**辅助证据**（非主判据）
 
 - 命令：`nvidia-smi pmon -c 3 -s u`（`-c 3` **多帧采样窗口**；`-s u` 只取 util 列，输出更短）。
-  本机实测（Ollama llama-server 推理压测，2026-08-20）：
-  - **持续计算负载下精确**：pmon sm=98/97/98 与 `query-gpu utilization.gpu` 99% 同秒偏差 ≤2
-    （与 08 §4.2 dmon vs query 结论一致：稳定负载偏差 0）；
-  - **突发/间隙负载下单帧低估**：prompt 处理间隙单帧 `-` 或 0，而 query 显示 25%/98%——
-    **必须多帧窗口**（`-c 3` 取均值或 max，见 §6 R2），单帧不可直接采信。
+- 本机实证（2026-08-20）：
+  - **空闲态 sm 列全 `-`**（仅活动进程有值）——空闲无 GPU 负载时该通道无信息量；
+  - Ollama llama-server 压测参考：持续负载 sm=98/97/98 vs query 99% 偏差 ≤2；prompt 间隙
+    单帧 `-`/0 vs query 25%/98%（突发低估）；
+  - **本机 torch 无 CUDA（`torch.cuda.is_available()=False`），无法构造更多真实 GPU 负载
+    验证峰值行为**——该通道定位为**辅助证据**，不参与告警硬判定。
 - 解析：跳过 `#` 注释行；`pid` 列 → `sm`（compute%）、`mem`（memory bandwidth%）；`-` 视作 0。
 - 频率：**归 5s 低频**（与 procs/进程树同拍），每次采样取 `-c 3` 三帧均值/max；整卡 util
   仍走 query 高频（dmon 流覆盖）。
 - 降级：pmon 失败（驱动不支持/权限）→ `procs[].gpuUtilPct = null`，整卡指标照常，sources 标注。
 
-#### 通道 A2：每进程 GPU 显存（compute-apps）——平台分化 ★实证
+#### 通道 A2：每进程 GPU 显存（compute-apps）——**预留字段，当前不启用** ★实证
 
 - 命令：`nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader`。
 - **Windows/WSL 实测：全部返回 `[N/A]`**（含真实 CUDA 进程 llama-server.exe 55884，type=C）。
-  WDDM 驱动不向 nvidia-smi 暴露每进程显存。
-- **Linux 原生**：同命令有效（Linux 驱动支持）。
-- **Windows 降级设计**（关键，防实现者踩坑）：
-  - `procs[].gpuMemMiB = null`（不可得）；
-  - 实验进程组 G 显存 = **未知**，但整卡 used 可得 → 呈现「整卡 X/总 + 实验显存未知（Windows
-    限制）+ 其他进程估算」；
-  - 其他进程显存估算的**候选回退**（设计二选一，实现时选 A 并记录）：
-    - 方案 A（推荐，零额外开销）：`其他 ≈ 整卡used - 实验组不可知` → 无法拆分，仅报整卡 + 提示
-      「Windows 无法按进程拆分显存」；
-    - 方案 B（尽力拆分）：周期性快照实验组**进程数 × 平均每进程显存**不可行（无数据源），
-      故 **B 不可行**——Windows 侧不虚构数据，诚实标注 unavailable（符合项目「防脏数据」原则）。
-- **队长预研结论（2026-08-20，与本设计一致）**：每进程显存归属在 Windows 退而求其次——
-  显存总量是整卡（16311MiB），实验进程组显存**无直接来源**；更可行的防误报信号是
-  **每进程 GPU 利用率（pmon）** + **每进程 CPU/内存（tasklist/ps 已有）** + **进程存在性**。
-  因此 Windows 侧 oom 不依赖 G.gpuMemMiB，改走 §2.3 的「降级而非误报」判定。
+  WDDM 驱动不向 nvidia-smi 暴露每进程显存 → **受限于 [N/A]，`procs[].gpuMemMiB` 为预留字段，
+  当前不启用**（不采集、不填充、不参与判定）。
+- **Linux 原生**：同命令有效（Linux 驱动支持）——留待未来启用（本机为 WSL，当前亦不启用）。
+- 设计说明：每进程显存是「理想值」但本机数据源不可靠；**防误报不依赖它做硬判定**，
+  显存维度用「整卡 + 上下文标注」呈现（§2.3），避免虚构数据（项目「防脏数据」原则）。
 
-#### 通道 A2b：每进程显存的实验组估算（仅 Linux 有效，Windows 跳过）
+#### 通道 A2b：每进程显存的实验组估算——不启用（并入上下文标注）
 
-- Linux 原生：compute-apps 有效 → G.gpuMemMiB = Σ 成员，精确拆分；
-- Windows：G.gpuMemMiB = null，**防误报判定改用「整卡显存 + 实验组利用率/CPU 活跃度」组合**：
-  实验组 GPU 利用率低 + 整卡显存高 → 判定「疑似他人占用」（§2.3 降级逻辑）。
+- 每进程 GPU 显存不可得（Windows N/A；Linux 未启用）→ **G.gpuMemMiB 恒为 null**；
+- 显存维度改由**上下文标注**承担：`整卡显存 X% 中实验进程占 Y MiB（估算，不可拆）+ 系统
+  其他 N 进程占卡`——Y 仅作展示性估算（如按实验进程 host 内存比例或留空），**不做判定输入**；
+- 判定改用「整卡显存 + 实验组 CPU/内存活跃度」组合（§2.3 交叉验证）。
 
 #### 通道 A3：每进程 CPU/内存——平台分发
 
@@ -155,9 +163,9 @@
 #### 合并策略（backend `snapshot()` 内，pid 为键）
 
 ```
-procs = tasklist|ps 基表（pid → cmd/cpuPct/memMiB/ppid）
-      ⊕ pmon 行（pid → gpuUtilPct）
-      ⊕ compute-apps 行（pid → gpuMemMiB，Linux 有效；Windows null）
+procs = tasklist|ps 基表（pid → cmd/cpuPct/memMiB/ppid）   ← 主通道
+      ⊕ pmon 行（pid → gpuUtilPct，辅助；失败则无此列）
+      ⊕ compute-apps 行（pid → gpuMemMiB，**预留不启用**，恒 null）
 按 pid 合并成 ProcSample[]（单表，字段缺失为 null，sources 标注各通道）
 ```
 
@@ -174,31 +182,34 @@ procs = tasklist|ps 基表（pid → cmd/cpuPct/memMiB/ppid）
 #### 拆分聚合（core 新增 `proc-aggregator` 模块，纯函数）
 
 输入：增强后 procs 表 + G 集合；输出（每 5s 周期）：
-`groupStats = { gpuUtilPct, gpuMemMiB|null, cpuPct, memMiB, memberCount, members:[{pid,cmd,gpuUtilPct,gpuMemMiB,cpuPct,memMiB}] }`
-`otherStats = { gpuMemMiB|null（整卡-G 不可得→null）, topN:[{pid,cmd,gpuUtilPct,gpuMemMiB,cpuPct,memMiB}], total }`
+`groupStats = { cpuPct, memMiB, memberCount, alive, members:[{pid,cmd,cpuPct,memMiB}], gpuUtilPct?(辅), gpuMemMiB?(预留 null) }`
+`otherStats = { cpuPct, memMiB, topN:[{pid,cmd,cpuPct,memMiB}], gpuMemMiB?(预留 null) }`
 
-聚合规则：
-- GPU 利用率：G 成员 gpuUtilPct 求和（多进程共享 GPU，pmon 已按进程报）→ 上限 100 截断。
-- GPU 显存：Linux 下 G 求和；Windows 下 null（见 A2）。
-- CPU/内存：G 成员求和；Windows 下 cpuPct 全 null → 仅 memMiB 可拆。
-- 非实验组 = 全表 − G（按 pid 差集）。
+聚合规则（**主：CPU/内存/存在性；辅：GPU 每进程**）：
+- **主**：CPU/内存——G 成员 cpuPct/memMiB 求和（Linux 双全；Windows cpuPct 全 null → 仅
+  memMiB 可拆 + 存在性 alive/memberCount）；非实验组 = 全表 − G（pid 差集）。
+- **辅**：GPU 利用率——G 成员 gpuUtilPct 求和截 100（pmon，仅活动进程有值；空闲/不可得为
+  null，不参与硬判定）。
+- **预留**：GPU 显存——`gpuMemMiB` 恒 null（通道 A2 不启用），仅上下文标注使用。
 
 ### 2.3 告警层：规则重写（防误报核心）
 
-**防误报核心逻辑（队长预研补充，2026-08-20）——「降级而非误报」**：
-告警触发时先做**归属仲裁**，再定级别：
-1. experiment 存在 且 G 自身指标达标（Linux：G.gpuMemMiB% ≥ memWarn；Windows：G.gpuUtilPct
-   高且整卡显存高）→ 判为实验自身风险（critical，如实告警）；
-2. experiment 存在 但 G 利用率/显存占比 **低**，而系统其他进程占卡 → **降级**为
-   「疑似他人占用，非实验 OOM」（warn/info + 附其他进程 Top 证据），**不误报实验 OOM**；
-3. 无 experiment → other-occupancy 独立提示（info）。
+**防误报核心逻辑（队长最终约束，2026-08-20）——「CPU/内存/存在性为主 + GPU 整卡交叉验证 +
+归属仲裁降级」**：
 
-| 规则 | 现状（全系统首卡） | 重写后（实验组为准 + 归属仲裁 + 上下文） |
+1. **主判据（实验进程组自身）**：G 的 CPU/内存/存在性（进程活着、CPU/内存有显著占用）
+   + GPU 整卡指标（query-gpu）交叉验证——**不依赖不可靠的每进程 GPU 显存/利用率硬判定**；
+2. **上下文标注**：整卡显存高时，msg 标注 `整卡显存 X% 中实验进程占 Y MiB（估算，不可拆）+
+   系统其他 N 进程占卡，疑似他人负载`——把「他人占卡」从误报源变成可解释信息；
+3. **归属仲裁降级**：实验存在但 G 活跃度低（CPU/内存占比低）而整卡显存高 → 降级 warn
+   「疑似他人占用，非实验 OOM」；无实验 → other-occupancy info 独立提示。
+
+| 规则 | 现状（全系统首卡） | 重写后（实验组 CPU/内存/存在性 + 整卡交叉 + 上下文） |
 |---|---|---|
-| **oom** | `gpu[0].memUsed% ≥ memWarn && util ≥ utilWarn` | **归属仲裁优先**：① Linux：G.gpuMemMiB% ≥ memWarn → critical（实验自身 OOM 风险）；G 低而整卡高 → 降级 warn「疑似他人占用」（附其他进程 Top）；② Windows：G.gpuMemMiB 不可得 → 整卡 used% ≥ memWarn **且** G.gpuUtilPct 高 → critical；整卡高但 G.gpuUtilPct 低 → 降级 warn「疑似他人占用」；③ 上下文：`实验 X GiB + 其他 Y GiB = 总 Z/Z GiB`（Linux 精确；Windows 报总数 + 提示「实验显存不可拆」） |
-| **io-bottleneck** | `gpu[0].util < 30 && 整机 cpu ≥ 90` | `G.gpuUtilPct < 30 && G.cpuPct ≥ 90`（**实验自身** CPU 满载才是数据管线瓶颈）；G.cpuPct 不可得（Windows）→ 降级整机 cpu 并标注「无法按进程拆分 CPU，基于全机判断」 |
-| **thermal** | 整卡温度 ≥ tempWarn | 保持整卡（物理量不可拆），msg 改为「GPU 温度达阈值（整卡物理量；若实验利用率低则非实验负载引起）」+ 上下文 G 利用率 |
-| **imbalance** | 多卡 util 差 ≥ 40 | 保持整卡（多卡间本就无进程边界），可加 G 在各卡的 util（多 GPU 分配信息） |
+| **oom** | `gpu[0].memUsed% ≥ memWarn && util ≥ utilWarn` | **交叉验证**：整卡 used% ≥ memWarn 时查 G——① G 活跃（CPU/内存占用高 或 进程存在且 pmon 有值）→ critical「实验显存风险（整卡 X%，实验进程占 Y MiB 估算）」；② G 不活跃（低 CPU/内存、pmon 无值）→ **降级 warn**「整卡显存 X%，实验进程仅 Y MiB（估算）/活跃度低，系统其他 N 进程占卡，疑似他人负载」；③ 无实验 → other-occupancy。上下文：`实验 X GiB（估算）+ 其他 Y GiB = 总 Z/Z GiB` |
+| **io-bottleneck** | `gpu[0].util < 30 && 整机 cpu ≥ 90` | `G.cpuPct ≥ 90 && 整卡 util < 30`（**实验自身 CPU 满载 + GPU 空闲**才是数据管线瓶颈）；G.cpuPct 不可得（Windows）→ 降级整机 cpu 并标注「无法按进程拆分 CPU，基于全机判断」 |
+| **thermal** | 整卡温度 ≥ tempWarn | 保持整卡（物理量不可拆），msg 改为「GPU 温度达阈值（整卡物理量；若实验进程 CPU/内存活跃度低则非实验负载引起）」+ 上下文 G 活跃度 |
+| **imbalance** | 多卡 util 差 ≥ 40 | 保持整卡（多卡间本就无进程边界） |
 | **新增 other-occupancy** | 无 | G 未 running（idle）但整卡显存 ≥ memWarn → 提示「系统其他进程占用 GPU 显存 X/X GiB（Top: pid/cmd）」——把「他人占卡」从误报源变成**独立提示**（info 级，不惊扰） |
 
 防抖保持：阈值持续 10s + 同类 5min（现有 hitByRule/lastByRule 机制不动）。
@@ -320,8 +331,8 @@ export interface ProcSample {
 
 ### Phase A：进程级采集（backend，只动 sampler，不影响协议语义）
 
-- [ ] A1 pmon 通道：`nvidia-smi pmon -c 1 -s u` 解析（WindowsBackend + LinuxBackend），
-      `procs[].gpuUtilPct` 填充；失败降级 null + sources 标注。
+- [ ] A1 pmon 通道：`nvidia-smi pmon -c 3 -s u` 解析（WindowsBackend + LinuxBackend，多帧取
+      均值/max，`-` 视 0），`procs[].gpuUtilPct` 填充；失败降级 null + sources 标注。
 - [ ] A2 compute-apps 通道：`--query-compute-apps=pid,process_name,used_memory`；
       Windows 侧检测 N/A → 置 null（**不虚构**）；Linux 侧填充 `gpuMemMiB`。
 - [ ] A3 Linux `memMiB` 补齐：`/proc/<pid>/status` VmRSS；procs 行加 `ppid`。
@@ -344,13 +355,14 @@ export interface ProcSample {
 
 ### Phase C：告警规则重写 + Agent 提醒（balancer + 工具）
 
-- [ ] C1 oom 重写：Linux 用 G.gpuMemMiB 主判 + 上下文拆分；Windows 整卡降级判 + 提示。
+- [ ] C1 oom 重写：归属仲裁（Linux 用 G.gpuMemMiB 主判；Windows 整卡 + G.gpuUtilPct 组合），
+      疑似他人占用 → 降级 warn 而非 critical。
 - [ ] C2 io-bottleneck 重写：G.cpuPct 主判，Windows 降级整机 + 标注。
 - [ ] C3 thermal msg 重写（整卡物理量 + G 利用率上下文）；imbalance 保持 + G 分卡。
 - [ ] C4 新增 other-occupancy（info）规则（无实验但整卡占用 → 独立提示）。
 - [ ] C5 Alert.evidence + actions 动态化（进程证据进告警）；lab_advice/lab_ctl 升级。
-- [ ] 验收：e2e——他人占卡场景（造 chrome/llama-server 占用）不误报实验 oom，出
-      other-occupancy；实验自身显存超阈值正确 oom 且 evidence 含实验 pid。
+- [ ] 验收：e2e——他人占卡场景（造 chrome/llama-server 占用）**降级为「疑似他人占用」而非误报
+      实验 oom**；实验自身显存超阈值正确 oom 且 evidence 含实验 pid；无实验时出 other-occupancy。
 
 ---
 

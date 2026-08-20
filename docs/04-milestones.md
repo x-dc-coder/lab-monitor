@@ -104,9 +104,11 @@
 - [x] ✅ **5'. 4 类规则各场景会话内构造触发**各构造场景触发一次，告警含分级字段；
   - **结论回填（integ / 2026-08-19）**：会话内构造触发 3/4 —— **thermal**（lab_ctl tempWarn 95→1，当前 37°C 恒命中 10s → warn+置信0.7+动作）、**oom**（memWarn/utilWarn→1，显存 11%+util≥1 → critical+置信0.85+动作）、**io-bottleneck**（CPU 满载 96% + GPU util<30 → warn+置信0.7+动作）；告警均含分级/置信度/动作，alertsCriticalCount 正确；**imbalance 需 ≥2 GPU，单 GPU 环境不可构造**（verify-host [C] 代码覆盖，留待多卡环境）。同时验证 **P2 2' 阈值即时生效**（lab_ctl set-threshold → ≤1 采样周期生效，thermal/oom 触发即证明；持久化留 v2，T4-4）。
 - [x] ✅ **6. emit 可测点（emitLab 内部 dispatch + console 自观测日志；rc.6 沙箱无 ctx.emit → v2 升级为平台广播）**：插件内自监听或临时观测行断言 `lab/experiment-start|end|alert` 按状态机转移发出（console 日志断言）；
-- [x] ✅ **7. 并发单跟踪约束（自测逻辑：running 中新 start → 旧 run 归档 aborted，无双 running）**
-- [x] ✅ **7'. 会话内同时跑两条实验命令实证**：同时跑两条实验命令 → 只跟踪其一（新 start 命中时旧 run 自动归档 aborted），无双 running 并存。
-  - **结论回填（integ / 2026-08-19）**：**发现并修复 v1.4.3 缺陷**——原 markResult 在「配对 result 早于 ps 周期到达」时（后台任务 pid 尚未关联）经 `!run.pid` 提前判 done（实验秒消失，实证 run 追踪丢失）；修复为 done 必须 ps tick 双确认（配对 result + 进程消失）。复验：`python3 /tmp/train_demo.py` 后台 → experiment=run-20260819-001 running+pid 关联；再起 train_demo2.py → 仅剩 run-002 running，run-001 自动归档 aborted（R-2），**无双 running ✓**。
+- [x] ✅ **7. 并发单跟踪约束（v1 语义）**：running 中新 start → 旧 run 归档 aborted，无双 running。
+  - **⚠️ v2（2026-08-20，A2 多轨）语义变更**：改为**多轨并行跟踪**（上限 4）——running 中新 start 不再归档旧 run，并行上限满 4 时才归档最旧；**P1 验收 7 的 v1 断言不再成立，已由 verify-host [B3] 多轨场景取代**（并行 2 实验独立判定 + 上限 4 归档最旧）。
+- [x] ✅ **7'. 会话内同时跑两条实验命令实证（v1）**：同时跑两条实验命令 → 只跟踪其一（新 start 命中时旧 run 自动归档 aborted），无双 running 并存。
+  - **结论回填（integ / 2026-08-19）**：**发现并修复 v1.4.3 缺陷**——原 markResult 在「配对 result 早于 ps 周期到达」时（后台任务 pid 尚未关联）经 `!run.pid` 提前判 done（实验秒消失，实证 run 追踪丢失）；修复为 done 必须 ps tick 双确认（配对 result + 进程消失）。复验：`python3 /tmp/train_demo.py` 后台 → experiment=run-20260819-001 running+pid 关联；再起 train_demo2.py → 仅剩 run-002 running，run-001 自动归档 aborted（R-2），**无双 running ✓（v1 语义）**。
+  - **⚠️ v2（2026-08-20）**：同上——多轨化后该实证场景不再适用，双实验并行由 verify-host [B3] 覆盖。
 
 ## P2「能管」：分级告警 + 原生兜底 UI + 历史曲线（better-sidebar 适配器为最后增量）
 
@@ -145,6 +147,12 @@
 - V2 差异：client 数据面由 `host.call('labMonitor.*')` 改为 **HTTP `/lab-monitor/api/*`**（协议字段不变）；工具注册走官方 `ctx.tools.register(defineTool(...))`；prompt 注入默认关闭（KV 缓存友好，`lab_status` 工具替代）。
 - 完整迁移设计：`docs/research/12-v2-migration.md`；架构差异：`docs/01-architecture.md` §8-11。
 
+## V2 完成记录（2026-08-20，A2 多轨 + 标签分组）
+
+1. **多轨实验并行跟踪（A2）**：`state-machine` 单轨 → 多轨——`runs: Map<runId, RunRecord>` 并行跟踪，上限 `MAX_PARALLEL_RUNS=4`（满 4 归档最旧 aborted）；`pidMissingStreak` per-run；done/crashed 独立双确认；`markResult(paired, runId?)` runId 优先 + 指纹回退；`snapshot()` 返回 `{main, all}`；协议追加 `experiments[]`（`experiment` 保留为主实验，向后兼容）。verify-host [B3] 覆盖（并行 2 实验独立判定、主实验切换、上限 4 归档、清理）。
+2. **标签分组（用户需求：手动打标签分组展示）**：`TagRule {id,label,patterns,kind,color}`——cmdline 正则匹配（**脚本形态天然覆盖**：解释器进程 cmdline 含脚本路径）；`lab_ctl tag add/remove/list`（add 支持 `patterns` 正则或 `pid` 快速打标自动生成规则）；settings 持久化（lab-monitor 命名空间 `tags` 键）；snapshot 追加 `tags[]` 聚合（组内 GPU/CPU/内存 + `runIds`）；UI 标签分组展示（experiment 组显示状态/时长/曲线，process 组显示资源占用）。verify-host [E2] 覆盖（add/pid 打标/list/remove/非法正则守卫/持久化）。
+3. **追踪主键语义**：实验 = runId（每次 start 新 runId）+ cmdline 指纹；标签进程 = 规则（cmdline 正则）；pid 均为关联结果——**进程重启/pid 变化自动重关联**（R3 机制复用）。
+
 ## V2 阶段未完成项（2026-08-20 对照 PLAN + 本清单）
 
 > 分类：A = 计划明确要求但代码未实现；B = 验收遗留（需真实环境/GUI）；C = 可选增强。
@@ -155,7 +163,7 @@
 | 项 | 追踪 | 状态 |
 |---|---|---|
 | A1 指挥层 Agent 预设 lab-commander | 🔶 **2026-08-20 用户决策：不做预设**，改为「使用文档」形式（lab_status/lab_advice/lab_ctl 用法手册）；prompt 注入增强待讨论（KV 缓存影响） | 🔶 重新定位 |
-| A2 多实验并行跟踪（R-2 留 v2） | 📋 方案已对齐：兼容协议（experiment 保留 + experiments[]）/ 上限 4 / runId 优先+指纹回退 | ⬜ 待实施 |
+| A2 多实验并行跟踪（R-2 留 v2） | ✅ **2026-08-20 实施完成**：多轨（上限 4 + per-run 判定 + runId 归属）+ 标签分组（TagRule 规则式打标 + lab_ctl tag + tags 聚合 + UI 分组展示）；verify-host [B3]/[E2] 全绿；见「V2 完成记录」 | ✅ 完成 |
 | A3 webServer 自托管面板（出口④） | 可选（v2 前置已满足：API 数据面就绪） | ⬜ |
 | A4 SSE /lab/events 远端扩展 | 可选（手机端/对接 monitor-panel） | ⬜ |
 

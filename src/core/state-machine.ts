@@ -2,7 +2,7 @@
  * state-machine（实验生命周期：idle/running/done/crashed/alerting/aborted）—— §4
  * 迁移自 host/index.js §4，逻辑等价（含 v1.4.3 / v1.4.5 会话内验收实证修正）
  */
-import { CRASH_PS_GAP, DONE_GRACE_TICKS, RING_MAX_MS, cmdFingerprint, makeRunId, normalizeCmdForMatch } from './constants.js'
+import { CRASH_PS_GAP, DONE_GRACE_TICKS, MAX_PARALLEL_RUNS, RING_MAX_MS, cmdFingerprint, makeRunId, normalizeCmdForMatch } from './constants.js'
 import type { Ring } from './ring.js'
 import type { Alert, ExperimentSnapshot, RunRecord } from './types.js'
 
@@ -26,12 +26,13 @@ export interface StateMachine {
   start(cmdStr: string, feature: string): RunRecord
   associatePid(pid: number): void
   associateProc(pid: number): void
-  markResult(paired: boolean): void
+  markResult(paired: boolean, runId?: string | null): void
   tick(aliveProcs: PsProc[]): void
   tickGrace(run: RunRecord): void
-  setAlerting(on: boolean): void
-  snapshot(): ExperimentSnapshot | null
+  setAlerting(on: boolean, runId?: string | null): void
+  snapshot(): { main: ExperimentSnapshot | null; all: ExperimentSnapshot[] }
   cur(): RunRecord | null
+  all(): RunRecord[]
   history: RunRecord[]
 }
 
@@ -94,17 +95,29 @@ function memberMatches(run: RunRecord, p: PsProc): boolean {
 
 export function createStateMachine(deps: StateMachineDeps): StateMachine {
   const state: {
-    cur: RunRecord | null
+    /** 2026-08-20（A2 多轨）：全部 running run（Map 保持 start 顺序）；cur() 语义保留 = 最近 start 的 running */
+    runs: Map<string, RunRecord>
     history: RunRecord[]
-    pidMissingStreak: number
   } = {
-    cur: null,
+    runs: new Map(),
     history: [],
-    pidMissingStreak: 0,
   }
 
   function cur(): RunRecord | null {
-    return state.cur && state.cur.state === 'running' ? state.cur : null
+    // 主实验 = 最近 start 的 running run（向后兼容 experimentActive 语义）
+    let latest: RunRecord | null = null
+    for (const run of state.runs.values()) {
+      if (run.state === 'running' && (!latest || run.startTs >= latest.startTs)) latest = run
+    }
+    return latest
+  }
+
+  function all(): RunRecord[] {
+    const out: RunRecord[] = []
+    for (const run of state.runs.values()) {
+      if (run.state === 'running') out.push(run)
+    }
+    return out
   }
 
   function buildSummary(run: RunRecord): RunRecord['summary'] {
@@ -126,10 +139,9 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     run.endReason = endReason
     run.state = endReason === 'aborted' ? 'aborted' : endReason === 'done' ? 'done' : 'crashed'
     run.summary = run.summary || buildSummary(run)
+    state.runs.delete(run.runId)
     state.history.unshift(run)
     if (state.history.length > 20) state.history.length = 20
-    if (state.cur === run) state.cur = null
-    state.pidMissingStreak = 0
   }
 
   function conclude(run: RunRecord, reason: 'done' | 'crashed'): void {
@@ -152,9 +164,14 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
   }
 
   // ① start：pre-execute 命中训练命令（只记 runId/cmd 特征/startTs，无 pid，T1-1）
+  // 2026-08-20（A2 多轨）：并行跟踪上限 MAX_PARALLEL_RUNS——超出时归档最旧 running 为 aborted；
+  // 不再「新 start 即归档旧 run」（v1 单跟踪语义，P1 验收 7 已更新）。
   function start(cmdStr: string, feature: string): RunRecord {
-    const existing = cur()
-    if (existing) archive(existing, 'aborted') // R-2：running 中新 start → 旧 run 归档 aborted
+    const running = all()
+    if (running.length >= MAX_PARALLEL_RUNS) {
+      const oldest = running.reduce((a, b) => (a.startTs <= b.startTs ? a : b))
+      archive(oldest, 'aborted') // 上限触发：最旧 running 归档 aborted
+    }
     const run: RunRecord = {
       runId: makeRunId(),
       cmd: cmdStr,
@@ -169,32 +186,40 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       fingerprint: cmdFingerprint(cmdStr),
       graceTicks: 0,
       alerting: false,
+      procGone: false,
+      pidMissingStreak: 0,
       sampleStats: null,
     }
-    state.cur = run
-    state.pidMissingStreak = 0
+    state.runs.set(run.runId, run)
     if (deps.ring) deps.ring.expand() // R-3：running 期扩容
     deps.emitLab('lab/experiment-start', { runId: run.runId, cmd: cmdStr, cmdFeature: feature, startTs: run.startTs })
     return run
   }
 
-  // ② pid 关联（ps 回填 / 显式注入；加入进程组）
-  function associateProc(pid: number): void {
-    const run = cur()
+  // ② pid 关联（ps 回填 / 显式注入；加入进程组；runId 可选，缺省作用于主实验）
+  function associateProc(pid: number, runId?: string | null): void {
+    const run = runId && state.runs.has(runId) ? state.runs.get(runId) as RunRecord : cur()
     if (run && pid) {
       if (!run.pid) run.pid = pid
       if (!run.procGroup) run.procGroup = new Set()
       run.procGroup.add(pid)
-      state.pidMissingStreak = 0
+      run.pidMissingStreak = 0
     }
   }
-  function associatePid(pid: number): void {
-    associateProc(pid)
+  function associatePid(pid: number, runId?: string | null): void {
+    associateProc(pid, runId)
   }
 
   // ③ done / crashed（T1-2 配对 + 双确认；kill 自身 result 不配对 → 忽略）
-  function markResult(paired: boolean): void {
-    const run = cur()
+  // 2026-08-20（A2 多轨）：runId 精确归属优先；无 runId 时按 cmd 指纹匹配 running run（T1-2 复用）
+  function markResult(paired: boolean, runId?: string | null): void {
+    let run: RunRecord | null = null
+    if (runId && state.runs.has(runId)) {
+      run = state.runs.get(runId) as RunRecord
+    } else if (paired) {
+      // 指纹回退：交给上层按指纹找（本函数只收「已配对」信号；多轨下若调用方已锁定 runId 则直取）
+      run = cur()
+    }
     if (!run) return
     if (!paired) return // 不匹配的 result 忽略（ls/curl/kill 等）
     run.resultSeen = true
@@ -203,12 +228,16 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
 
   // ps tick：实验进程组存活检测（B2：ppid 递归扩张）+ crashed/done 双确认
   // R3：pid 变化 → 按 cmd 指纹重新关联主进程；pid 复用（cmd 不符）→ 剔除
+  // 2026-08-20（A2 多轨）：遍历全部 running run，per-run 独立判定（pidMissingStreak per-run）
   function tick(aliveProcs: PsProc[]): void {
-    const run = cur()
-    if (!run) {
-      state.pidMissingStreak = 0
-      return
+    const runs = all()
+    if (!runs.length) return
+    for (const run of runs) {
+      tickRun(run, aliveProcs)
     }
+  }
+
+  function tickRun(run: RunRecord, aliveProcs: PsProc[]): void {
     // 主进程查找（pid 精确优先，其次指纹——v1.4.5 语义）
     const main = findAliveProc(run, aliveProcs)
     // 组扩张根：主进程优先；主进程消失但组内成员存活（worker 存活）→ 以指纹匹配成员为根
@@ -237,7 +266,7 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     if (G.size > 0) {
       if (main) run.pid = main.pid // R3：pid 变化重关联
       else if (!run.pid) run.pid = roots[0]
-      state.pidMissingStreak = 0
+      run.pidMissingStreak = 0
       run.procGone = false
       run.graceTicks = 0
       return
@@ -247,8 +276,8 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       conclude(run, 'done') // done 双确认 2/2：配对 result + 进程组消失
       return
     }
-    state.pidMissingStreak += 1
-    if (state.pidMissingStreak >= CRASH_PS_GAP) conclude(run, 'crashed') // 进程组消失 ≥2 ps 周期
+    run.pidMissingStreak += 1
+    if (run.pidMissingStreak >= CRASH_PS_GAP) conclude(run, 'crashed') // 进程组消失 ≥2 ps 周期
   }
 
   // 配对 result 后进程仍活 → 宽限 2 个 ps 周期后再判 done（异常残留）
@@ -258,15 +287,13 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     if (run.graceTicks >= DONE_GRACE_TICKS) conclude(run, 'done')
   }
 
-  // 平衡引擎 critical 置位（alerting 状态语义）
-  function setAlerting(on: boolean): void {
-    const run = cur()
+  // 平衡引擎 critical 置位（alerting 状态语义；runId 可选，缺省作用于主实验）
+  function setAlerting(on: boolean, runId?: string | null): void {
+    const run = runId && state.runs.has(runId) ? state.runs.get(runId) as RunRecord : cur()
     if (run) run.alerting = on
   }
 
-  function snapshot(): ExperimentSnapshot | null {
-    const run = state.cur && state.cur.state === 'running' ? state.cur : null
-    if (!run) return null
+  function toSnapshot(run: RunRecord): ExperimentSnapshot {
     return {
       runId: run.runId,
       state: run.alerting ? 'alerting' : 'running',
@@ -281,5 +308,16 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     }
   }
 
-  return { start, associatePid, associateProc, markResult, tick, tickGrace, setAlerting, snapshot, cur, history: state.history }
+  function snapshot(): { main: ExperimentSnapshot | null; all: ExperimentSnapshot[] } {
+    const runs = all()
+    if (!runs.length) return { main: null, all: [] }
+    // main = 最近 start 的 running（与 cur() 一致）
+    const mainRun = cur() as RunRecord
+    return {
+      main: toSnapshot(mainRun),
+      all: runs.map(toSnapshot),
+    }
+  }
+
+  return { start, associatePid, associateProc, markResult, tick, tickGrace, setAlerting, snapshot, cur, all, history: state.history }
 }

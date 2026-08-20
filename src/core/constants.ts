@@ -18,6 +18,8 @@ export const ALERT_MAX = 20
 export const CRASH_PS_GAP = 2
 /** 配对 result 后进程仍活的宽限 ps 周期 → done */
 export const DONE_GRACE_TICKS = 2
+/** 2026-08-20（A2 多轨）：并行实验跟踪上限（超出时归档最旧 running 为 aborted） */
+export const MAX_PARALLEL_RUNS = 4
 
 export const THRESHOLD_DEFAULTS = { utilWarn: 90, memWarn: 95, tempWarn: 85, pollMs: 5000 }
 export type Thresholds = typeof THRESHOLD_DEFAULTS
@@ -72,4 +74,15 @@ export function makeRunId(): string {
   const mo = ('0' + (d.getMonth() + 1)).slice(-2)
   const dd = ('0' + d.getDate()).slice(-2)
   return 'run-' + y + mo + dd + '-' + ('000' + RUN_ID_COUNTER).slice(-3)
+}
+
+let TAG_ID_COUNTER = 0
+/** 标签规则 id（与 runId 区分前缀；settings 持久化主键） */
+export function makeTagId(): string {
+  TAG_ID_COUNTER += 1
+  const d = new Date()
+  const y = d.getFullYear()
+  const mo = ('0' + (d.getMonth() + 1)).slice(-2)
+  const dd = ('0' + d.getDate()).slice(-2)
+  return 'tag-' + y + mo + dd + '-' + ('000' + TAG_ID_COUNTER).slice(-3)
 }

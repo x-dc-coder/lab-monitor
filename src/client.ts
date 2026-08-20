@@ -60,6 +60,10 @@ interface SnapView {
   mem: { totalMiB: number | null; availableMiB: number | null }
   procs: ProcView[]
   watchedPids?: number[]
+  /** 2026-08-20（A2 多轨）：全部 running 实验（experiment 保留为主实验） */
+  experiments?: ExperimentView[]
+  /** 2026-08-20（标签分组）：用户标签规则命中聚合 */
+  tags?: TagGroupView[]
   alerts: AlertView[]
   alertsCriticalCount: number
   experiment: { runId: string; state: string; cmd?: string | null; pid?: number | null } | null
@@ -67,6 +71,23 @@ interface SnapView {
   ui: { betterSidebarVisible: boolean }
   error?: boolean
   degraded?: { gpu?: string; reason?: string }
+}
+interface ExperimentView {
+  runId: string
+  state: string
+  cmd?: string | null
+  pid?: number | null
+  startTs: number
+  groupStats?: { cpuPct?: number | null; memMiB?: number | null; memberCount?: number } | null
+}
+interface TagGroupView {
+  rule: { id: string; label: string; patterns: string[]; kind: string; color?: string }
+  pids: number[]
+  procs: { pid: number; cmd: string | null; cpuPct?: number | null; memMiB?: number | null; gpuUtilPct?: number | null }[]
+  gpuUtilPct?: number | null
+  cpuPct?: number | null
+  memMiB?: number | null
+  runIds?: string[]
 }
 interface HistPoint {
   ts: number
@@ -207,6 +228,114 @@ function summaryLine(s: SnapView): string {
   if (s.cpu && typeof s.cpu.percent === 'number') parts.push('CPU ' + Math.round(s.cpu.percent) + '%')
   if (s.alertsCriticalCount) parts.push(s.alertsCriticalCount + '告警')
   return parts.length ? '监控 ' + parts.join(' ') : '监控'
+}
+
+/** 2026-08-20（A2 多轨）：实验状态块——主实验 + 并行实验列表（每行 runId/状态/时长/pid/cmd） */
+function expBlock(s: SnapView | null): React.ReactElement | null {
+  if (!s) return null
+  const main = s.experiment
+  const all = Array.isArray(s.experiments) && s.experiments.length ? s.experiments : main ? [main] : []
+  if (!all.length && !main) return null
+  const rows: React.ReactElement[] = []
+  const seen = new Set<string>()
+  // 主实验优先展示（标注「主」），并行实验依次列出
+  const ordered: { runId: string; state: string; cmd?: string | null; pid?: number | null; startTs?: number }[] = []
+  if (main) ordered.push(main)
+  for (const e of all) {
+    if (e.runId === (main && main.runId)) continue
+    ordered.push(e)
+  }
+  for (const e of ordered) {
+    if (seen.has(e.runId)) continue
+    seen.add(e.runId)
+    const mins = e.startTs ? Math.max(0, Math.round((Date.now() - e.startTs) / 60000)) : null
+    const isMain = main && e.runId === main.runId
+    const gs = (e as { groupStats?: { cpuPct?: number | null; memMiB?: number | null; memberCount?: number } | null }).groupStats
+    rows.push(
+      React.createElement('div', { key: e.runId, style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+        React.createElement('span', {
+          style: {
+            width: 8, height: 8, borderRadius: 4,
+            background: e.state === 'alerting' ? C.error : e.state === 'running' ? C.success : C.warn,
+          },
+        }),
+        React.createElement('span', { style: { fontWeight: 600, fontSize: 12 } },
+          (isMain ? '实验 ' : '  ') + (e.runId || '-')),
+        React.createElement('span', { style: { fontSize: 11, color: C.label2 } },
+          '[' + (e.state || '-') + ']'),
+        mins !== null
+          ? React.createElement('span', { style: { fontSize: 11, color: C.label2 } }, mins + 'min')
+          : null,
+        e.pid
+          ? React.createElement('span', { style: { fontSize: 11, color: C.label2 } }, 'pid ' + e.pid)
+          : null,
+        e.cmd
+          ? React.createElement('span', { style: { fontSize: 11, color: C.label2, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+              e.cmd)
+          : null,
+        gs && typeof gs.cpuPct === 'number'
+          ? React.createElement('span', { style: { fontSize: 11, color: utilColor(gs.cpuPct) } }, 'CPU ' + Math.round(gs.cpuPct) + '%')
+          : null,
+        gs && typeof gs.memMiB === 'number'
+          ? React.createElement('span', { style: { fontSize: 11, color: C.label2 } }, fmtGiB(gs.memMiB) + 'G')
+          : null,
+      ),
+    )
+  }
+  return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } }, ...rows)
+}
+
+/** 2026-08-20（标签分组）：用户标签规则命中的分组展示——组头（label+kind+聚合）+ 命中进程行 */
+function TagGroups(props: { tags: TagGroupView[] }): React.ReactElement {
+  const groups = props.tags || []
+  return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+    groups.map((g) => {
+      const color = g.rule && g.rule.color ? g.rule.color : C.brand
+      const isExp = g.rule && g.rule.kind === 'experiment'
+      return React.createElement('div', {
+        key: g.rule.id,
+        style: { border: '1px solid ' + C.border, borderRadius: 8, padding: '6px 10px', background: C.layer1 },
+      },
+        // 组头：色点 + label + kind 徽标 + 聚合统计
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+          React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: color } }),
+          React.createElement('span', { style: { fontWeight: 600, fontSize: 12 } }, g.rule.label || '未命名'),
+          React.createElement('span', { style: { fontSize: 10, padding: '0 4px', borderRadius: 3, border: '1px solid ' + color, color: color } },
+            isExp ? '实验' : '进程'),
+          React.createElement('span', { style: { fontSize: 11, color: C.label2 } }, g.pids.length + ' 进程'),
+          g.gpuUtilPct !== null && g.gpuUtilPct !== undefined
+            ? React.createElement('span', { style: { fontSize: 11, color: utilColor(g.gpuUtilPct) } }, 'GPU ' + g.gpuUtilPct + '%')
+            : null,
+          g.cpuPct !== null && g.cpuPct !== undefined
+            ? React.createElement('span', { style: { fontSize: 11, color: utilColor(g.cpuPct) } }, 'CPU ' + g.cpuPct + '%')
+            : null,
+          g.memMiB !== null && g.memMiB !== undefined
+            ? React.createElement('span', { style: { fontSize: 11, color: C.label2 } }, fmtGiB(g.memMiB) + 'G')
+            : null,
+          isExp && g.runIds && g.runIds.length
+            ? React.createElement('span', { style: { fontSize: 10, color: C.label2 } },
+                '实验 ' + g.runIds.join(' / '))
+            : null,
+        ),
+        // 命中进程明细（折叠式简表）
+        React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 1, marginTop: 4 } },
+          g.procs.map((p) => (
+            React.createElement('div', { key: p.pid, style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 11 } },
+              React.createElement('span', { style: { color: C.label2, width: 42 } }, 'pid ' + p.pid),
+              React.createElement('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, p.cmd || '-'),
+              typeof p.gpuUtilPct === 'number'
+                ? React.createElement('span', { style: { color: utilColor(p.gpuUtilPct), width: 42, textAlign: 'right' } }, p.gpuUtilPct + '%')
+                : React.createElement('span', { style: { width: 42 } }),
+              typeof p.cpuPct === 'number'
+                ? React.createElement('span', { style: { color: utilColor(p.cpuPct), width: 42, textAlign: 'right' } }, p.cpuPct + '%')
+                : React.createElement('span', { style: { width: 42 } }),
+              React.createElement('span', { style: { color: C.label2, width: 44, textAlign: 'right' } }, fmtGiB(p.memMiB) + 'G'),
+            )
+          )),
+        ),
+      )
+    }),
+  )
 }
 
 // ----------------------------------------------------------------------------
@@ -577,12 +706,11 @@ function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
       cpuCard(s),
       memCard(s),
     ),
-    // ── 实验状态 ────────────────────────────────────────────────────────────
-    s && s.experiment
-      ? React.createElement('div', { style: { fontSize: 12, color: C.label2 } },
-          '实验 ' + (s.experiment.runId || '-') + ' [' + (s.experiment.state || '-') + ']' +
-          (s.experiment.cmd ? ' · ' + s.experiment.cmd : '') +
-          (s.experiment.pid ? ' · pid ' + s.experiment.pid : ''))
+    // ── 实验状态（2026-08-20 多轨：主实验 + 并行实验列表）────────────────────
+    expBlock(s),
+    // ── 标签分组（2026-08-20：手动打标签的分组展示；进程表之前）───────────────
+    s && Array.isArray(s.tags) && s.tags.length
+      ? React.createElement(TagGroups, { tags: s.tags, key: 'tags' })
       : null,
     // ── 进程表 ──────────────────────────────────────────────────────────────
     React.createElement(ProcsTable, { snap: s, key: 'procs' }),

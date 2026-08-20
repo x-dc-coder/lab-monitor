@@ -24,11 +24,12 @@ import { createRing } from './core/ring.js'
 import { createStateMachine, parsePs } from './core/state-machine.js'
 import { createBalancer, createThresholds } from './core/balancer.js'
 import { aggregateProcStats } from './core/proc-aggregator.js'
-import type { GroupStats, SystemStats } from './core/types.js'
+import type { GroupStats, ProcStat, SystemStats, TagGroup, TagRule } from './core/types.js'
 import {
   SAMPLE_MS,
   PS_INTERVAL_MS,
   THRESHOLD_DEFAULTS,
+  makeTagId,
   matchTrainFeature,
   normalizeCmdForMatch,
 } from './core/constants.js'
@@ -51,6 +52,12 @@ export interface LabMonitorConfig {
    * 来源：配置文件（settings.yaml 的 lab-monitor 段）静态基线 + lab_ctl watch 运行时动态合并。
    */
   watchProcs: string[]
+  /**
+   * 进程标签规则（2026-08-20 新增，A2 标签分组）：手动给进程打标签分组展示。
+   * 匹配 cmdline 全串正则（脚本形态天然覆盖——解释器进程 cmdline 含脚本路径）。
+   * 来源：settings.yaml（lab-monitor 段）静态基线 + lab_ctl tag 运行时动态合并。
+   */
+  tags: TagRule[]
 }
 
 /** dsh-settings 命名空间句柄（SettingsScope 子集：get/watch/update） */
@@ -241,6 +248,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     sampleMs: config.sampleMs ?? SAMPLE_MS,
     pollMs: config.pollMs ?? THRESHOLD_DEFAULTS.pollMs,
     watchProcs: Array.isArray(config.watchProcs) ? config.watchProcs.slice() : [],
+    tags: Array.isArray(config.tags) ? config.tags.slice() : [],
   }
 
   // ── 运行时 watchlist（2026-08-20：用户配置静态基线 ∪ lab_ctl watch 动态注册）──
@@ -248,6 +256,25 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   const runtimeWatch = new Set<string>()
   function watchSet(): string[] {
     return Array.from(new Set([...cfg.watchProcs, ...runtimeWatch]))
+  }
+
+  // ── 运行时标签规则（2026-08-20：静态基线为主，cfg.tags 为唯一来源；持久化由 settings 段承担）──
+  function tagSet(): TagRule[] {
+    return cfg.tags
+  }
+  /** cmdline 是否命中某标签规则（正则全串匹配；任一 pattern 命中即 true） */
+  function tagMatches(rule: TagRule, cmd: string): boolean {
+    if (!cmd || !rule || !Array.isArray(rule.patterns)) return false
+    for (const p of rule.patterns) {
+      if (!p) continue
+      try {
+        const re = new RegExp(p, 'i')
+        if (re.test(cmd)) return true
+      } catch (e) {
+        // 非法正则忽略（settings 校验兜底）
+      }
+    }
+    return false
   }
 
   // ── 状态容器（apply 内初始化，闭包共享）────────────────────────────────
@@ -316,10 +343,12 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       ring.push(pt)
       recentWindow.push(pt)
       while (recentWindow.length > 5) recentWindow.shift() // ≤10s 窗口（2s × 5）
-      const run = machine.cur()
-      if (run) {
+      // 2026-08-20（A2 多轨）：每个 running run 各自累计其运行窗口内的全局 GPU 指标
+      // （GPU 为共享资源，无法按 run 拆分；语义 = 该实验运行期间 GPU 的 util/显存峰值）
+      const runsNow = machine.all()
+      const g0 = pt.gpu && pt.gpu.length ? pt.gpu[0] : null
+      for (const run of runsNow) {
         const st = run.sampleStats || (run.sampleStats = { utilSum: 0, utilN: 0, utilMax: 0, memPeakMiB: 0 })
-        const g0 = pt.gpu && pt.gpu.length ? pt.gpu[0] : null
         if (g0 && typeof g0.utilPct === 'number') {
           st.utilSum += g0.utilPct
           st.utilN += 1
@@ -354,14 +383,17 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         pt.group = agg.group
         pt.system = agg.system
         pt.experimentActive = !!curRun
-        // summary 扩展（1.2）：实验组 vs 其他进程峰值（5s 粒度）
+        // summary 扩展（1.2）：实验组 vs 其他进程峰值（5s 粒度；主实验精确，并行实验同视图近似）
         if (curRun) {
           const st = curRun.sampleStats || (curRun.sampleStats = { utilSum: 0, utilN: 0, utilMax: 0, memPeakMiB: 0 })
           if (agg.group && typeof agg.group.memMiB === 'number' && agg.group.memMiB > (st.groupMemPeakMiB ?? 0)) st.groupMemPeakMiB = agg.group.memMiB
           if (agg.group && typeof agg.group.cpuPct === 'number' && agg.group.cpuPct > (st.groupCpuMax ?? 0)) st.groupCpuMax = agg.group.cpuPct
           if (agg.system && typeof agg.system.memMiB === 'number' && agg.system.memMiB > (st.otherMemPeakMiB ?? 0)) st.otherMemPeakMiB = agg.system.memMiB
         }
-        if (curRun && curRun.resultSeen) machine.tickGrace(curRun)
+        // 2026-08-20（A2 多轨）：每个 running run 的 grace 判定独立（配对 result 后进程仍活）
+        for (const r of machine.all()) {
+          if (r.resultSeen) machine.tickGrace(r)
+        }
       }
       // evaluate 前 refresh 最近点：group/system 只在 ps 周期 tick 写入，
       // 非 ps 周期 tick 的点回退最近一次 5s 聚合；experimentActive 实时判定（事件驱动 start/end）
@@ -371,7 +403,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         wLast.system = lastSystemStats
         wLast.experimentActive = !!machine.cur()
       }
-      balancer.evaluate(recentWindow, run ? run.runId : null)
+      // 2026-08-20（A2 多轨）：资源类告警归属主实验（cur）；experiment-crash 走 run 独立路径（conclude 已带 runId）
+      const mainRun = machine.cur()
+      balancer.evaluate(recentWindow, mainRun ? mainRun.runId : null)
     } catch (e) {
       console.error('[lab-monitor] 采样 tick 错误:', e)
     } finally {
@@ -467,10 +501,16 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     }
     const gpu = base.gpu || []
     const gpuState = gpu.length ? 'ok' : (base.sources && base.sources.gpu === 'unavailable' ? 'unavailable' : 'ok')
-    const exp = machine.snapshot()
+    const expView = machine.snapshot()
+    const exp = expView.main
+    const exps = expView.all
     // 1.2：实验进程组统计回填（最近一次 5s 聚合；快照 RPC 与 ps 周期解耦）
     if (exp) {
       exp.groupStats = lastGroupStats
+    }
+    // 2026-08-20（A2 多轨）：全部并行实验的 groupStats 一并回填（同一 5s 聚合视图）
+    for (const e of exps) {
+      if (!e.groupStats) e.groupStats = lastGroupStats
     }
     // 2026-08-20：watchProcs 命中标记（进程名 contains 关键词，大小写不敏感）
     const watchList = watchSet()
@@ -486,6 +526,43 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         }
       }
     }
+    // 2026-08-20（标签分组）：按标签规则聚合 procs（cmdline 正则匹配；组内聚合 GPU/CPU/内存）
+    const procsAll = prioritizeGpuProcs(base.procs || [], 15)
+    const tagGroups: TagGroup[] = []
+    const rules = tagSet()
+    if (rules.length && procsAll.length) {
+      for (const rule of rules) {
+        const pids: number[] = []
+        const members: ProcStat[] = []
+        for (const p of procsAll) {
+          if (p.cmd && tagMatches(rule, p.cmd)) {
+            pids.push(p.pid)
+            members.push({ pid: p.pid, cmd: p.cmd, cpuPct: typeof p.cpuPct === 'number' ? p.cpuPct : null, memMiB: typeof p.memMiB === 'number' ? p.memMiB : null, gpuUtilPct: typeof p.gpuUtilPct === 'number' ? p.gpuUtilPct : null })
+          }
+        }
+        if (!pids.length) continue
+        let gpuSum = 0, gpuN = 0, cpuSum = 0, cpuN = 0, memSum = 0, memN = 0
+        for (const m of members) {
+          if (typeof m.gpuUtilPct === 'number' && !Number.isNaN(m.gpuUtilPct)) { gpuSum += m.gpuUtilPct; gpuN++ }
+          if (typeof m.cpuPct === 'number' && !Number.isNaN(m.cpuPct)) { cpuSum += m.cpuPct; cpuN++ }
+          if (typeof m.memMiB === 'number' && !Number.isNaN(m.memMiB)) { memSum += m.memMiB; memN++ }
+        }
+        const tg: TagGroup = {
+          rule,
+          pids,
+          procs: members,
+          gpuUtilPct: gpuN ? Math.round(gpuSum / gpuN) : null,
+          cpuPct: cpuN ? Math.round(cpuSum / cpuN) : null,
+          memMiB: memN ? Math.round(memSum / memN) : null,
+        }
+        // kind=experiment 标签：附加归属实验 runId（多轨下可多个）
+        if (rule.kind === 'experiment') {
+          const runIds = exps.filter((e) => e.cmd && tagMatches(rule, e.cmd)).map((e) => e.runId)
+          if (runIds.length) tg.runIds = runIds
+        }
+        tagGroups.push(tg)
+      }
+    }
     const snap: MonitorSnapshot = {
       ts: Date.now(),
       platform: base.platform || 'linux',
@@ -499,12 +576,14 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       gpuState,
       cpu: base.cpu ? { percent: base.cpu.percent, cores: base.cpu.cores !== undefined ? base.cpu.cores : null } : { percent: null, cores: null },
       mem: base.mem ? { totalMiB: base.mem.totalMiB, availableMiB: base.mem.availableMiB } : { totalMiB: null, availableMiB: null },
-      procs: prioritizeGpuProcs(base.procs || [], 15),
+      procs: procsAll,
       system: lastSystemStats,
       watchedPids,
+      tags: tagGroups,
       alerts: balancer.snapshotAlerts(),
       alertsCriticalCount: balancer.count(),
       experiment: exp,
+      experiments: exps,
       callCount,
       ui: { betterSidebarVisible: uiVisible() },
     }
@@ -557,25 +636,39 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           pollMs: Schema.number().default(THRESHOLD_DEFAULTS.pollMs),
         }),
         watchProcs: Schema.array(Schema.string()).default([]),
+        // 2026-08-20（标签分组）：进程标签规则持久化
+        tags: Schema.array(Schema.object({
+          id: Schema.string(),
+          label: Schema.string(),
+          patterns: Schema.array(Schema.string()),
+          kind: Schema.union([Schema.const('experiment'), Schema.const('process')]),
+          color: Schema.any(),
+        })).default([]),
       })
       settingsScope = settingsSvc.register('lab-monitor', persistSchema, { applies: 'live' })
       // 读回持久化基线（重启后 lab_ctl 改的阈值 / watch 动态注册不再丢失）
-      const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[] } | null
+      const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[] } | null
       if (stored && stored.thresholds) thresholds.apply(stored.thresholds as never, true)
       if (stored && Array.isArray(stored.watchProcs)) {
         cfg.watchProcs = stored.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
       }
+      if (stored && Array.isArray(stored.tags)) {
+        cfg.tags = stored.tags.filter(isValidTagRule)
+      }
       // 外部修改（用户手改 settings.yaml / 其他配置面）实时生效
       if (typeof settingsScope.watch === 'function') {
         settingsScope.watch((next) => {
-          const v = next as { thresholds?: Partial<Thresholds>; watchProcs?: string[] } | null
+          const v = next as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[] } | null
           if (v && v.thresholds) thresholds.apply(v.thresholds as never, true)
           if (v && Array.isArray(v.watchProcs)) {
             cfg.watchProcs = v.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
           }
+          if (v && Array.isArray(v.tags)) {
+            cfg.tags = v.tags.filter(isValidTagRule)
+          }
         })
       }
-      console.log('[lab-monitor] 阈值/watchlist 持久化已启用（settings 命名空间 lab-monitor）')
+      console.log('[lab-monitor] 阈值/watchlist/标签持久化已启用（settings 命名空间 lab-monitor）')
     }
   } catch (e) {
     console.warn('[lab-monitor] settings 持久化不可用，回退内存模式（阈值/watchlist 重启即还原）:', (e as Error).message)
@@ -585,10 +678,26 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   function persistState() {
     if (!settingsScope || typeof settingsScope.update !== 'function') return
     try {
-      settingsScope.update({ thresholds: thresholds.get(), watchProcs: watchSet() })
+      settingsScope.update({ thresholds: thresholds.get(), watchProcs: watchSet(), tags: tagSet() })
     } catch (e) {
       console.warn('[lab-monitor] 设置持久化写入失败（保留内存值）:', (e as Error).message)
     }
+  }
+
+  /** 标签规则合法性过滤（settings 读回 / lab_ctl tag add 的守卫） */
+  function isValidTagRule(t: unknown): t is TagRule {
+    if (!t || typeof t !== 'object') return false
+    const r = t as Partial<TagRule>
+    if (typeof r.id !== 'string' || !r.id) return false
+    if (typeof r.label !== 'string' || !r.label) return false
+    if (!Array.isArray(r.patterns) || !r.patterns.length) return false
+    for (const p of r.patterns) {
+      if (typeof p !== 'string' || !p) return false
+      try { new RegExp(p) } catch (e) { return false }
+    }
+    if (r.kind !== 'experiment' && r.kind !== 'process') return false
+    if (r.color !== undefined && typeof r.color !== 'string') return false
+    return true
   }
 
   // ── RPC 方法集合（webServer HTTP 数据面）───────────────────────────────
@@ -627,6 +736,50 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   }
   function rpcAdvice() {
     return balancer.advice()
+  }
+  // 2026-08-20（标签分组）：lab_ctl tag —— add（label+patterns 或 label+pid 快速打标）/ remove / list
+  // 规则存 cfg.tags（settings 持久化唯一来源；不引入运行时副本避免重复）
+  function rpcTag(a: Record<string, unknown>) {
+    const op = a.op === undefined || a.op === null ? 'list' : String(a.op)
+    if (op === 'list') {
+      return { ok: true, tags: tagSet(), matches: buildSnapshot().tags || [] }
+    }
+    if (op === 'add') {
+      const label = typeof a.label === 'string' && a.label.trim() ? a.label.trim() : null
+      if (!label) return { ok: false, error: 'tag add 需要 label' }
+      const kind = a.kind === 'experiment' ? 'experiment' : 'process'
+      const color = typeof a.color === 'string' && a.color.trim() ? a.color.trim() : undefined
+      let patterns: string[] = []
+      // 快速打标：pid → 取当前进程 cmdline 生成 pattern（正则转义；等价规则式，重启后仍命中）
+      if (typeof a.pid === 'number' && a.pid > 0) {
+        const procsAll = backendState.lastSnap && Array.isArray((backendState.lastSnap as { procs?: unknown[] }).procs) ? (backendState.lastSnap as { procs: { pid: number; cmd: string }[] }).procs : []
+        const hit = procsAll.find((p) => p.pid === a.pid)
+        if (!hit || !hit.cmd) return { ok: false, error: 'pid ' + a.pid + ' 不在当前进程表（进程可能已退出，请用 patterns 打标）' }
+        const esc = hit.cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        patterns = [esc]
+      } else if (Array.isArray(a.patterns) && a.patterns.length) {
+        patterns = a.patterns.filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+      }
+      if (!patterns.length) return { ok: false, error: 'tag add 需要 patterns 或 pid（cmdline 正则，如 "python.*train"）' }
+      const rule: TagRule = { id: makeTagId(), label, patterns, kind, color }
+      if (!isValidTagRule(rule)) return { ok: false, error: '标签规则非法（pattern 正则或字段类型错误）' }
+      cfg.tags.push(rule)
+      persistState()
+      // 命中预览
+      const snapNow = buildSnapshot()
+      const tg = (snapNow.tags || []).find((t) => t.rule.id === rule.id)
+      return { ok: true, state: 'tag-added', rule, matchedPids: tg ? tg.pids : [], matchedProcs: tg ? tg.procs.length : 0 }
+    }
+    if (op === 'remove') {
+      const id = typeof a.id === 'string' && a.id ? a.id : null
+      if (!id) return { ok: false, error: 'tag remove 需要 id' }
+      const idx = cfg.tags.findIndex((t) => t.id === id)
+      if (idx === -1) return { ok: true, state: 'tag-not-found', id }
+      cfg.tags.splice(idx, 1)
+      persistState()
+      return { ok: true, state: 'tag-removed', id }
+    }
+    return { ok: false, error: '未知 tag 操作: ' + op }
   }
 
   // ── webServer HTTP 路由（替代动态版 harness.handle RPC）───────────────
@@ -739,9 +892,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         toolsService.register(
           defineTool({
             name: 'lab_ctl',
-            description: '控制 Lab Monitor 监控/告警引擎（start/pause/resume/set-threshold/watch）。护栏：只控制监控引擎，绝不触碰实验进程。',
+            description: '控制 Lab Monitor 监控/告警引擎（start/pause/resume/set-threshold/watch/tag）。护栏：只控制监控引擎，绝不触碰实验进程。',
             parameters: {
-              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch'], description: '操作类型' },
+              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch', 'tag'], description: '操作类型' },
               keywords: {
                 type: 'array',
                 items: { type: 'string' },
@@ -758,12 +911,26 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                 },
                 description: 'set-threshold 时的阈值',
               },
+              tag: {
+                type: 'object',
+                additionalProperties: true,
+                properties: {
+                  op: { type: 'string', enum: ['add', 'remove', 'list'], description: 'add=打标签（label+patterns 或 label+pid）；remove=按 id 删除；list=列出全部' },
+                  label: { type: 'string', description: '标签组显示名（如 "推理服务"、"训练实验A"）' },
+                  patterns: { type: 'array', items: { type: 'string' }, description: 'cmdline 正则列表（任一命中即归属；脚本形态天然覆盖，如 "python.*train"、"deploy\\.ps1"）' },
+                  pid: { type: 'number', description: '从当前进程列表快速打标：按 pid 取该进程 cmdline 自动生成 pattern（等价于规则式，重启后仍命中）' },
+                  kind: { type: 'string', enum: ['experiment', 'process'], description: 'experiment=实验型（组内展示状态/时长/曲线）；process=进程型（只展示资源占用），默认 process' },
+                  color: { type: 'string', description: '展示色（可选，16 进制如 #3964fe）' },
+                  id: { type: 'string', description: 'remove 时的规则 id' },
+                },
+                description: 'tag 操作的参数（action=tag 时使用）',
+              },
             },
             output: {
               schema: { type: 'json' },
               render: (_args: Record<string, unknown>, value: unknown) => renderText(value),
             },
-            async execute(args: { action?: string; keywords?: string[]; thresholds?: Record<string, unknown> }) {
+            async execute(args: { action?: string; keywords?: string[]; thresholds?: Record<string, unknown>; tag?: Record<string, unknown> }) {
               const a = args || {}
               if (a.action === 'watch') {
                 const kws = Array.isArray(a.keywords) ? a.keywords.filter((k) => typeof k === 'string' && k.trim()) : []
@@ -783,6 +950,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                 }
                 // 1.2：写阈值时返回当前拆分统计（快照语义，Agent 设置前可见证据）
                 return sanitizeJson({ ok: true, applied: rpcSetThresholds(thr).applied, system: lastSystemStats }) as never
+              }
+              if (a.action === 'tag') {
+                return sanitizeJson(rpcTag(a.tag || {})) as never
               }
               return { ok: true, state: rpcControl({ action: a.action }).state } as never
             },

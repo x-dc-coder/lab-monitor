@@ -67,6 +67,8 @@ export interface RunRecord {
   graceTicks: number
   alerting: boolean
   procGone?: boolean
+  /** 2026-08-20：per-run 进程消失连续计数（多轨化：从 state 级移入，独立判定 crashed） */
+  pidMissingStreak: number
   sampleStats: { utilSum: number; utilN: number; utilMax: number; memPeakMiB: number; groupCpuMax?: number | null; groupMemPeakMiB?: number | null; otherMemPeakMiB?: number | null } | null
   summary?: { gpuUtilMax: number | null; gpuUtilAvg: number | null; memPeak: number | null; durationSec: number; dataPartial: boolean; groupCpuMax?: number | null; groupMemPeakMiB?: number | null; otherMemPeakMiB?: number | null }
 }
@@ -100,6 +102,32 @@ export interface Alert {
   runId: string | null
 }
 
+/** 进程标签规则（2026-08-20 用户需求：手动对进程打标签分组展示；settings 持久化） */
+export interface TagRule {
+  /** 稳定 id（uuid，lab_ctl tag add 生成） */
+  id: string
+  /** 分组显示名 */
+  label: string
+  /** cmdline 正则列表（任一命中即归属；匹配全串，脚本形态天然覆盖——解释器进程 cmdline 含脚本路径） */
+  patterns: string[]
+  /** experiment=实验型（组内展示状态/时长/曲线）；process=进程型（组内只展示资源占用） */
+  kind: 'experiment' | 'process'
+  /** 展示色（可选，16 进制如 #3964fe） */
+  color?: string
+}
+
+/** 标签组聚合（snapshot 输出：命中进程 + 聚合统计） */
+export interface TagGroup {
+  rule: TagRule
+  pids: number[]
+  procs: ProcStat[]
+  gpuUtilPct?: number | null
+  cpuPct?: number | null
+  memMiB?: number | null
+  /** 归属本组的实验 runId 列表（kind=experiment 且实验启动时命中规则；多轨下可多个） */
+  runIds?: string[]
+}
+
 /** 完整对外快照（lab-protocol/1.2：+system；experiment +procGroup/+groupStats） */
 export interface MonitorSnapshot {
   ts: number
@@ -114,6 +142,10 @@ export interface MonitorSnapshot {
   system: SystemStats | null
   /** 2026-08-20：命中 watchProcs 关键词的进程 pid 列表（面板高亮+置顶；空=未配置/未命中） */
   watchedPids?: number[]
+  /** 2026-08-20（A2 多轨）：全部 running 实验（experiment 保留为主实验=最近 start；本字段承载并行） */
+  experiments?: ExperimentSnapshot[]
+  /** 2026-08-20（标签分组）：用户标签规则命中聚合（按规则分组展示） */
+  tags?: TagGroup[]
   alerts: Alert[]
   alertsCriticalCount: number
   experiment: ExperimentSnapshot | null

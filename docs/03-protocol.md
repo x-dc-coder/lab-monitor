@@ -4,7 +4,7 @@
 
 ## 1. 版本与变更规则
 
-- 契约版本：`lab-protocol/1.2`（v1.4：+platform/sources，指标命名规范化；**1.2：进程级跟踪（2026-08-20）**——`procs[].ppid/gpuUtilPct`、`experiment.procGroup/groupStats`、`snapshot.system`、`alerts[].evidence`、`history[].groupCpu/groupMem`；**纯增量追加字段，老 client 照常工作**）；
+- 契约版本：`lab-protocol/1.2`（v1.4：+platform/sources，指标命名规范化；**1.2：进程级跟踪（2026-08-20）**——`procs[].ppid/gpuUtilPct`、`experiment.procGroup/groupStats`、`snapshot.system`、`alerts[].evidence`、`history[].groupCpu/groupMem`；**纯增量追加字段，老 client 照常工作**；**1.3（2026-08-20，A2 多轨+标签）：新增 `experiments[]`（全部并行实验，`experiment` 保留为主实验）、`tags[]`（标签分组聚合）——继续纯增量追加**）；
 - JSON schema 追加字段向后兼容；**删除/改型字段 = 破坏性变更**，须先更新本文件与计划，再通知 D-A/D-B1；
 - 所有载荷为**纯 JSON**（host.call 只驮 JSON；函数/undefined/类实例会被 codec 拒收，t5 结论②）。
 
@@ -46,6 +46,10 @@
   "experiment": { "runId": "run-20260818-001", "state": "running", "cmd": "python train_demo.py",
                   "pid": 1234, "procGroup": [1234, 5678], "groupStats": { "cpuPct": null, "memMiB": 2938, "memberCount": 2, "alive": true, "gpuUtilPct": null, "gpuMemMiB": null, "members": [] },
                   "startTs": 1787030000000, "summary": null },
+  "experiments": [ { "runId": "run-20260818-002", "state": "running", "cmd": "python train_b.py", "pid": 5679, "startTs": 1787030006000 } ],
+  "tags": [ { "rule": { "id": "tag-20260820-001", "label": "推理服务", "patterns": ["llama-server"], "kind": "process", "color": "#16a34a" },
+              "pids": [5555], "procs": [ { "pid": 5555, "cmd": "llama-server", "cpuPct": null, "memMiB": 50000, "gpuUtilPct": 45 } ],
+              "gpuUtilPct": 45, "cpuPct": null, "memMiB": 50000 } ],
   "callCount": 42,
   "ui": { "betterSidebarVisible": true }
 }
@@ -63,7 +67,9 @@
 | `system` | **（1.2）非实验组统计**：`{ cpuPct, memMiB, gpuUtilPct, gpuMemMiB(预留), topN[5] }`——系统其他进程聚合（实验成员按 pid 差集排除） |
 | `alerts[]` | 最近告警列表（含分级/规则/建议动作；**1.2：`evidence.procs[]` 进程级证据，CPU/内存为主、GPU 每进程辅助**） |
 | `alertsCriticalCount` | **host 预算的 CRITICAL 计数**（badge 直读，T2-2） |
-| `experiment` | 当前实验（状态机输出；idle 时为 null） |
+| `experiment` | 主实验（= 最近 start 的 running run，状态机输出；idle 时为 null） |
+| `experiments` | **（1.3，A2 多轨）全部 running 实验数组**——`experiment` 保留为主实验（向后兼容），本字段承载并行实验（多轨上限 4） |
+| `tags` | **（1.3，标签分组）用户标签规则命中聚合数组**——`{ rule: {id,label,patterns,kind,color}, pids[], procs[], gpuUtilPct, cpuPct, memMiB, runIds? }`；`kind=experiment` 时 `runIds` 附归属实验；匹配 cmdline 正则（脚本形态天然覆盖） |
 | `callCount` | **host 侧 RPC 调用计数器**（P0 验收 2 断言手段，T4-2） |
 | `ui.betterSidebarVisible` | **host 半经 `settings.describe` 探测 aionui-panel 互斥标志**（`aionui-panel.rightPanel === 'aionui-panel'` → false；t6 §3.2 判据）+ 监听 `settings/updated` 实时刷新；出口适配层据此决定 ②/③ 切换（t6 §4 规避方案 1/2） |
 

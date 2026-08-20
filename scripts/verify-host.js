@@ -296,6 +296,59 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   assert(snap.alertsCriticalCount >= 1, 'crashed 触发 critical 告警（alertsCriticalCount>=1）', snap.alertsCriticalCount)
   assert(Array.isArray(snap.alerts) && snap.alerts.some((a) => a.rule === 'experiment-crash'), '告警列表含 experiment-crash', snap.alerts && snap.alerts[0])
 
+  console.log('\n[B3] 多轨并行（A2：并行跟踪上限 4 + 各自独立判定）')
+  // 实验 A start → pid 关联 101
+  await pre({ name: 'bash', arguments: { command: 'python train_a.py --epochs 5' } }, async () => ({ kind: 'allow' }))
+  FAKE.psLines = ['101 1 20.0 12000 python train_a.py --epochs 5', '8888 1 0.5 300000 node server.js']
+  await tick(3)
+  snap = await G('snapshot')({})
+  assert(snap.experiment && snap.experiment.runId, '实验 A running（主实验）', snap.experiment && snap.experiment.runId)
+  const runA = snap.experiment.runId
+  // 实验 B start（新命令）→ 并行，不再归档 A
+  await pre({ name: 'bash', arguments: { command: 'python train_b.py --epochs 5' } }, async () => ({ kind: 'allow' }))
+  FAKE.psLines = ['101 1 20.0 12000 python train_a.py --epochs 5', '102 1 15.0 10000 python train_b.py --epochs 5', '8888 1 0.5 300000 node server.js']
+  await tick(3)
+  snap = await G('snapshot')({})
+  assert(Array.isArray(snap.experiments) && snap.experiments.length === 2, '多轨：experiments 数组含 2 个并行实验', snap.experiments && snap.experiments.length)
+  assert(snap.experiment && snap.experiment.runId !== runA, '主实验切换为最近 start（实验 B）', snap.experiment && snap.experiment.runId)
+  assert(snap.experiments.some((e) => e.runId === runA), 'experiments 仍含实验 A（不再 aborted）', snap.experiments && snap.experiments.map((e) => e.runId))
+  const runB = snap.experiment.runId
+  // 实验 B 进程消失 ≥2 ps 周期 → B crashed，A 不受影响
+  FAKE.psLines = ['101 1 20.0 12000 python train_a.py --epochs 5', '8888 1 0.5 300000 node server.js']
+  await tick(3) // ps 周期 1：B streak 1
+  await tick(3) // ps 周期 2：B streak 2 → crashed
+  snap = await G('snapshot')({})
+  assert(Array.isArray(snap.experiments) && snap.experiments.length === 1 && snap.experiments[0].runId === runA,
+    'B crashed 后 experiments 只剩 A（独立判定）', snap.experiments && snap.experiments.map((e) => e.runId))
+  assert(snap.experiment && snap.experiment.runId === runA, '主实验回到 A', snap.experiment && snap.experiment.runId)
+  // A done：配对 result + 进程消失
+  FAKE.psLines = []
+  res({ name: 'bash', arguments: { command: 'python train_a.py --epochs 5' } }, { isError: false, content: [] })
+  await tick(3)
+  snap = await G('snapshot')({})
+  assert(snap.experiment === null && (!Array.isArray(snap.experiments) || snap.experiments.length === 0), 'A done → 无 running 实验', snap.experiment)
+  // 上限 4：连续 start 5 个 → 最旧 aborted，保持 ≤4 并行
+  const runIds5 = []
+  for (let i = 1; i <= 5; i++) {
+    await pre({ name: 'bash', arguments: { command: 'python train_cap' + i + '.py --epochs 1' } }, async () => ({ kind: 'allow' }))
+    FAKE.psLines = [String(1000 + i) + ' 1 10.0 9000 python train_cap' + i + '.py --epochs 1', '8888 1 0.5 300000 node server.js']
+    await tick(3)
+    snap = await G('snapshot')({})
+    if (snap.experiment) runIds5.push(snap.experiment.runId)
+  }
+  assert(runIds5.length === 5, '5 次 start 均返回 running 记录（第 5 次触发上限归档）', runIds5.length)
+  snap = await G('snapshot')({})
+  assert(Array.isArray(snap.experiments) && snap.experiments.length <= 4, '并行上限 4：experiments ≤ 4', snap.experiments && snap.experiments.length)
+  // 清理：全部结束（供后续场景干净起点）
+  FAKE.psLines = []
+  for (const rid of runIds5) {
+    // 各实验按 cmd 配对 result（runId 归属链路：markResult 无 runId 时指纹匹配主实验）
+    res({ name: 'bash', arguments: { command: '' } }, { isError: false, content: [] })
+  }
+  await tick(6)
+  snap = await G('snapshot')({})
+  assert(snap.experiment === null, '多轨场景清理完毕（无 running）', snap.experiment)
+
   console.log('\n[C] 平衡引擎 1.2：归属仲裁三分支（防误报核心）')
   // 分支③：无实验 + 整卡显存高 → other-occupancy(info)，不误报实验 oom
   FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 95 %, 24000 MiB, 24576 MiB, 81, 350.00 W' // mem 97.6% ≥ memWarn 95
@@ -436,6 +489,41 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   assert(vWatch && vWatch.ok === true && Array.isArray(vWatch.matchedPids), 'lab_ctl watch → matchedPids 数组', vWatch)
   assert(lmNs && lmNs.user && Array.isArray(lmNs.user.watchProcs) && lmNs.user.watchProcs.indexOf('llama-server') !== -1,
     'lab_ctl watch 写回 settings.user.watchProcs', lmNs && lmNs.user && lmNs.user.watchProcs)
+
+  // 2026-08-20（A2 标签分组）：lab_ctl tag —— add（正则）/ add（pid 快速打标）/ list / remove + 快照 tags 聚合
+  console.log('\n[E2] 标签分组（A2：规则式打标签 → 分组聚合展示）')
+  FAKE.tasklist = '"python.exe","1234","Console","1","12,345 K"\n"llama-server.exe","5555","Console","1","50,000 K"\n"chrome.exe","9999","Console","1","20,000 K"'
+  await tick(1)
+  const vTag1 = await tCtl.execute({ action: 'tag', tag: { op: 'add', label: '推理服务', patterns: ['llama-server'], kind: 'process', color: '#16a34a' } })
+  assert(vTag1 && vTag1.ok === true && vTag1.rule && vTag1.rule.id, 'lab_ctl tag add（正则）→ rule 生成', vTag1 && vTag1.rule)
+  assert(Array.isArray(vTag1.matchedPids) && vTag1.matchedPids.indexOf(5555) !== -1, 'tag add 命中 llama-server(5555)', vTag1.matchedPids)
+  // pid 快速打标：从当前进程表取 pid 1234（python.exe）生成规则
+  const vTag2 = await tCtl.execute({ action: 'tag', tag: { op: 'add', label: '训练脚本', pid: 1234, kind: 'experiment' } })
+  assert(vTag2 && vTag2.ok === true && Array.isArray(vTag2.rule.patterns) && vTag2.rule.patterns.length === 1,
+    'tag add（pid 快速打标）→ 自动生成 cmdline 规则', vTag2 && vTag2.rule && vTag2.rule.patterns)
+  assert(vTag2.matchedPids.indexOf(1234) !== -1, 'pid 打标立即命中原进程', vTag2.matchedPids)
+  // 快照 tags 聚合
+  snap = await G('snapshot')({})
+  assert(Array.isArray(snap.tags) && snap.tags.length >= 2, '快照 tags 含 ≥2 个标签组', snap.tags && snap.tags.length)
+  const tgSvc = snap.tags.find((t) => t.rule && t.rule.label === '推理服务')
+  assert(tgSvc && tgSvc.pids.indexOf(5555) !== -1, '推理服务组含 llama-server(5555)', tgSvc && tgSvc.pids)
+  assert(tgSvc && typeof tgSvc.memMiB === 'number' && tgSvc.memMiB > 0, '推理服务组聚合 memMiB 存在（tasklist 无 CPU% 属正常）', tgSvc && tgSvc.memMiB)
+  const tgExp = snap.tags.find((t) => t.rule && t.rule.label === '训练脚本')
+  assert(tgExp && tgExp.rule.kind === 'experiment', '训练脚本组 kind=experiment', tgExp && tgExp.rule && tgExp.rule.kind)
+  // 持久化写回 settings
+  assert(lmNs && lmNs.user && Array.isArray(lmNs.user.tags) && lmNs.user.tags.length >= 2,
+    'lab_ctl tag 写回 settings.user.tags', lmNs && lmNs.user && lmNs.user.tags && lmNs.user.tags.length)
+  // list + remove
+  const vTagList = await tCtl.execute({ action: 'tag', tag: { op: 'list' } })
+  assert(vTagList && vTagList.ok === true && Array.isArray(vTagList.tags) && vTagList.tags.length >= 2, 'lab_ctl tag list', vTagList && vTagList.tags && vTagList.tags.length)
+  const firstId = vTag1.rule.id
+  const vTagRm = await tCtl.execute({ action: 'tag', tag: { op: 'remove', id: firstId } })
+  assert(vTagRm && vTagRm.ok === true && vTagRm.state === 'tag-removed', 'lab_ctl tag remove', vTagRm)
+  const vTagList2 = await tCtl.execute({ action: 'tag', tag: { op: 'list' } })
+  assert(vTagList2 && vTagList2.tags.every((t) => t.id !== firstId), 'remove 后规则不存在', vTagList2 && vTagList2.tags && vTagList2.tags.map((t) => t.id))
+  // 非法输入守卫
+  const vTagBad = await tCtl.execute({ action: 'tag', tag: { op: 'add', label: '坏规则', patterns: ['['] } })
+  assert(vTagBad && vTagBad.ok === false, '非法正则 tag add 拒绝', vTagBad)
   // 重启模拟：新 fiber 重新 apply，settings 磁盘文档（documents）保留 → 阈值/watchlist 自动恢复
   const ctxd3 = makeCtx()
   // 只预置持久化文档层（user 层数据）；namespaces 留空让新实例 register 时从 documents 重建

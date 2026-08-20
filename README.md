@@ -226,6 +226,32 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 
 > 注意：1/2/4 的 **host 半改动需 DSH 重启生效**（进程内加载旧 lib/index.js）；3 为 client 半改动，浏览器刷新即生效。
 
+### V2.3 多轨实验 + 标签分组（2026-08-20，A2 实施，需求讨论后落地）
+
+1. **多轨实验并行跟踪（A2，原 R-2「多轨并存留 v2」）**：
+   - `state-machine` 单轨 → 多轨：`runs: Map<runId, RunRecord>` 并行跟踪，上限 `MAX_PARALLEL_RUNS=4`
+     （满 4 时新 start 归档最旧 running 为 aborted；v1「新 start 即归档旧 run」语义废弃，P1 验收 7 已更新）；
+   - **per-run 独立判定**：`pidMissingStreak` 移入 RunRecord，每个实验各自 findAliveProc + BFS 组扩张 +
+     done/crashed 双确认，互不干扰；
+   - **result 归属**：`markResult(paired, runId?)`——runId 精确归属优先，无 runId 时指纹匹配主实验
+     （T1-2 复用）；**追踪主键 = runId + cmdline 指纹，pid 为关联结果**（实验重启/pid 变化自动重关联，R3）；
+   - 协议：`snapshot.experiment` 保留为主实验（最近 start），新增 `experiments[]` 承载全部并行实验
+     （向后兼容，老 client 照常工作）。
+2. **标签分组（用户需求：手动打标签分组展示——系统固定开销/日常客户端/脚本进程）**：
+   - `TagRule { id, label, patterns[], kind: 'experiment'|'process', color? }`——**cmdline 正则匹配**，
+     脚本形态天然覆盖（ps/tasklist 看到的是解释器进程，脚本路径在 cmdline：`python E:\exp\train.py`、
+     `powershell -File deploy.ps1` 均按 cmdline 特征命中）；
+   - **`lab_ctl tag` 三操作**：`add`（label + patterns 正则，或 label + pid 快速打标——自动提取
+     该进程 cmdline 生成规则，等价规则式，重启后仍命中）/ `remove` / `list`；规则存 settings
+     持久化（lab-monitor 命名空间 `tags` 键）；
+   - 快照 `tags[]` 聚合：每组命中 pids/procs + GPU/CPU/内存聚合；`kind=experiment` 附归属实验 runIds；
+   - UI：实验状态块多轨展示（主实验 + 并行列表，各带状态/时长/pid/cmd）；标签分组卡片在进程表前
+     （experiment 组显示状态/时长/曲线，process 组显示资源占用，组头色点 + kind 徽标 + 聚合统计）。
+3. **测试**：verify-host [B3]（多轨：并行 2 实验独立判定、主实验切换、上限 4 归档、清理）+ [E2]
+   （标签：add 正则/pid 快速打标/list/remove/非法正则守卫/持久化）；mock-test 全绿。
+
+> 注意：本段 **host 半改动（state-machine/协议/tag 引擎）需 DSH 重启生效**；client 半（实验块/标签分组 UI）浏览器刷新即生效。
+
 ## 未完成项清单（2026-08-20 对照 PLAN v1.4.5 + 04-milestones）
 
 > 对照依据：PLAN §0 三层组合 / §1 目录树 / §6 风险表 / §4 验收清单；04-milestones 勾选状态。
@@ -236,7 +262,7 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 | # | 未完成项 | 文档依据 | 现状 |
 |---|---|---|---|
 | A1 | ~~指挥层 Agent 预设 lab-commander~~ → **使用文档**（lab_status/lab_advice/lab_ctl 用法手册） | PLAN §0 三层组合第 2 层、§1 目录树 | 🔶 **2026-08-20 用户决策：不做 Agent 预设**（插件功能未完善，预设无收益）；改为使用文档形式；prompt 注入增强待讨论（KV 缓存影响） |
-| A2 | **多实验并行跟踪**（R-2「多轨并存留 v2」） | 风险 11 | 📋 **方案已对齐（2026-08-20）**：兼容协议（experiment 保留 + experiments[]）/ 上限 4 / runId 优先+指纹回退——待实施 |
+| A2 | **多实验并行跟踪**（R-2「多轨并存留 v2」） | 风险 11 | ✅ **2026-08-20 实施完成（V2.3）**：多轨（上限 4 + per-run 判定 + runId 归属）+ 标签分组（规则式打标 + lab_ctl tag + tags 聚合 + UI 分组展示）；verify-host [B3]/[E2] 全绿 |
 | A3 | webServer 自托管面板（出口④） | 风险 14 + §3.2.4（「v2 前置」） | 仅实现 HTTP 数据面 `/lab-monitor/api/*`；自托管 HTML 面板未实现 |
 | A4 | SSE `/lab/events` 远端扩展 | README v2 演进表「webServer SSE /lab/events（手机端/对接 monitor-panel）」 | 源码无 SSE/EventSource 实现 |
 

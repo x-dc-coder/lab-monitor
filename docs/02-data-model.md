@@ -55,17 +55,18 @@ idle ──(start 命中)──► running ──(配对 result + 进程消失)�
   ▲                      │  │
   └──────────────────────┤  └──(pid 消失 ≥2 ps 周期且无配对 result)──► crashed
                          └──(平衡引擎 critical)──► alerting ──(恢复)──► running
-running 期间新 start 命中 ──► 旧 run 自动归档 aborted（单实验跟踪，R-2）
+2026-08-20（A2 多轨）：running 期间新 start 命中 ──► 并行跟踪（上限 MAX_PARALLEL_RUNS=4）
+  并行满 4 时 ──► 最旧 running 归档 aborted（v1 的「新 start 即归档旧 run」已废弃）
 ```
 
 | 状态 | 含义 | 进入条件 |
 |---|---|---|
-| `idle` | 无实验 | 初始 / 实验结束归档后 |
+| `idle` | 无实验 | 初始 / 全部实验结束归档后 |
 | `running` | 实验执行中 | ① start 命中（见 3.2） |
 | `done` | 正常结束 | ③ 配对 result + 进程消失**双确认**（见 3.3） |
 | `crashed` | 异常退出 | ④ pid 消失（连续 ≥2 个 ps 周期 = 10~15s 无存活）且无配对 result |
 | `alerting` | 告警中 | 平衡引擎触发 critical 时置位，恢复后回 running |
-| `aborted` | 被新 run 顶替归档 | running 期间新 start 命中（R-2） |
+| `aborted` | 被顶替归档 | 并行达到上限 4 时最旧 running 被新 start 顶替归档 |
 
 ### 3.2 start 判定与 pid 关联链路（T1-1）
 
@@ -82,10 +83,14 @@ running 期间新 start 命中 ──► 旧 run 自动归档 aborted（单实�
 - **kill 不误判 done**：kill 实验进程走 crashed 路径——kill 自身的 result 因不配对被忽略（P1 验收 1 成立前提）；
 - 规则定稿进本文件（§3.3），实现时 hooks.js/state-machine.js 按此编码。
 
-### 3.4 单实验跟踪约束（R-2）
+### 3.4 多轨并行跟踪（A2，2026-08-20 实施）
 
-- v1 定「**单实验跟踪**」：running 期间新 start 命中 → 旧 run 自动归档 `aborted`，**无双 running 并存**（P1 验收 7）；
-- 多轨并存（按 runId 多实验并行跟踪）留 v2。
+- **v1（单实验跟踪）**：running 期间新 start 命中 → 旧 run 自动归档 `aborted`，**无双 running 并存**（P1 验收 7 旧语义）；
+- **v2（多轨，2026-08-20）**：`state.runs: Map<runId, RunRecord>` 并行跟踪，**并行上限 `MAX_PARALLEL_RUNS=4`**——满 4 时新 start 归档**最旧** running 为 aborted；
+- **per-run 独立判定**：`pidMissingStreak` 移入 RunRecord，每个 running run 各自 findAliveProc + BFS 组扩张 + done/crashed 双确认，互不干扰；
+- **result 归属**：`markResult(paired, runId?)`——runId 精确归属优先；无 runId 时按 cmd 指纹匹配主实验（cur = 最近 start 的 running）；
+- **主实验语义**：`cur()` 返回最近 start 的 running run（向后兼容 `experimentActive`/`experiment` 单对象字段）；
+- **追踪主键**：runId（每次 start 新 runId）+ cmdline 指纹（pid 为关联结果，重启自动重关联）。
 
 ## 4. 实验记录（run 记录数组）
 

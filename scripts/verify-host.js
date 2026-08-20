@@ -53,6 +53,7 @@ function makeCtx() {
   // documents = 磁盘文档（跨「DSH 重启」保留的用户层）；namespaces = 本进程注册表。
   // register 读取 documents 初始化 user；update 双向写（reg.user + documents）。
   const settingsMock = {
+    available: true, // M4 重探测试：false → ctx.get('settings') 返回 undefined（服务未就绪）
     documents: {}, // ns -> user 层（模拟 DSH settings 的磁盘持久化文档）
     namespaces: {}, // ns -> { schema, user, resolved }
     get(ns) {
@@ -127,7 +128,8 @@ function makeCtx() {
   const ctx = {
     shell,
     get(name) {
-      if (name === 'settings') return settingsMock
+      // 2026-08-20（M4 重探测试）：settingsAvailable=false 模拟 settings 服务晚于 apply 就绪
+      if (name === 'settings') return settingsMock.available === false ? undefined : settingsMock
       if (name === 'systemPrompt') return promptService
       return undefined
     },
@@ -137,6 +139,7 @@ function makeCtx() {
     },
     interval(fn, ms) { const rec = { fn, ms, disposed: false }; intervals.push(rec); return () => { rec.disposed = true } },
     timeout(fn, ms) { const t = setTimeout(fn, ms); timeouts.push(t); return () => { clearTimeout(t) } },
+    setTimeout(fn, ms) { const t = setTimeout(fn, ms); timeouts.push(t); return () => { clearTimeout(t) } },
     effect(fn, label) { const d = fn() || (() => {}); teardowns.push(d); return d },
   }
   return { ctx, intervals, events, teardowns, promptState, timeouts, settingsMock, promptService }
@@ -449,6 +452,24 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   assert(!!lmNs, 'settings 命名空间 lab-monitor 已注册（settings.register 落地）')
   assert(lmNs && lmNs.user && lmNs.user.thresholds && lmNs.user.thresholds.memWarn === 80,
     'setThresholds 写回 settings.user.thresholds（memWarn=80）', lmNs && lmNs.user && lmNs.user.thresholds)
+
+  console.log('\n[E3] M4 settings 服务延迟就绪 → 重探后持久化启用（2026-08-20 实测修复）')
+  // 场景：settings 服务晚于插件 apply（ctx.get('settings') 首次 undefined）→ 500ms 重探
+  const ctxdM4 = makeCtx()
+  ctxdM4.settingsMock.available = false // 服务未就绪
+  const HM4 = makeHarness(ctxdM4.ctx, ctxdM4.settingsMock, ctxdM4.promptService)
+  plugin.apply(ctxdM4.ctx, {})
+  assert(!ctxdM4.settingsMock.namespaces['lab-monitor'], '服务未就绪 → 首次 register 未执行', !!ctxdM4.settingsMock.namespaces['lab-monitor'])
+  // 模拟服务 600ms 后就绪（首次探针 500ms 触发时已可用）
+  setTimeout(() => { ctxdM4.settingsMock.available = true }, 600)
+  await new Promise((r) => setTimeout(r, 1400)) // 等待重探（500ms×2）
+  assert(!!ctxdM4.settingsMock.namespaces['lab-monitor'], '重探后 settings 命名空间 lab-monitor 注册成功', !!ctxdM4.settingsMock.namespaces['lab-monitor'])
+  // 重探后持久化可用：tag add 写回
+  const tCtlM4 = HM4.toolDefs.find((t) => t.name === 'lab_ctl')
+  const vTagM4 = await tCtlM4.execute({ action: 'tag', tag: { op: 'add', label: 'M4重探', patterns: ['never-match'], kind: 'process' } })
+  assert(vTagM4 && vTagM4.ok === true, '重探后 lab_ctl tag add 可用', vTagM4 && vTagM4.ok)
+  assert(ctxdM4.settingsMock.documents['lab-monitor'] && Array.isArray(ctxdM4.settingsMock.documents['lab-monitor'].tags) && ctxdM4.settingsMock.documents['lab-monitor'].tags.length >= 1,
+    '重探后 tag 写回 settings documents（持久化链路通）', ctxdM4.settingsMock.documents['lab-monitor'] && ctxdM4.settingsMock.documents['lab-monitor'].tags && ctxdM4.settingsMock.documents['lab-monitor'].tags.length)
 
   console.log('\n[E] 工具执行 + prompt 注入')
   const tStatus = H.toolDefs.find((t) => t.name === 'lab_status')

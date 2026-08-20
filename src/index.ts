@@ -618,67 +618,80 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     /* 服务不可用 → 默认可见 */
   }
 
-  // ── 阈值/watchProcs 持久化（2026-08-20：P2 2' 落地——settings.register + update）──
-  // 命名空间 lab-monitor：{ thresholds: {utilWarn,memWarn,tempWarn,pollMs}, watchProcs: string[] }
+  // ── 阈值/watchProcs/标签持久化（2026-08-20：P2 2' + A2 标签——settings.register + update）──
+  // 命名空间 lab-monitor：{ thresholds, watchProcs, tags }
   // 语义：settings 为唯一事实来源（schema 默认值 ∪ 用户 settings.yaml 覆盖）→ 初始化内存态；
-  // 内存态变更（lab_ctl set-threshold / watch / 请求携带覆盖）→ update 写回持久化。
+  // 内存态变更（lab_ctl set-threshold / watch / tag / 请求携带覆盖）→ update 写回持久化。
+  // M4 服务时序：settings 服务可能晚于本插件 apply（better-sidebar 大 bundle 同理）——
+  // 一次性 ctx.get('settings') 会拿到 undefined → 静默降级（实测 tags 不落盘）。加重探。
   let settingsScope: SettingsScopeLike | null = null
-  try {
-    const settingsSvc = ctx.get('settings') as unknown as {
-      register?(ns: string, schema: unknown, opts?: { base?: unknown; applies?: string }): SettingsScopeLike
-    } | undefined
-    if (settingsSvc && typeof settingsSvc.register === 'function') {
-      const persistSchema = Schema.object({
-        thresholds: Schema.object({
-          utilWarn: Schema.number().default(THRESHOLD_DEFAULTS.utilWarn),
-          memWarn: Schema.number().default(THRESHOLD_DEFAULTS.memWarn),
-          tempWarn: Schema.number().default(THRESHOLD_DEFAULTS.tempWarn),
-          pollMs: Schema.number().default(THRESHOLD_DEFAULTS.pollMs),
-        }),
-        watchProcs: Schema.array(Schema.string()).default([]),
-        // 2026-08-20（标签分组）：进程标签规则持久化
-        tags: Schema.array(Schema.object({
-          id: Schema.string(),
-          label: Schema.string(),
-          patterns: Schema.array(Schema.string()),
-          kind: Schema.union([Schema.const('experiment'), Schema.const('process')]),
-          color: Schema.any(),
-        })).default([]),
-      })
-      settingsScope = settingsSvc.register('lab-monitor', persistSchema, { applies: 'live' })
-      // 读回持久化基线（重启后 lab_ctl 改的阈值 / watch 动态注册不再丢失）
-      const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[] } | null
-      if (stored && stored.thresholds) thresholds.apply(stored.thresholds as never, true)
-      if (stored && Array.isArray(stored.watchProcs)) {
-        cfg.watchProcs = stored.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
-      }
-      if (stored && Array.isArray(stored.tags)) {
-        cfg.tags = stored.tags.filter(isValidTagRule)
-      }
-      // 外部修改（用户手改 settings.yaml / 其他配置面）实时生效
-      if (typeof settingsScope.watch === 'function') {
-        settingsScope.watch((next) => {
-          const v = next as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[] } | null
-          if (v && v.thresholds) thresholds.apply(v.thresholds as never, true)
-          if (v && Array.isArray(v.watchProcs)) {
-            cfg.watchProcs = v.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
-          }
-          if (v && Array.isArray(v.tags)) {
-            cfg.tags = v.tags.filter(isValidTagRule)
-          }
+  const settingsRetry = (attempt: number): void => {
+    if (settingsScope) return
+    try {
+      const settingsSvc = ctx.get('settings') as unknown as {
+        register?(ns: string, schema: unknown, opts?: { base?: unknown; applies?: string }): SettingsScopeLike
+      } | undefined
+      if (settingsSvc && typeof settingsSvc.register === 'function') {
+        const persistSchema = Schema.object({
+          thresholds: Schema.object({
+            utilWarn: Schema.number().default(THRESHOLD_DEFAULTS.utilWarn),
+            memWarn: Schema.number().default(THRESHOLD_DEFAULTS.memWarn),
+            tempWarn: Schema.number().default(THRESHOLD_DEFAULTS.tempWarn),
+            pollMs: Schema.number().default(THRESHOLD_DEFAULTS.pollMs),
+          }),
+          watchProcs: Schema.array(Schema.string()).default([]),
+          // 2026-08-20（标签分组）：进程标签规则持久化
+          tags: Schema.array(Schema.object({
+            id: Schema.string(),
+            label: Schema.string(),
+            patterns: Schema.array(Schema.string()),
+            kind: Schema.union([Schema.const('experiment'), Schema.const('process')]),
+            color: Schema.any(),
+          })).default([]),
         })
+        settingsScope = settingsSvc.register('lab-monitor', persistSchema, { applies: 'live' })
+        // 读回持久化基线（重启后 lab_ctl 改的阈值 / watch 动态注册 / 标签不再丢失）
+        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[] } | null
+        if (stored && stored.thresholds) thresholds.apply(stored.thresholds as never, true)
+        if (stored && Array.isArray(stored.watchProcs)) {
+          cfg.watchProcs = stored.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
+        }
+        if (stored && Array.isArray(stored.tags)) {
+          cfg.tags = stored.tags.filter(isValidTagRule)
+        }
+        // 外部修改（用户手改 settings.yaml / 其他配置面）实时生效
+        if (typeof settingsScope.watch === 'function') {
+          settingsScope.watch((next) => {
+            const v = next as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[] } | null
+            if (v && v.thresholds) thresholds.apply(v.thresholds as never, true)
+            if (v && Array.isArray(v.watchProcs)) {
+              cfg.watchProcs = v.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
+            }
+            if (v && Array.isArray(v.tags)) {
+              cfg.tags = v.tags.filter(isValidTagRule)
+            }
+          })
+        }
+        console.log('[lab-monitor] 阈值/watchlist/标签持久化已启用（settings 命名空间 lab-monitor）')
+      } else if (attempt < 10) {
+        // M4：settings 服务未就绪 → 500ms 后重探（上限 10 次，约 5s 窗口）
+        ctx.setTimeout(() => settingsRetry(attempt + 1), 500)
       }
-      console.log('[lab-monitor] 阈值/watchlist/标签持久化已启用（settings 命名空间 lab-monitor）')
+    } catch (e) {
+      if (attempt < 10) {
+        ctx.setTimeout(() => settingsRetry(attempt + 1), 500)
+      } else {
+        console.warn('[lab-monitor] settings 持久化不可用，回退内存模式（阈值/watchlist/标签重启即还原）:', (e as Error).message)
+      }
     }
-  } catch (e) {
-    console.warn('[lab-monitor] settings 持久化不可用，回退内存模式（阈值/watchlist 重启即还原）:', (e as Error).message)
   }
+  settingsRetry(0)
 
-  // 写入辅助：内存态变更 → 持久化（失败静默降级内存，不影响运行）
-  function persistState() {
+  // 写入辅助：内存态变更 → 持久化（async 写队列；失败显式记录，不影响运行）
+  async function persistState() {
     if (!settingsScope || typeof settingsScope.update !== 'function') return
     try {
-      settingsScope.update({ thresholds: thresholds.get(), watchProcs: watchSet(), tags: tagSet() })
+      await settingsScope.update({ thresholds: thresholds.get(), watchProcs: watchSet(), tags: tagSet() })
     } catch (e) {
       console.warn('[lab-monitor] 设置持久化写入失败（保留内存值）:', (e as Error).message)
     }

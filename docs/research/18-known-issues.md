@@ -8,22 +8,18 @@
 
 ## 问题 1：GPU 利用率趋势图未显示
 
-- **状态**：🟡 待确认（数据面正常，渲染层疑点）
+- **状态**：✅ 已修（2026-08-20 截图核验定位**真根因**：MiniTrend 用 `<polyline>` 元素但 points 是 path 格式 `"M4 52 L12 50"`（M/L 命令），polyline 只接受坐标对 → 属性非法被浏览器忽略 → 折线永不渲染。改 `<path d="M… L…">` + stroke 硬编码 #3964fe）
 - **现象**：面板「GPU 利用率趋势」区域空白，无折线（用户截图确认）。
 - **证据**：
   - history API 数据正常：18 点、18 个 gpuUtil 非空，值序列有波动（19,16,21,…,48,1,9）——**数据面没问题**
   - client 半已更新（boot rev 2abe4e748ee1 与本地构建一致），含「Y 轴动态区间 + 折线加粗 2px + 浅色基线」修复
   - 上一轮验证（webbridge DOM）：polyline 元素存在、2760 字符 points、stroke 品牌色——**元素在，但视觉可能仍不可见**
-- **根因候选**（需截图复核）：
-  1. **折线颜色与背景对比度不足**：`C.brand` = `var(--dsw-alias-brand-primary, #3964fe)`，若主题下该变量解析异常 → 折线透明/近背景
-  2. **SVG 高度/宽度为 0**：`width: 100%` + `height: 56` 在容器异常时可能坍缩
-  3. **hist 数据不足 2 点时的分支**：显示"数据积累中…"文案而非折线（但 18 点已满足）
-  4. 浏览器缓存旧 bundle（用户可能未硬刷新）
-- **修复建议**：
-  - 截图复核折线区域；查 C.brand 变量在运行主题下的实际值
-  - 兜底：折线 stroke 直接写十六进制 `#3964fe`（不依赖 CSS 变量），加 `strokeWidth: 2`
-  - SVG 容器加固定 `minHeight: 56`，避免坍缩
-- **验证方法**：浏览器截图 → 对比修复前后；`document.querySelector('polyline').getAttribute('points')` 非空即元素在
+- **根因**（2026-08-20 截图复核确认）：
+  1. **polyline 元素 + path 格式 points（真根因）**：`d.push((i ? 'L' : 'M') + x + ' ' + y)` 生成 `M/L` 命令串，但 `<polyline points>` 只接受坐标对（`"4,52 12,50"`）。非法属性 → 浏览器不渲染该元素。此前误判为 C.brand CSS 变量问题（stroke 硬编码后仍不可见，反证颜色不是根因）。
+- **修复**（2026-08-20）：
+  - `<polyline points>` → `<path d>`（d 属性原生支持 M/L 命令）
+  - stroke 硬编码 `#3964fe`（不依赖 CSS 变量）+ `strokeWidth: 2` + SVG `minHeight: 56`
+- **验证方法**：浏览器硬刷新 → 趋势区可见蓝色折线；`document.querySelector('path[stroke="#3964fe"]')` 非空
 
 ---
 

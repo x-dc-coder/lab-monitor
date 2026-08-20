@@ -465,9 +465,10 @@ function MiniTrend(props: { points: HistPoint[] }) {
     React.createElement('span', { style: { fontSize: 10 } }, yMin + '%–' + yMax + '%'),
     React.createElement('svg', { viewBox: '0 0 ' + W + ' ' + H, width: '100%', height: 56, style: { display: 'block', maxWidth: 640, minHeight: 56, background: C.layer1, borderRadius: 6, border: '1px solid ' + C.border } },
       React.createElement('line', { x1: PAD, y1: baseY, x2: W - PAD, y2: baseY, stroke: 'rgba(128,128,128,0.25)', strokeWidth: 1 }),
-      // 2026-08-20：stroke 硬编码 #3964fe（C.brand 的 CSS 变量 fallback）——部分主题下
-      // var(--dsw-alias-brand-primary) 解析异常导致折线透明不可见（18-known-issues 问题 1）
-      React.createElement('polyline', { points: line, fill: 'none', stroke: '#3964fe', strokeWidth: 2, strokeLinejoin: 'round', strokeLinecap: 'round' }),
+      // 2026-08-20 截图核验真根因：此前用 polyline 元素 + path 格式 points（"M4 52 L12 50"），
+      // polyline 只接受坐标对（"4,52 12,50"）→ 非法属性被浏览器忽略 → 折线永不渲染。
+      // 改用 path 元素（d 属性原生支持 M/L）；stroke 硬编码 #3964fe（不依赖 CSS 变量）。
+      React.createElement('path', { d: line, fill: 'none', stroke: '#3964fe', strokeWidth: 2, strokeLinejoin: 'round', strokeLinecap: 'round' }),
     ),
   )
 }

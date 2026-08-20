@@ -83,6 +83,18 @@ let intervals = []            // { cb, delay, disposed }
 let registered = null         // slots.register 记录
 let effects = []              // ctx.effect 记录
 const slots = {
+  // 官方 slots 契约（v2 修复后）：注册必须经 slots.inject(key, () => slots.register(...)) 包裹。
+  // mock 中声明恒就绪：立即执行 callback（返回 register 的 disposer），返回 idempotent disposer。
+  inject(key, callback) {
+    assert(key === 'conversation.view', 'inject key = conversation.view', key)
+    const dispose = callback()
+    let disposed = false
+    return () => {
+      if (disposed) return
+      disposed = true
+      if (typeof dispose === 'function') dispose()
+    }
+  },
   register(options, component) {
     registered = { options, component }
     return () => { registered = null }
@@ -144,11 +156,25 @@ setTimeout(async () => {
   const mountCleanup = __effectQueueRef().length ? __effectQueueRef()[__effectQueueRef().length - 1].fn() : null
   assert(typeof mountCleanup === 'function', '组件 useEffect 返回 cleanup（卸载即停）')
   const texts = []
+  // 函数组件浅渲染（AlertList/ProcsTable 等）：用独立 hook 容器渲染一次，
+  // 避免 useState/useEffect 索引与宿主组件（component() 已消耗一轮 hooks）串扰。
+  const renderFn = (fn, props) => {
+    const savedState = __hookState, savedIdx = __hookIdx, savedEq = __effectQueue
+    __hookState = []; __hookIdx = 0; __effectQueue = []
+    let out
+    try { out = fn(props || {}) } finally {
+      __hookState = savedState; __hookIdx = savedIdx; __effectQueue = savedEq
+    }
+    return out
+  }
   const walk = (n) => {
     if (n === null || n === undefined) return
     if (typeof n === 'string') { texts.push(n); return }
     if (Array.isArray(n)) { n.forEach(walk); return }
-    if (typeof n === 'object') walk(n.props && n.props.children)
+    if (typeof n === 'object') {
+      if (typeof n.type === 'function') { walk(renderFn(n.type, n.props)); return }
+      walk(n.props && n.props.children)
+    }
   }
   walk(tree.props.children)
   const joined = texts.join(' ')
@@ -216,7 +242,10 @@ setTimeout(async () => {
   // 新 mock ctx：slots + better-sidebar 服务（features 含 badge/pluginSettings）
   let registered3 = null
   let disposed2 = false
-  let slots3 = { register(options, component) { return () => { disposed2 = true } } }
+  let slots3 = {
+    inject(key, callback) { const d = callback(); return () => { if (typeof d === 'function') d() } },
+    register(options, component) { return () => { disposed2 = true } },
+  }
   let bs = {
     features: ['badge', 'pluginSettings'],
     registerTab(desc) { registered3 = desc; return () => {} },
@@ -294,7 +323,14 @@ setTimeout(async () => {
   if (mount3) mount3()
   let bs2 = { features: ['badge'], registerTab(dsc) { registered4 = dsc; return () => {} } }
   const ctxD3 = {
-    get(name) { if (name === 'slots') return { register() { return () => { disposed4 = true } } }; if (name === 'betterSidebar') return bs2; return undefined },
+    get(name) {
+      if (name === 'slots') return {
+        inject(key, callback) { const d = callback(); return () => { if (typeof d === 'function') d() } },
+        register() { return () => { disposed4 = true } },
+      }
+      if (name === 'betterSidebar') return bs2
+      return undefined
+    },
     setInterval(cb, delay) { const rec = { cb, delay, disposed: false }; intervalsD2.push(rec); return () => { rec.disposed = true } },
     setTimeout() { return () => {} },
     effect(fn) { const r = fn(); return r || (() => {}) },

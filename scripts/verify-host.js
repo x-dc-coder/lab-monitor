@@ -49,9 +49,36 @@ function makeCtx() {
   const events = {}       // name -> [listener]
   const teardowns = []
   const promptState = { variables: {}, sections: [] }
+  // 2026-08-20（P2 2'）：内存 settings 服务——支持 register/update/watch（持久化断言）
+  // documents = 磁盘文档（跨「DSH 重启」保留的用户层）；namespaces = 本进程注册表。
+  // register 读取 documents 初始化 user；update 双向写（reg.user + documents）。
   const settingsMock = {
-    get(ns) { return ns === 'aionui-panel' ? FAKE.aionui : undefined },
+    documents: {}, // ns -> user 层（模拟 DSH settings 的磁盘持久化文档）
+    namespaces: {}, // ns -> { schema, user, resolved }
+    get(ns) {
+      if (ns === 'aionui-panel') return FAKE.aionui
+      const reg = this.namespaces[ns]
+      return reg ? reg.resolved : undefined
+    },
     on(name, fn) { (events[name] = events[name] || []).push(fn); return () => {} },
+    register(ns, schema, opts) {
+      if (this.namespaces[ns]) throw new Error('settings namespace "' + ns + '" is already registered')
+      const user = this.documents[ns] !== undefined ? this.documents[ns] : undefined
+      // schema 是 callable（schemastery Schema 实例）：schema(mergeLayers(base, section))
+      const reg = { schema, user, resolved: schema(user) }
+      this.namespaces[ns] = reg
+      return {
+        get: () => reg.resolved,
+        watch: (cb) => { reg.watchCb = cb; return () => { reg.watchCb = null } },
+        update: (patch) => {
+          reg.user = { ...(reg.user || {}), ...patch }
+          reg.resolved = schema(reg.user)
+          this.documents[ns] = { ...reg.user }
+          if (reg.watchCb) reg.watchCb(reg.resolved, undefined)
+          return reg.resolved
+        },
+      }
+    },
   }
   const promptService = {
     variable(name, provider) { promptState.variables[name] = provider; return () => {} },
@@ -143,10 +170,10 @@ const C = ctxd
 const plugin = { name, inject, apply }
 
 /** HTTP 数据面模拟：POST /lab-monitor/api/<method>，body JSON，返回解析结果。 */
-function G(method) {
-  const route = H.httpRoutes.find((r) => (r.path || '').indexOf('/lab-monitor/api') === 0)
+function callApi(hh, method, body) {
+  const route = hh.httpRoutes.find((r) => (r.path || '').indexOf('/lab-monitor/api') === 0)
   if (!route) return undefined
-  return (body) => {
+  return (payload) => {
     const res = {
       writeHead(code, headers) { this._code = code; this._headers = headers; return this },
       end(data) { this._body = data; return this },
@@ -161,12 +188,15 @@ function G(method) {
       },
     }
     route.handler(req, res) // 同步注册 data/end 监听（httpHandler 实现）
-    const payload = body ? JSON.stringify(body) : '{}'
-    for (const fn of req._dataFns) fn(payload)
+    const payloadStr = payload ? JSON.stringify(payload) : '{}'
+    for (const fn of req._dataFns) fn(payloadStr)
     for (const fn of req._endFns) fn()
     if (res._body !== undefined) return JSON.parse(res._body)
     return { ok: false, error: 'no response body' }
   }
+}
+function G(method) {
+  return callApi(H, method)
 }
 
 plugin.apply(C.ctx, {})
@@ -334,6 +364,12 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   rt = await G('setThresholds')({})
   assert(rt.applied.memWarn === 80, '直连后携带（新时间戳）→ 覆盖为 80', rt.applied)
 
+  // 2026-08-20（P2 2'）：阈值持久化——setThresholds 写回 settings 命名空间 lab-monitor
+  const lmNs = C.settingsMock.namespaces['lab-monitor']
+  assert(!!lmNs, 'settings 命名空间 lab-monitor 已注册（settings.register 落地）')
+  assert(lmNs && lmNs.user && lmNs.user.thresholds && lmNs.user.thresholds.memWarn === 80,
+    'setThresholds 写回 settings.user.thresholds（memWarn=80）', lmNs && lmNs.user && lmNs.user.thresholds)
+
   console.log('\n[E] 工具执行 + prompt 注入')
   const tStatus = H.toolDefs.find((t) => t.name === 'lab_status')
   const vBrief = await tStatus.execute({ brief: true })
@@ -348,6 +384,74 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   const tAdvice = H.toolDefs.find((t) => t.name === 'lab_advice')
   const vAdvice = await tAdvice.execute({})
   assert(vAdvice && Array.isArray(vAdvice.advice), 'lab_advice → { advice: [] }', vAdvice)
+
+  // 2026-08-20（#1）：lossless JSON 清洗断言——nvidia-smi/CIM 输出 "N/A"（解析得 NaN）场景，
+  // 快照与 lab_status 完整输出必须全 lossless（无 NaN/Infinity/undefined，dsh-tools 校验边界）
+  const checkLossless = (v, path) => {
+    if (v === null) return null
+    if (v === undefined) return 'undefined@' + path
+    if (typeof v === 'number') return Number.isFinite(v) ? null : 'non-finite@' + path + '=' + v
+    if (Array.isArray(v)) {
+      for (let i = 0; i < v.length; i++) {
+        const e = checkLossless(v[i], path + '[' + i + ']')
+        if (e) return e
+      }
+      return null
+    }
+    if (typeof v === 'object') {
+      for (const k of Object.keys(v)) {
+        const e = checkLossless(v[k], path + '.' + k)
+        if (e) return e
+      }
+      return null
+    }
+    return null
+  }
+  FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, N/A, N/A, N/A, N/A, N/A'
+  FAKE.cimLine = 'N/A;N/A;N/A\n1234;1;python.exe'
+  // 恢复采样（上方 vPause 已 pause → enabled=false，tick 会跳过采样）+ 过期
+  // GPU 查询缓存(500ms)/CIM 缓存(5s)：advance 6000 + tick 内 2000 = 8000ms > 5s TTL
+  await tCtl.execute({ action: 'resume' })
+  advance(6000)
+  await tick(1)
+  const snapNa = await G('snapshot')({})
+  const bad = checkLossless(snapNa, 'snap')
+  assert(bad === null, 'N/A 采样场景快照全 lossless（无 NaN/Infinity/undefined）', bad)
+  assert(snapNa.gpu && snapNa.gpu[0] && snapNa.gpu[0].utilPct === 0, 'nvidia-smi N/A → utilPct=0（安全降级）', snapNa.gpu && snapNa.gpu[0])
+  assert(snapNa.cpu && snapNa.cpu.percent === null, 'CIM N/A → cpu.percent=null（安全降级）', snapNa.cpu)
+  const vFullNa = await tStatus.execute({})
+  assert(checkLossless(vFullNa, 'vFullNa') === null, 'lab_status 完整输出 N/A 场景全 lossless', checkLossless(vFullNa, 'vFullNa'))
+  const vAdvNa = await tAdvice.execute({})
+  assert(checkLossless(vAdvNa, 'vAdvNa') === null, 'lab_advice N/A 场景全 lossless', checkLossless(vAdvNa, 'vAdvNa'))
+  // 复位正常数据
+  FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 92 %, 19200 MiB, 24576 MiB, 80, 350.00 W'
+  FAKE.cimLine = '92;30480;12560\n1234;1;python.exe\n5678;1234;python.exe\n9999;1;chrome.exe'
+  await tick(1)
+
+  // 2026-08-20（P2 2'）：watch 动态注册持久化 + 「DSH 重启」读回断言
+  const vWatch = await tCtl.execute({ action: 'watch', keywords: ['llama-server', 'vllm'] })
+  assert(vWatch && vWatch.ok === true && Array.isArray(vWatch.matchedPids), 'lab_ctl watch → matchedPids 数组', vWatch)
+  assert(lmNs && lmNs.user && Array.isArray(lmNs.user.watchProcs) && lmNs.user.watchProcs.indexOf('llama-server') !== -1,
+    'lab_ctl watch 写回 settings.user.watchProcs', lmNs && lmNs.user && lmNs.user.watchProcs)
+  // 重启模拟：新 fiber 重新 apply，settings 磁盘文档（documents）保留 → 阈值/watchlist 自动恢复
+  const ctxd3 = makeCtx()
+  // 只预置持久化文档层（user 层数据）；namespaces 留空让新实例 register 时从 documents 重建
+  ctxd3.settingsMock.documents['lab-monitor'] = JSON.parse(JSON.stringify(lmNs.user))
+  const H3 = makeHarness(ctxd3.ctx, ctxd3.settingsMock, ctxd3.promptService)
+  plugin.apply(ctxd3.ctx, {})
+  await new Promise((r) => setTimeout(r, 300)) // 后端探测 + 首帧采样
+  const rt3 = await callApi(H3, 'setThresholds')({})
+  assert(rt3 && rt3.applied && rt3.applied.memWarn === 80, '重启后阈值从 settings 文档恢复（memWarn=80）', rt3 && rt3.applied)
+  FAKE.tasklist = '"python.exe","1234","Console","1","12,345 K"\n"llama-server.exe","5555","Console","1","50,000 K"\n"chrome.exe","9999","Console","1","20,000 K"'
+  for (let i = 0; i < 2; i++) {
+    advance(2000)
+    const iv3 = ctxd3.intervals[0]
+    if (iv3 && !iv3.disposed) { try { await iv3.fn() } catch (e) { console.error('tick3 错误:', e) } }
+  }
+  const snapR = await callApi(H3, 'snapshot')({})
+  assert(Array.isArray(snapR.watchedPids) && snapR.watchedPids.indexOf(5555) !== -1,
+    '重启后 watchlist 恢复并命中 llama-server(5555)', snapR.watchedPids)
+  FAKE.tasklist = '"python.exe","1234","Console","1","12,345 K"\n"python.exe","5678","Console","1","8,000 K"\n"chrome.exe","9999","Console","1","20,000 K"'
   // promptInjection=true 时注入生效（KV 缓存默认关；此处显式验证开启路径）
   const cfg2 = { promptInjection: true }
   const ctxd2 = makeCtx()

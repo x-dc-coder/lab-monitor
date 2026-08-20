@@ -154,8 +154,8 @@
 
 | 项 | 追踪 | 状态 |
 |---|---|---|
-| A1 指挥层 Agent 预设 lab-commander | 待实施（persona/RULES/tools 三文件） | ⬜ |
-| A2 多实验并行跟踪（R-2 留 v2） | 待实施（state-machine 单轨 → 多轨） | ⬜ |
+| A1 指挥层 Agent 预设 lab-commander | 🔶 **2026-08-20 用户决策：不做预设**，改为「使用文档」形式（lab_status/lab_advice/lab_ctl 用法手册）；prompt 注入增强待讨论（KV 缓存影响） | 🔶 重新定位 |
+| A2 多实验并行跟踪（R-2 留 v2） | 📋 方案已对齐：兼容协议（experiment 保留 + experiments[]）/ 上限 4 / runId 优先+指纹回退 | ⬜ 待实施 |
 | A3 webServer 自托管面板（出口④） | 可选（v2 前置已满足：API 数据面就绪） | ⬜ |
 | A4 SSE /lab/events 远端扩展 | 可选（手机端/对接 monitor-panel） | ⬜ |
 

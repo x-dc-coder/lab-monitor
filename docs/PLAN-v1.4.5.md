@@ -743,8 +743,8 @@ P1 验收 1/2 会话内端到端实证完成（T1 done 零告警 / T2 crashed+CR
 - **P0 6' 互斥形态真实设置模拟**：逻辑已由 mock-test [10]/verify-host [F] 覆盖（B3）。
 - **P2 5 better-sidebar 真实注册（GUI 实测）**：用户确认保持 ②，③ 有意不启用（B4）。
 - **回归红线 + 断连自愈（T2-3）**：自测全绿；GUI 复核待安排（B5）。
-- **A1 指挥层 Agent 预设 lab-commander**（§0 三层组合第 2 层，★v2 启用）：`agent-preset/lab-commander/` 空目录，persona/RULES/tools 三文件未实现。
-- **A2 多实验并行跟踪**（风险 11 R-2「多轨并存留 v2」）：state-machine 仍单跟踪（新 start 归档旧 run aborted）。
+- **A1 指挥层 Agent 预设 lab-commander**（§0 三层组合第 2 层，★v2 启用）：🔶 **2026-08-20 用户决策——不做预设**（插件功能未完善，预设无收益）；改为「使用文档」形式（lab_status/lab_advice/lab_ctl 用法手册）；prompt 注入增强待讨论（KV 缓存影响）。
+- **A2 多实验并行跟踪**（风险 11 R-2「多轨并存留 v2」）：📋 方案已对齐（2026-08-20）——兼容协议（experiment 保留 + 新增 experiments[]）/ 并行上限 4（超出归档最旧 aborted）/ result 归属 runId 优先 + 指纹回退；待实施。
 - **A3 webServer 自托管面板（出口④）**（风险 14 + §3.2.4）：仅 API 数据面，自托管 HTML 面板未实现（可选）。
 - **A4 SSE /lab/events 远端扩展**（README v2 演进表）：未实现（可选，手机端/对接 monitor-panel）。
 

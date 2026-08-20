@@ -50,7 +50,8 @@
 /home/dc/projects/lab-monitor/
 ├── README.md                        # 本文件：总览、架构图、快速开始
 ├── agent-preset/                    # v2「实验指挥」Agent 预设（★v2 启用，MVP 不实现——T3-3）
-│   └── lab-commander/               #   ⚠️ 2026-08-20 对照：仍未实现（仅 .gitkeep，persona/RULES/tools 三文件待补）
+│   └── lab-commander/               #   🔶 2026-08-20 用户决策：**不做预设**，改为「使用文档」形式
+│                                   #     （lab_status/lab_advice/lab_ctl 用法手册；prompt 注入增强待讨论）
 │       ├── persona.md / RULES.md / tools.md
 ├── scripts/
 │   ├── verify.sh                    # CI 式自测：node --check + 目录完整 + 契约静态核对 + 四测套
@@ -234,10 +235,10 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 
 | # | 未完成项 | 文档依据 | 现状 |
 |---|---|---|---|
-| A1 | **指挥层 Agent 预设 lab-commander** | PLAN §0 三层组合第 2 层、§1 目录树（persona/RULES/tools 三文件，★v2 启用） | `agent-preset/lab-commander/` 仅 .gitkeep，三文件全缺 |
-| A2 | **多实验并行跟踪** | 风险 11（R-2「多轨并存留 v2」） | state-machine 仍单跟踪：新 start 归档旧 run 为 aborted（`src/core/state-machine.ts`） |
-| A3 | **webServer 自托管面板（出口④）** | 风险 14 + §3.2.4（「v2 前置」） | 仅实现 HTTP 数据面 `/lab-monitor/api/*`；自托管 HTML 面板未实现 |
-| A4 | **SSE `/lab/events` 远端扩展** | README v2 演进表「webServer SSE /lab/events（手机端/对接 monitor-panel）」 | 源码无 SSE/EventSource 实现 |
+| A1 | ~~指挥层 Agent 预设 lab-commander~~ → **使用文档**（lab_status/lab_advice/lab_ctl 用法手册） | PLAN §0 三层组合第 2 层、§1 目录树 | 🔶 **2026-08-20 用户决策：不做 Agent 预设**（插件功能未完善，预设无收益）；改为使用文档形式；prompt 注入增强待讨论（KV 缓存影响） |
+| A2 | **多实验并行跟踪**（R-2「多轨并存留 v2」） | 风险 11 | 📋 **方案已对齐（2026-08-20）**：兼容协议（experiment 保留 + experiments[]）/ 上限 4 / runId 优先+指纹回退——待实施 |
+| A3 | webServer 自托管面板（出口④） | 风险 14 + §3.2.4（「v2 前置」） | 仅实现 HTTP 数据面 `/lab-monitor/api/*`；自托管 HTML 面板未实现 |
+| A4 | SSE `/lab/events` 远端扩展 | README v2 演进表「webServer SSE /lab/events（手机端/对接 monitor-panel）」 | 源码无 SSE/EventSource 实现 |
 
 ### B 类：验收遗留（需真实环境/GUI）
 

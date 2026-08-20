@@ -423,6 +423,9 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   assert(checkLossless(vFullNa, 'vFullNa') === null, 'lab_status 完整输出 N/A 场景全 lossless', checkLossless(vFullNa, 'vFullNa'))
   const vAdvNa = await tAdvice.execute({})
   assert(checkLossless(vAdvNa, 'vAdvNa') === null, 'lab_advice N/A 场景全 lossless', checkLossless(vAdvNa, 'vAdvNa'))
+  // codex 审查：lab_ctl set-threshold 返回值（含 lastSystemStats）也必须 lossless
+  const vCtlNa = await tCtl.execute({ action: 'set-threshold', thresholds: {} })
+  assert(checkLossless(vCtlNa, 'vCtlNa') === null, 'lab_ctl set-threshold N/A 场景全 lossless', checkLossless(vCtlNa, 'vCtlNa'))
   // 复位正常数据
   FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 92 %, 19200 MiB, 24576 MiB, 80, 350.00 W'
   FAKE.cimLine = '92;30480;12560\n1234;1;python.exe\n5678;1234;python.exe\n9999;1;chrome.exe'

@@ -173,8 +173,8 @@ function fmtGiBx(mib: number | null | undefined): string {
  * 模式不受影响）。本函数在对外输出边界递归清洗：非有限数 → null、undefined → null、-0 → 0；
  * 返回**新对象**（复制语义，不污染 balancer/backend 内部共享引用）。
  */
-function sanitizeJson<T>(value: T, depth = 0): T {
-  if (depth > 12) return value
+function sanitizeJson<T>(value: T, depth = 0, seen?: WeakSet<object>): T {
+  if (depth > 12) return null as unknown as T // 深度截断返回 null，而非原对象（深层非法值/环不泄漏）
   if (value === undefined) return null as unknown as T
   if (typeof value === 'number') {
     if (Number.isFinite(value)) return (value === 0 ? 0 : value) as T // -0 → +0（lossless 语义）
@@ -182,14 +182,22 @@ function sanitizeJson<T>(value: T, depth = 0): T {
   }
   if (Array.isArray(value)) {
     const src = value as unknown[]
+    if (!seen) seen = new WeakSet()
+    if (seen.has(src)) return null as unknown as T // 环引用 → null
+    seen.add(src)
     const out: unknown[] = new Array(src.length)
-    for (let i = 0; i < src.length; i++) out[i] = sanitizeJson(src[i], depth + 1)
+    for (let i = 0; i < src.length; i++) out[i] = sanitizeJson(src[i], depth + 1, seen)
+    seen.delete(src) // 共享引用（DAG）允许重复复制
     return out as unknown as T
   }
   if (value !== null && typeof value === 'object') {
     const src = value as Record<string, unknown>
+    if (!seen) seen = new WeakSet()
+    if (seen.has(src)) return null as unknown as T
+    seen.add(src)
     const out: Record<string, unknown> = {}
-    for (const k of Object.keys(src)) out[k] = sanitizeJson(src[k], depth + 1)
+    for (const k of Object.keys(src)) out[k] = sanitizeJson(src[k], depth + 1, seen)
+    seen.delete(src)
     return out as unknown as T
   }
   return value // string / boolean / null
@@ -774,7 +782,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                   if (typeof v === 'number' && isFinite(v)) thr[k] = v
                 }
                 // 1.2：写阈值时返回当前拆分统计（快照语义，Agent 设置前可见证据）
-                return { ok: true, applied: rpcSetThresholds(thr).applied, system: lastSystemStats } as never
+                return sanitizeJson({ ok: true, applied: rpcSetThresholds(thr).applied, system: lastSystemStats }) as never
               }
               return { ok: true, state: rpcControl({ action: a.action }).state } as never
             },

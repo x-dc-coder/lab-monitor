@@ -373,6 +373,10 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           cpuPct: typeof p.cpuPct === 'number' ? p.cpuPct : null,
           memMiB: typeof p.memMiB === 'number' ? p.memMiB : null,
         }))
+        // 2026-08-20（A2 多轨修复）：每个 running run 用自己的 procGroup 聚合——
+        // 之前只聚合主实验（cur）再回填所有并行实验（lastGroupStats 单变量），
+        // 实测并行 run 的 groupStats 全是主实验进程组（sleep(35) 显示到 sleep(30) run 上）。
+        // 聚合语义：该 run 的进程组统计（非实验组 system 仅主实验视图，快照一致）。
         const agg = aggregateProcStats({
           procs: aggProcs,
           group: curRun ? curRun.procGroup : null,
@@ -383,6 +387,12 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         pt.group = agg.group
         pt.system = agg.system
         pt.experimentActive = !!curRun
+        // 并行实验各自聚合（非主实验；主实验走上面 agg 避免重复计算）
+        for (const r of machine.all()) {
+          if (!r.procGroup || !r.procGroup.size || r.runId === (curRun ? curRun.runId : null)) continue
+          const gAgg = aggregateProcStats({ procs: aggProcs, group: r.procGroup, runActive: true })
+          if (gAgg.group) r.groupStats = gAgg.group
+        }
         // summary 扩展（1.2）：实验组 vs 其他进程峰值（5s 粒度；主实验精确，并行实验同视图近似）
         if (curRun) {
           const st = curRun.sampleStats || (curRun.sampleStats = { utilSum: 0, utilN: 0, utilMax: 0, memPeakMiB: 0 })
@@ -505,10 +515,11 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     const exp = expView.main
     const exps = expView.all
     // 1.2：实验进程组统计回填（最近一次 5s 聚合；快照 RPC 与 ps 周期解耦）
+    // 2026-08-20（A2 多轨修复）：优先用 ps 周期写入的各 run 自有 groupStats
+    // （并行实验各自聚合），没有的（如 ps 未到、新 start）回填主实验聚合视图。
     if (exp) {
-      exp.groupStats = lastGroupStats
+      exp.groupStats = (exp.groupStats as GroupStats | null | undefined) || lastGroupStats
     }
-    // 2026-08-20（A2 多轨）：全部并行实验的 groupStats 一并回填（同一 5s 聚合视图）
     for (const e of exps) {
       if (!e.groupStats) e.groupStats = lastGroupStats
     }
@@ -527,14 +538,18 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       }
     }
     // 2026-08-20（标签分组）：按标签规则聚合 procs（cmdline 正则匹配；组内聚合 GPU/CPU/内存）
-    const procsAll = prioritizeGpuProcs(base.procs || [], 15)
+    // 修复（2026-08-20 实测）：标签匹配必须扫**全量**进程表（与 watch 匹配一致）——之前用
+    // prioritizeGpuProcs 15 截断子集，无 GPU 进程（如 llama-server.exe）被截掉 → 标签组永远为空。
+    // 截断（procsAll）只用于快照 procs 字段的 UI 展示，不参与标签匹配。
+    const baseProcsFull = Array.isArray(base.procs) ? base.procs : []
+    const procsAll = prioritizeGpuProcs(baseProcsFull, 15)
     const tagGroups: TagGroup[] = []
     const rules = tagSet()
-    if (rules.length && procsAll.length) {
+    if (rules.length && baseProcsFull.length) {
       for (const rule of rules) {
         const pids: number[] = []
         const members: ProcStat[] = []
-        for (const p of procsAll) {
+        for (const p of baseProcsFull) {
           if (p.cmd && tagMatches(rule, p.cmd)) {
             pids.push(p.pid)
             members.push({ pid: p.pid, cmd: p.cmd, cpuPct: typeof p.cpuPct === 'number' ? p.cpuPct : null, memMiB: typeof p.memMiB === 'number' ? p.memMiB : null, gpuUtilPct: typeof p.gpuUtilPct === 'number' ? p.gpuUtilPct : null })
@@ -1017,18 +1032,31 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   // ② tools/result（emit）——配对校验后结束（T1-2：不匹配忽略，kill 不误判 done）
   const resultHandler = (exec: { name?: string; arguments?: Record<string, unknown> }, result: unknown) => {
     try {
-      const run = machine.cur()
-      if (!run) return
       const name = exec && exec.name
       const args = exec && exec.arguments
       const cmd = args ? (args.command !== undefined ? String(args.command) : name === 'bash' ? null : String(args.code ?? '')) : null
-      // v1.4.5：配对校验剥离 pyc: 前缀 + 归一化（引号剥离），与 findAliveProc 一致
-      let fp = run.fingerprint
-      if (typeof fp === 'string' && fp.indexOf('pyc:') === 0) fp = fp.slice(4)
-      const normCmd = typeof cmd === 'string' ? normalizeCmdForMatch(cmd) : null
-      const paired = name === 'bash' && normCmd !== null && normCmd.indexOf(fp) !== -1
-      if (paired) console.log('[lab-monitor] 配对 result 命中，实验结束判定进行中… runId=', run.runId)
-      machine.markResult(paired)
+      if (name !== 'bash' || cmd === null) return
+      // 2026-08-20（A2 多轨修复）：遍历 all() 按各 run 指纹配对，命中哪个 end 哪个——
+      // 之前只对 cur()（最近 start）配对：并行下先结束的 A 的 result 会拿 B 指纹匹配
+      // → 不匹配被忽略 → A 进程消失走 crashed 而非 done（实测暴露）。
+      const normCmd = normalizeCmdForMatch(cmd)
+      let matchedRunId: string | null = null
+      for (const run of machine.all()) {
+        if (run.resultSeen) continue
+        let fp = run.fingerprint
+        if (typeof fp === 'string' && fp.indexOf('pyc:') === 0) fp = fp.slice(4)
+        if (fp && normCmd.indexOf(fp) !== -1) {
+          matchedRunId = run.runId
+          break
+        }
+      }
+      if (matchedRunId) {
+        console.log('[lab-monitor] 配对 result 命中，实验结束判定进行中… runId=', matchedRunId)
+        machine.markResult(true, matchedRunId)
+      } else {
+        // 不在多轨表中（无实验/不匹配）→ 与原语义一致：对主实验按 false 处理（忽略不匹配）
+        if (machine.cur()) machine.markResult(false)
+      }
     } catch (e) {
       console.error('[lab-monitor] result 处理错误:', e)
     }

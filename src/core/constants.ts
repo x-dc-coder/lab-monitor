@@ -81,12 +81,20 @@ export function makeRunId(): string {
 }
 
 let TAG_ID_COUNTER = 0
-/** 标签规则 id（与 runId 区分前缀；settings 持久化主键） */
+/**
+ * 标签规则 id（与 runId 区分前缀；settings 持久化主键）
+ * 2026-08-20（持久化修复）：id 必须跨重启唯一——之前仅日期+计数器，重启后计数器归零
+ * → 新规则与磁盘已有规则 id 重复（实测 tag-20260820-001 重复两条，remove 会删错）。
+ * 改为日期 + HHMMSS + 计数器（同一秒内最多 999 条，足够；重启后同秒并发概率可忽略）。
+ */
 export function makeTagId(): string {
   TAG_ID_COUNTER += 1
   const d = new Date()
   const y = d.getFullYear()
   const mo = ('0' + (d.getMonth() + 1)).slice(-2)
   const dd = ('0' + d.getDate()).slice(-2)
-  return 'tag-' + y + mo + dd + '-' + ('000' + TAG_ID_COUNTER).slice(-3)
+  const hh = ('0' + d.getHours()).slice(-2)
+  const mm = ('0' + d.getMinutes()).slice(-2)
+  const ss = ('0' + d.getSeconds()).slice(-2)
+  return 'tag-' + y + mo + dd + '-' + hh + mm + ss + '-' + ('000' + TAG_ID_COUNTER).slice(-3)
 }

@@ -69,6 +69,8 @@ export interface RunRecord {
   procGone?: boolean
   /** 2026-08-20：per-run 进程消失连续计数（多轨化：从 state 级移入，独立判定 crashed） */
   pidMissingStreak: number
+  /** 2026-08-20（A2 多轨）：ps 周期按本 run 进程组聚合的统计（并行实验各自独立；无则上层回填主实验） */
+  groupStats: GroupStats | null
   sampleStats: { utilSum: number; utilN: number; utilMax: number; memPeakMiB: number; groupCpuMax?: number | null; groupMemPeakMiB?: number | null; otherMemPeakMiB?: number | null } | null
   summary?: { gpuUtilMax: number | null; gpuUtilAvg: number | null; memPeak: number | null; durationSec: number; dataPartial: boolean; groupCpuMax?: number | null; groupMemPeakMiB?: number | null; otherMemPeakMiB?: number | null }
 }

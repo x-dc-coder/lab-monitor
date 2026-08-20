@@ -439,6 +439,45 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   snap = await G('snapshot')({})
   assert(snap.experiment === null, '相似命令场景清理完毕', snap.experiment)
 
+  console.log('\n[B3c] 并行实验 groupStats 各自独立 + A 先 result 配对（2026-08-20 修复）')
+  // groupStats 独立：A/B 并行，各自进程组聚合，不得共享主实验聚合
+  await pre({ name: 'bash', arguments: { command: 'python train_x.py --epochs 5' } }, async () => ({ kind: 'allow' }))
+  await pre({ name: 'bash', arguments: { command: 'python train_y.py --epochs 5' } }, async () => ({ kind: 'allow' }))
+  FAKE.psLines = [
+    '201 1 20.0 12000 python train_x.py --epochs 5',
+    '202 1 15.0 10000 python train_y.py --epochs 5',
+    '8888 1 0.5 300000 node server.js',
+  ]
+  await tick(3)
+  snap = await G('snapshot')({})
+  assert(Array.isArray(snap.experiments) && snap.experiments.length === 2, 'B3c：双实验并行', snap.experiments && snap.experiments.length)
+  const ex = snap.experiments.find((e) => e.cmd && e.cmd.indexOf('train_x') !== -1)
+  const ey = snap.experiments.find((e) => e.cmd && e.cmd.indexOf('train_y') !== -1)
+  assert(ex && ey && ex.groupStats && ey.groupStats, '并行实验各有 groupStats', !!(ex && ex.groupStats) + '/' + !!(ey && ey.groupStats))
+  assert(ex && ey && ex.groupStats && ey.groupStats && ex.groupStats.members && ey.groupStats.members &&
+    ex.groupStats.members.some((m) => m.pid === 201) && !ex.groupStats.members.some((m) => m.pid === 202) &&
+    ey.groupStats.members.some((m) => m.pid === 202) && !ey.groupStats.members.some((m) => m.pid === 201),
+    'groupStats 各自独立（A 只含 201，B 只含 202）',
+    (ex && ex.groupStats && ex.groupStats.members || []).map((m) => m.pid) + ' / ' + (ey && ey.groupStats && ey.groupStats.members || []).map((m) => m.pid))
+  // A 先 result（进程消失 + result）→ A done；B 仍 running
+  const resA = C.events['tools/result'][0]
+  FAKE.psLines = ['202 1 15.0 10000 python train_y.py --epochs 5', '8888 1 0.5 300000 node server.js']
+  resA({ name: 'bash', arguments: { command: 'python train_x.py --epochs 5' } }, { isError: false, content: [] })
+  await tick(3)
+  await tick(3)
+  snap = await G('snapshot')({})
+  const exAfter = snap.experiments || []
+  assert(exAfter.length === 1 && exAfter[0].cmd && exAfter[0].cmd.indexOf('train_y') !== -1,
+    'A 先 result → A done 移除，B 保留（多轨配对命中 A 而非 B）', exAfter.map((e) => e.cmd))
+  assert(snap.experiment && snap.experiment.cmd && snap.experiment.cmd.indexOf('train_y') !== -1, '主实验仍为 B', snap.experiment && snap.experiment.cmd)
+  // 清理
+  FAKE.psLines = []
+  const resB = C.events['tools/result'][0]
+  resB({ name: 'bash', arguments: { command: 'python train_y.py --epochs 5' } }, { isError: false, content: [] })
+  await tick(6)
+  snap = await G('snapshot')({})
+  assert(snap.experiment === null, 'B3c 清理完毕', snap.experiment)
+
   console.log('\n[D] 阈值：直连即时生效 + 携带 last-write-wins（M3）')
   let rt = await G('setThresholds')({ memWarn: 50 })
   assert(rt.ok && rt.applied.memWarn === 50, 'setThresholds 直连 → memWarn=50', rt.applied)

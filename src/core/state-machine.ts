@@ -188,6 +188,7 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       alerting: false,
       procGone: false,
       pidMissingStreak: 0,
+      groupStats: null,
       sampleStats: null,
     }
     state.runs.set(run.runId, run)
@@ -301,7 +302,7 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       cmdFeature: run.cmdFeature,
       pid: run.pid,
       procGroup: run.procGroup ? [...run.procGroup] : null,
-      groupStats: null, // 由上层（index 层聚合器）回填最近一次 5s 聚合
+      groupStats: run.groupStats || null, // 2026-08-20（A2 多轨）：透传 ps 周期写入的 run 自有聚合；无则上层回填
       startTs: run.startTs,
       summary: null,
       endReason: null,

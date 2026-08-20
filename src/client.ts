@@ -174,6 +174,7 @@ const C = {
 function fmtGiB(mib: number | null | undefined): string {
   if (mib === null || mib === undefined || Number.isNaN(mib)) return '-'
   const g = mib / 1024
+  if (g < 0.1) return '<0.1' // 2026-08-20：小内存进程不再显示 0G（18-known-issues 反馈，截图 0G 误读）
   return g >= 100 ? String(Math.round(g)) : String(Math.round(g * 10) / 10)
 }
 
@@ -348,8 +349,15 @@ function ProcsTable(props: { snap: SnapView | null }) {
       for (const m of g.members) tbodyRows.push(row(m, { background: 'rgba(0,0,0,0.02)' }))
     }
   }
-  // 其余普通进程（非默认组）
-  for (const p of otherRows) tbodyRows.push(row(p))
+  // 其余普通进程（非默认组）：加「其他进程」标题行分隔，避免与上方聚合组混淆
+  // （2026-08-20 截图核验：O+Connect 紧贴「其他应用」组被误读为组内第 4 项）
+  if (otherRows.length) {
+    tbodyRows.push(React.createElement('tr', { key: 'grp-other' },
+      React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 11, borderTop: '1px solid ' + C.border, paddingTop: 6, marginTop: 6 } },
+        '其他进程（' + otherRows.length + '）'),
+    ))
+    for (const p of otherRows) tbodyRows.push(row(p, { background: 'rgba(0,0,0,0.02)' }))
+  }
   return React.createElement('div', { key: 'procs', style: { marginTop: 10 } },
     React.createElement('div', { style: { fontWeight: 600, fontSize: 12, marginBottom: 4 } },
       '进程' + (s && s.sources && s.sources.procs ? '（' + s.sources.procs + '）' : '') +
@@ -455,9 +463,11 @@ function MiniTrend(props: { points: HistPoint[] }) {
   return React.createElement('div', { key: 'trend', style: { fontSize: 11, color: C.label2, marginTop: 6 } },
     React.createElement('span', { style: { marginRight: 6, fontWeight: 600, color: C.label } }, 'GPU 利用率趋势'),
     React.createElement('span', { style: { fontSize: 10 } }, yMin + '%–' + yMax + '%'),
-    React.createElement('svg', { viewBox: '0 0 ' + W + ' ' + H, width: '100%', height: 56, style: { display: 'block', maxWidth: 640, background: C.layer1, borderRadius: 6, border: '1px solid ' + C.border } },
+    React.createElement('svg', { viewBox: '0 0 ' + W + ' ' + H, width: '100%', height: 56, style: { display: 'block', maxWidth: 640, minHeight: 56, background: C.layer1, borderRadius: 6, border: '1px solid ' + C.border } },
       React.createElement('line', { x1: PAD, y1: baseY, x2: W - PAD, y2: baseY, stroke: 'rgba(128,128,128,0.25)', strokeWidth: 1 }),
-      React.createElement('polyline', { points: line, fill: 'none', stroke: C.brand, strokeWidth: 2, strokeLinejoin: 'round', strokeLinecap: 'round' }),
+      // 2026-08-20：stroke 硬编码 #3964fe（C.brand 的 CSS 变量 fallback）——部分主题下
+      // var(--dsw-alias-brand-primary) 解析异常导致折线透明不可见（18-known-issues 问题 1）
+      React.createElement('polyline', { points: line, fill: 'none', stroke: '#3964fe', strokeWidth: 2, strokeLinejoin: 'round', strokeLinecap: 'round' }),
     ),
   )
 }

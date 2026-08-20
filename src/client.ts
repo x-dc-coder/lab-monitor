@@ -39,6 +39,7 @@ interface ProcView {
   cpuPct?: number | null
   memMiB?: number | null
   gpu?: number | null
+  gpuUtilPct?: number | null
 }
 interface AlertView {
   level: string
@@ -58,6 +59,7 @@ interface SnapView {
   cpu: { percent: number | null; cores: number | null }
   mem: { totalMiB: number | null; availableMiB: number | null }
   procs: ProcView[]
+  watchedPids?: number[]
   alerts: AlertView[]
   alertsCriticalCount: number
   experiment: { runId: string; state: string; cmd?: string | null; pid?: number | null } | null
@@ -273,71 +275,189 @@ function memCard(s: SnapView | null) {
   )
 }
 
-function alertRow(a: AlertView) {
-  const color = a.level === 'critical' ? C.error : a.level === 'warn' ? C.warn : C.label2
-  return React.createElement('div', { key: a.ts + '-' + a.rule, style: { padding: '4px 0', fontSize: 12 } },
-    React.createElement('span', { style: { color, fontWeight: 600, marginRight: 6 } },
-      (a.level || 'info').toUpperCase()),
-    React.createElement('span', { style: { color: C.label } }, a.msg || a.rule || ''),
-    a.confidence !== null && a.confidence !== undefined
-      ? React.createElement('span', { style: { color: C.label2, marginLeft: 6 } }, '置信 ' + Math.round(a.confidence * 100) + '%')
-      : null,
-    Array.isArray(a.actions) && a.actions.length
-      ? React.createElement('span', { style: { color: C.brand, marginLeft: 6 } }, '建议: ' + a.actions.join(' / '))
-      : null,
-  )
+// 常见默认进程聚合组（2026-08-20：避免列表被系统进程刷屏；折叠展示 + 统计行）
+const DEFAULT_PROC_GROUPS: { key: string; label: string; match: (cmd: string) => boolean }[] = [
+  { key: 'browser', label: '浏览器', match: (c) => /chrome|msedge|firefox|WeChatAppEx/i.test(c) },
+  { key: 'ide', label: '编辑器/终端', match: (c) => /Code\.exe|WindowsTerminal|ShellHost|coodesker|explorer/i.test(c) },
+  { key: 'docker', label: 'Docker/WSL', match: (c) => /Docker|docker|wsl/i.test(c) },
+  { key: 'system', label: '系统进程', match: (c) => /System|Registry|smss|csrss|wininit|services|lsass|dwm|SearchHost|StartMenu|LockApp|TextInputHost|ApplicationFrame/i.test(c) },
+  { key: 'other-app', label: '其他应用', match: (c) => /Weixin|QQ|ToDesk|TaiShanNet|llama-server/i.test(c) },
+]
+
+/** GPU 利用率取值：优先 gpuUtilPct（backend 填充），回退 v1.1 遗留 gpu 字段 */
+function procGpu(p: ProcView): number | null {
+  if (p.gpuUtilPct !== undefined && p.gpuUtilPct !== null && !Number.isNaN(p.gpuUtilPct)) return p.gpuUtilPct
+  if (p.gpu !== undefined && p.gpu !== null && !Number.isNaN(p.gpu)) return p.gpu
+  return null
 }
 
-function procsTable(s: SnapView | null) {
-  const procs = (s && Array.isArray(s.procs) ? s.procs : []).slice(0, 10)
-  if (!procs.length) return null
+/**
+ * 进程表组件（2026-08-20 增强）：
+ * - watched 置顶高亮（watchProcs 命中）
+ * - 默认进程聚合组折叠展示，标题行可点击展开/收起成员（18-known-issues 问题 2b 落地）
+ */
+function ProcsTable(props: { snap: SnapView | null }) {
+  const [expanded, setExpanded] = React.useState<Record<string, boolean>>({})
+  const s = props.snap
+  const procs = (s && Array.isArray(s.procs) ? s.procs : []).slice(0, 15)
+  if (!procs.length || !s) return null
+  const watched = new Set<number>(Array.isArray(s.watchedPids) ? s.watchedPids : [])
+  const watchedRows = procs.filter((p) => watched.has(p.pid))
+  const rest = procs.filter((p) => !watched.has(p.pid))
+  // 聚合组（标题行 + 组内成员；展开后渲染全部成员行）
+  const groupRows: { key: string; label: string; members: ProcView[] }[] = []
+  for (const g of DEFAULT_PROC_GROUPS) {
+    const members = rest.filter((p) => g.match(p.cmd || ''))
+    if (!members.length) continue
+    groupRows.push({ key: g.key, label: g.label, members })
+    for (const m of members) rest.splice(rest.indexOf(m), 1)
+  }
+  const otherRows = rest
+
+  const row = (p: ProcView, extraStyle?: Record<string, string>) =>
+    React.createElement('tr', { key: 'p' + p.pid, style: extraStyle },
+      React.createElement('td', { style: tdStyle }, String(p.pid)),
+      React.createElement('td', { style: { ...tdStyle, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' } }, p.cmd || ''),
+      React.createElement('td', { style: tdStyle }, procGpu(p) !== null ? String(Math.round(procGpu(p) as number)) : '-'),
+      React.createElement('td', { style: tdStyle }, p.cpuPct !== undefined && p.cpuPct !== null ? String(Math.round(p.cpuPct)) : '-'),
+      React.createElement('td', { style: tdStyle }, p.memMiB !== undefined && p.memMiB !== null ? fmtGiB(p.memMiB) + 'G' : '-'),
+    )
+  const toggle = (key: string) =>
+    setExpanded((prev) => {
+      const next = { ...prev }
+      if (next[key]) delete next[key]
+      else next[key] = true
+      return next
+    })
+  const tbodyRows: unknown[] = []
+  // watched 置顶（独立高亮行）
+  for (const p of watchedRows) tbodyRows.push(row(p, { background: 'rgba(57,100,254,0.06)' }))
+  // 聚合组：标题行（点击展开/收起）+ 展开时全部成员行
+  for (const g of groupRows) {
+    const open = !!expanded[g.key]
+    tbodyRows.push(React.createElement('tr', {
+      key: 'grp-' + g.label,
+      onClick: () => toggle(g.key),
+      style: { cursor: 'pointer' },
+    },
+      React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 11 } },
+        (open ? '▼ ' : '▸ ') + g.label + '（' + g.members.length + '）' +
+        (open ? '' : ' ' + g.members.slice(0, 3).map((m) => m.cmd || '').join(' / '))),
+    ))
+    if (open) {
+      for (const m of g.members) tbodyRows.push(row(m, { background: 'rgba(0,0,0,0.02)' }))
+    }
+  }
+  // 其余普通进程（非默认组）
+  for (const p of otherRows) tbodyRows.push(row(p))
   return React.createElement('div', { key: 'procs', style: { marginTop: 10 } },
     React.createElement('div', { style: { fontWeight: 600, fontSize: 12, marginBottom: 4 } },
-      'GPU 进程' + (s && s.sources && s.sources.procs ? '（' + s.sources.procs + '）' : '')),
+      '进程' + (s && s.sources && s.sources.procs ? '（' + s.sources.procs + '）' : '') +
+      (watchedRows.length ? ' · 监控 ' + watchedRows.length : '')),
     React.createElement('div', { style: { overflowX: 'auto' } },
       React.createElement('table', { style: { borderCollapse: 'collapse', width: '100%' } },
         React.createElement('thead', null,
           React.createElement('tr', null,
             React.createElement('th', { style: thStyle }, 'PID'),
             React.createElement('th', { style: thStyle }, '命令'),
-            React.createElement('th', { style: thStyle }, 'GPU'),
+            React.createElement('th', { style: thStyle }, 'GPU%'),
+            React.createElement('th', { style: thStyle }, 'CPU%'),
+            React.createElement('th', { style: thStyle }, '内存'),
           ),
         ),
-        React.createElement('tbody', null,
-          procs.map((p) => {
-            return React.createElement('tr', { key: p.pid },
-              React.createElement('td', { style: tdStyle }, String(p.pid)),
-              React.createElement('td', { style: { ...tdStyle, maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' } }, p.cmd || ''),
-              React.createElement('td', { style: tdStyle }, p.gpu !== undefined && p.gpu !== null ? String(p.gpu) : '-'),
-            )
-          }),
-        ),
+        React.createElement('tbody', null, ...(tbodyRows as React.ReactElement[])),
       ),
     ),
   )
 }
 
-/** P2 历史曲线：SVG 折线（GPU 利用率 %），O(最小) 点渲染，零第三方依赖。 */
+/**
+ * 告警列表组件（2026-08-20 增强，18-known-issues 问题 3 落地）：
+ * - 同 rule 合并计数（host 对同类告警按周期重复入列 → 显示 ×N 去冗余）
+ * - 超长 msg 截断 120 字 + ellipsis（完整文本 title 提示）
+ * - 默认显示前 2 条 + 「还有 N 条」点击展开
+ */
+function AlertList(props: { alerts: AlertView[] }) {
+  const [showAll, setShowAll] = React.useState(false)
+  const alerts = props.alerts
+  if (!alerts.length) return null
+  const merged: { level: string; rule: string; msg: string; confidence: number; actions: string[]; ts: number; count: number }[] = []
+  const byRule: Record<string, number> = {}
+  for (const a of alerts) {
+    const idx = byRule[a.rule]
+    if (idx !== undefined) {
+      merged[idx].count += 1
+      continue
+    }
+    byRule[a.rule] = merged.length
+    merged.push({ level: a.level, rule: a.rule, msg: a.msg, confidence: a.confidence, actions: a.actions, ts: a.ts, count: 1 })
+  }
+  const visible = showAll ? merged : merged.slice(0, 2)
+  const clip = (m: string) => (m.length > 120 ? m.slice(0, 120) + '…' : m)
+  const items = visible.map((a) => {
+    const color = a.level === 'critical' ? C.error : a.level === 'warn' ? C.warn : C.label2
+    const full = clip(a.msg || a.rule || '')
+    return React.createElement('div', { key: a.rule + '-' + a.ts, style: { padding: '4px 0', fontSize: 12 } },
+      React.createElement('span', { style: { color, fontWeight: 600, marginRight: 6 } }, (a.level || 'info').toUpperCase()),
+      React.createElement('span', { style: { color: C.label, wordBreak: 'break-all' }, title: (a.msg || a.rule || '').length > 120 ? a.msg : undefined }, full),
+      a.count > 1 ? React.createElement('span', { style: { color: C.label2, marginLeft: 6 } }, '×' + a.count) : null,
+      a.confidence !== null && a.confidence !== undefined
+        ? React.createElement('span', { style: { color: C.label2, marginLeft: 6 } }, '置信 ' + Math.round(a.confidence * 100) + '%')
+        : null,
+      Array.isArray(a.actions) && a.actions.length
+        ? React.createElement('span', { style: { color: C.brand, marginLeft: 6 } }, '建议: ' + a.actions.join(' / '))
+        : null,
+    )
+  })
+  const rest = merged.length - visible.length
+  return React.createElement('div', { key: 'alerts', style: { marginTop: 10 } },
+    React.createElement('div', { style: { fontWeight: 600, fontSize: 12, marginBottom: 4 } }, '告警'),
+    ...items,
+    rest > 0
+      ? React.createElement('div', {
+          key: 'alerts-more',
+          onClick: () => setShowAll(true),
+          style: { fontSize: 11, color: C.brand, cursor: 'pointer', padding: '4px 0' },
+        }, '还有 ' + rest + ' 条（点击展开全部）')
+      : null,
+  )
+}
+
+/** P2 历史曲线：SVG 折线（GPU 利用率 %），O(最小) 点渲染，零第三方依赖。
+ * 2026-08-20（2nd）：Y 轴动态区间 + 最小跨度 10——GPU 空闲（全 0%）时折线不再贴底不可见；
+ * 折线加粗 2px + 浅色基线 + 量程标注。 */
 function MiniTrend(props: { points: HistPoint[] }) {
   const points = props.points
   const W = 640, H = 56, PAD = 4
   const vals = points.map((pt) => pt.gpuUtil).filter((v): v is number => typeof v === 'number' && !Number.isNaN(v))
-  if (vals.length < 2) return React.createElement('div', { key: 'trend' })
-  const min = Math.min(...vals)
-  const max = Math.max(...vals)
-  const span = (max - min) || 1
+  // 2026-08-20 修复：数据不足时渲染明确占位文案（此前返回空 div = 视觉"空白"，无任何反馈）
+  if (vals.length < 2) {
+    return React.createElement('div', { key: 'trend', style: { fontSize: 11, color: C.label2, marginTop: 6 } },
+      React.createElement('span', { style: { marginRight: 6, fontWeight: 600, color: C.label } }, 'GPU 利用率趋势'),
+      React.createElement('div', { style: { padding: '12px 0', fontSize: 11, color: C.label2 } }, '数据积累中…（采样 2 点后出图）'),
+    )
+  }
+  // Y 轴动态区间：下界取整到 5 的倍数（≥0），上界 = max+5；最小跨度 10（GPU 空闲 0% 可见）
+  const rawMin = Math.min(...vals)
+  const rawMax = Math.max(...vals)
+  const yMin = Math.max(0, Math.floor(rawMin / 5) * 5)
+  const yMax = Math.max(yMin + 10, Math.ceil((rawMax + 5) / 5) * 5)
+  const span = (yMax - yMin) || 1
   const step = (W - PAD * 2) / Math.max(vals.length - 1, 1)
   const d: string[] = []
   for (let i = 0; i < vals.length; i++) {
     const x = Math.round(PAD + i * step)
-    const y = Math.round(H - PAD - ((vals[i] - min) / span) * (H - PAD * 2))
+    const y = Math.round(H - PAD - ((vals[i] - yMin) / span) * (H - PAD * 2))
     d.push((i ? 'L' : 'M') + x + ' ' + y)
   }
   const line = d.join(' ')
+  const baseY = H - PAD // yMin 基线
   return React.createElement('div', { key: 'trend', style: { fontSize: 11, color: C.label2, marginTop: 6 } },
     React.createElement('span', { style: { marginRight: 6, fontWeight: 600, color: C.label } }, 'GPU 利用率趋势'),
+    React.createElement('span', { style: { fontSize: 10 } }, yMin + '%–' + yMax + '%'),
     React.createElement('svg', { viewBox: '0 0 ' + W + ' ' + H, width: '100%', height: 56, style: { display: 'block', maxWidth: 640, background: C.layer1, borderRadius: 6, border: '1px solid ' + C.border } },
-      React.createElement('polyline', { points: line, fill: 'none', stroke: C.brand, strokeWidth: 1.5, strokeLinejoin: 'round', strokeLinecap: 'round' }),
+      React.createElement('line', { x1: PAD, y1: baseY, x2: W - PAD, y2: baseY, stroke: 'rgba(128,128,128,0.25)', strokeWidth: 1 }),
+      React.createElement('polyline', { points: line, fill: 'none', stroke: C.brand, strokeWidth: 2, strokeLinejoin: 'round', strokeLinecap: 'round' }),
     ),
   )
 }
@@ -371,16 +491,12 @@ function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
           /* 读不到保持旧值 */
         }
       }
-      const s = await refresh()
+      // 2026-08-20（18 问题 4）：快照与历史**同 tick 并行拉取**（此前先 refresh 再 fetchHistory
+      // 串行 → 两处数据时刻不同步，展示数字滞后最多一个轮询周期）
+      const [s, h] = await Promise.all([refresh(), fetchHistory()])
       if (!alive) return
       setSnap(s && !(s as { error?: boolean }).error ? (s as SnapView) : null)
-      // P2 历史曲线：低频随轮询拉取（进程内 API 开销可忽略；失败静默保留旧曲线）
-      try {
-        const h = await fetchHistory()
-        if (alive && h && h.length) setHist(h)
-      } catch (e) {
-        /* 静默 */
-      }
+      if (alive && h && h.length) setHist(h)
       schedule()
     }
     const schedule = () => {
@@ -395,16 +511,20 @@ function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
     const init = () => {
       if (didInit) return
       didInit = true
+      // 首帧并行拉取：快照（缓存优先）+ 历史曲线（2026-08-20 修复：此前首帧不拉历史，
+      // 面板刚打开时 hist=null → 趋势卡片不渲染，直到第一个 tick（5s）后才出现）
       if (last && !(last as { error?: boolean }).error && Date.now() - lastFetchAt < (hidden ? KEEPALIVE_MS : POLL_MS)) {
         setSnap(last)
-        schedule()
       } else {
         refresh().then((s) => {
           if (!alive) return
           setSnap(s && !(s as { error?: boolean }).error ? (s as SnapView) : null)
-          schedule()
         })
       }
+      fetchHistory().then((h) => {
+        if (alive && h && h.length) setHist(h)
+      }).catch(() => { /* 静默：首帧历史失败不阻塞面板 */ })
+      schedule()
     }
     init()
     return () => {
@@ -429,8 +549,8 @@ function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
       }),
       React.createElement('span', { style: { fontWeight: 600 } },
         connecting ? '连接中断，重试中…' : summaryLine(s as SnapView)),
-      React.createElement('span', { style: { fontSize: 11, color: C.label2 } },
-        lastFetchAt ? '更新于 ' + fmtTime(lastFetchAt) : ''),
+      React.createElement('span', { style: { fontSize: 11, color: C.label2 }, title: '数据由 host 采样生成（快照时刻）' },
+        s && s.ts ? '数据 ' + fmtTime(s.ts) : (lastFetchAt ? '更新于 ' + fmtTime(lastFetchAt) : '')),
       s && s.platform
         ? React.createElement('span', { style: { fontSize: 11, color: C.label2 } },
             '[' + s.platform + (s.sources && s.sources.gpu ? '·' + s.sources.gpu : '') + ']')
@@ -454,12 +574,10 @@ function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
           (s.experiment.pid ? ' · pid ' + s.experiment.pid : ''))
       : null,
     // ── 进程表 ──────────────────────────────────────────────────────────────
-    procsTable(s),
-    // ── 告警列表 ────────────────────────────────────────────────────────────
+    React.createElement(ProcsTable, { snap: s, key: 'procs' }),
+    // ── 告警列表（同 rule 合并计数 + 截断 + 可展开）──────────────────────────
     s && Array.isArray(s.alerts) && s.alerts.length
-      ? React.createElement('div', { style: { marginTop: 10 } },
-          React.createElement('div', { style: { fontWeight: 600, fontSize: 12, marginBottom: 4 } }, '告警'),
-          s.alerts.slice(0, 5).map(alertRow))
+      ? React.createElement(AlertList, { alerts: s.alerts, key: 'alerts' })
       : null,
   )
 }
@@ -578,17 +696,26 @@ export function apply(ctx: CtxLike) {
   // ① 数据消费者：apply 顶部无条件执行——首帧拉取（失败静默，轮询退避由组件调度接管）
   void refresh()
   // ② conversation.view 默认出口（★默认兜底；slots 是可选服务，ctx.get 判空）
+  // 2026-08-20 修复（plugin-specialist 诊断）：官方 slots 契约要求先
+  // slots.inject('conversation.view', () => slots.register(...)) 包裹——
+  // inject 订阅该 slot 的声明（ui-conversation 的 children 表），声明就绪后
+  // 才执行注册；裸调 slots.register 会抛
+  // `slot "conversation.view" is not declared (a parent entry's children table must declare it)`，
+  // 导致兜底出口注册失败、UI 完全不显示（chrome console 实测证据）。
   let disposeView: (() => void) | null = null
   const slots = ctx.get('slots')
   if (slots !== undefined) {
     try {
-      ctx.effect(() => {
-        disposeView = (slots as { register(desc: unknown, comp: unknown): () => void }).register(
+      const slotsSvc = slots as {
+        inject(key: string, cb: () => () => void): () => void
+        register(desc: unknown, comp: unknown): () => void
+      }
+      disposeView = slotsSvc.inject('conversation.view', () =>
+        slotsSvc.register(
           { name: 'conversation.view', id: 'lab-monitor', order: 20, label: labelThunk },
           MonitorPanel,
-        )
-        return disposeView
-      })
+        ),
+      )
     } catch (e) {
       console.error('[lab-monitor] conversation.view 注册失败:', e)
     }

@@ -213,7 +213,13 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
    c. **刷新同步**：tick 内 `Promise.all([refresh(), fetchHistory()])` 合并拉取；status 行显示
       「数据 <快照时刻>」+ title 提示（替代 lastFetchAt）。
    mock-test [4] 渲染树断言增强：walk 支持函数组件浅渲染（独立 hook 容器，防 useState 索引串扰）。
-4. **测试脚本配套**：verify-host.js settingsMock 拆 `documents`（持久化文档层，可预置模拟重启）
+4. **趋势图真根因修复（截图核验定位）**：MiniTrend 此前用 `<polyline points>` 渲染 path 命令串
+   （`"M4 52 L12 50"`）——SVG polyline 只接受坐标对，非法属性被浏览器忽略 → 折线永不渲染。
+   改为 `<path d>`（原生支持 M/L）+ stroke 硬编码 `#3964fe` + SVG `minHeight: 56`
+   （known-issues 问题 1；此前误判为 CSS 变量颜色问题，stroke 硬编码后仍不可见反证颜色非根因）。
+5. **展示层核验三项（截图驱动）**：普通进程行加「其他进程（N）」标题 + 上分隔线（无组匹配进程
+   不再被误读为组内成员）；`fmtGiB` 小内存（<0.1GiB）显示 `<0.1`（不再 0G 误读）。
+6. **测试脚本配套**：verify-host.js settingsMock 拆 `documents`（持久化文档层，可预置模拟重启）
    与 `namespaces`（注册表，register 从 documents 初始化）——修复重启模拟时 register 误判
    "already registered" 的问题。
 

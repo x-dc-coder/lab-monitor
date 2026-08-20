@@ -409,6 +409,33 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   await tick(3)
   FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 92 %, 19200 MiB, 24576 MiB, 80, 350.00 W'
 
+  console.log('\n[B3b] 相似命令指纹分离（2026-08-20 多轨修复：pyc: 截断 28→48 防指纹相同）')
+  // python -c 内联形态：sleep(30) vs sleep(35)——v1 的 28 字符截断使两指纹相同 → 都关联第一进程
+  await pre({ name: 'bash', arguments: { command: 'python3 -c "import time; time.sleep(30)" && echo "RUN-A"' } }, async () => ({ kind: 'allow' }))
+  await pre({ name: 'bash', arguments: { command: 'python3 -c "import time; time.sleep(35)" && echo "RUN-B"' } }, async () => ({ kind: 'allow' }))
+  FAKE.psLines = [
+    '53299 1 0.0 3000 bash -c python3 -c "import time; time.sleep(30)" && echo "RUN-A"',
+    '53300 53299 0.0 8000 python3 -c import time; time.sleep(30)',
+    '53301 1 0.0 3000 bash -c python3 -c "import time; time.sleep(35)" && echo "RUN-B"',
+    '53302 53301 0.0 8000 python3 -c import time; time.sleep(35)',
+    '8888 1 0.5 300000 node server.js',
+  ]
+  await tick(3)
+  snap = await G('snapshot')({})
+  assert(Array.isArray(snap.experiments) && snap.experiments.length === 2, '相似命令双实验并行', snap.experiments && snap.experiments.length)
+  const eA = snap.experiments.find((e) => e.cmd && e.cmd.indexOf('sleep(30)') !== -1)
+  const eB = snap.experiments.find((e) => e.cmd && e.cmd.indexOf('sleep(35)') !== -1)
+  assert(eA && eB && eA.pid !== eB.pid, '相似命令 pid 分离（sleep(30)≠sleep(35)）', (eA && eA.pid) + ' vs ' + (eB && eB.pid))
+  assert(eA && Array.isArray(eA.procGroup) && eA.procGroup.indexOf(53299) !== -1 && eA.procGroup.indexOf(53301) === -1,
+    'run-A procGroup 只含自身进程（不含 B 的 53301）', eA && eA.procGroup)
+  assert(eB && Array.isArray(eB.procGroup) && eB.procGroup.indexOf(53301) !== -1 && eB.procGroup.indexOf(53299) === -1,
+    'run-B procGroup 只含自身进程（不含 A 的 53299）', eB && eB.procGroup)
+  // 清理：全部结束
+  FAKE.psLines = []
+  await tick(6)
+  snap = await G('snapshot')({})
+  assert(snap.experiment === null, '相似命令场景清理完毕', snap.experiment)
+
   console.log('\n[D] 阈值：直连即时生效 + 携带 last-write-wins（M3）')
   let rt = await G('setThresholds')({ memWarn: 50 })
   assert(rt.ok && rt.applied.memWarn === 50, 'setThresholds 直连 → memWarn=50', rt.applied)

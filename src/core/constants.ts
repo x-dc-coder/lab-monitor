@@ -46,6 +46,10 @@ export function matchTrainFeature(cmdStr: string | null | undefined): string | n
  * 命令指纹：ps 关联 / result 配对用的特征串（T1-1/T1-2）
  * v1.4.5（e2e 实证）：python -c 内联形态用「pyc: + 归一化命令从 -c 起的完整后缀前 28 字符」，
  * ps 行 indexOf 可匹配（findAliveProc 同归一化）；不可用 m[1]（分号处截断）。
+ * 2026-08-20（A2 多轨修复）：28 → 48 字符——v1 单跟踪时指纹只匹配自身（长度无碍），
+ * 多轨下两个相似命令（如 sleep(30) vs sleep(35)）在 28 字符处差异恰好被截掉 → 指纹相同
+ * → 都关联到第一个进程（pid/procGroup 重叠，实证 run-001/run-002 共享进程组）。
+ * 48 字符保留更多区分信息，且 ps cmdline 一般长于此，indexOf 匹配不受影响。
  */
 export function cmdFingerprint(cmdStr: string | null | undefined): string {
   const norm = String(cmdStr || '').trim().replace(/\s+/g, ' ')
@@ -54,7 +58,7 @@ export function cmdFingerprint(cmdStr: string | null | undefined): string {
   const mc = norm.match(/-c\s+["']?([\s\S]+?)["']?\s*(?:$|;)/)
   if (/python3?\s+-c\b/.test(norm) && mc) {
     const tail = norm.slice(norm.indexOf('-c')).replace(/["']/g, '').replace(/\s+/g, ' ')
-    return 'pyc:' + tail.slice(0, 28)
+    return 'pyc:' + tail.slice(0, 48)
   }
   if (/torchrun|deepspeed/.test(norm)) return norm.split(/\s+/).slice(0, 6).join(' ').slice(0, 80)
   const tok = norm.split(/\s+/)[0] || ''

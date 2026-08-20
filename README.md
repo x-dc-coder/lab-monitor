@@ -97,6 +97,7 @@
 | `docs/04-milestones.md` | P0/P1/P2 验收清单（勾选制） | §4 / §5.5 |
 | `docs/05-ui-adapters.md` | 出口注册策略 / 优先级 / 互斥规则 / 能力降级矩阵 | §3.2 / §6 风险 1/13/15 |
 | `docs/research/` | 调研与评审归档（07 篇） | t1~t8 各轮输出 |
+| `docs/research/18-known-issues.md` | **已知问题跟踪**（2026-08-20：趋势可见性/表格折叠/告警展示/刷新同步） | 后续迭代 |
 
 ## 快速开始（MVP 阶段，已归档）
 
@@ -159,4 +160,61 @@ lib/                # 构建产物（index.js ESM + client.js ModuleLoader bundl
 cordis.patch.yml    # 插件挂载 patch（dsh plugin add 自动应用）
 scripts/            # verify.sh / verify-host.js / verify-sampler.js / e2e-host.js
 docs/research/12-v2-migration.md   # V2 迁移设计 + KV 缓存证据链
+docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存调研（2026-08-20）
 ```
+
+### V2.1 修复与增强（2026-08-20，plugin-specialist 诊断 + 用户需求）
+
+1. **conversation.view 注册姿势修复**（核心 bug）：② 兜底出口必须用官方 slots 契约
+   `slots.inject('conversation.view', () => slots.register(...))` 包裹（裸调 register 抛
+   `slot "conversation.view" is not declared`，UI 完全不显示）。实测主页面会话区出现
+   三个 tab：对话 / 轨迹 / GPU监控（② 出口生效；③ better-sidebar 适配器留后续优化）。
+2. **GPU 占用列恒 `-` 修复（两层）**：
+   a. `nvidia-smi pmon` 新版 9 列输出（`gpu pid type sm ... jpg ofa command`），解析改为
+      **表头列名映射索引**（兼容新旧格式），不再把 gpu 索引当 pid、type 当 sm；
+   b. **截断修复**：tasklist 按 pid 序输出，`slice(0,15)` 截到前 15 个系统进程，真实 GPU
+      活动进程（chrome/explorer/llama-server…）被丢弃 → 新增 `prioritizeGpuProcs`
+      （有 GPU 值的进程置顶、按利用率降序，再补足到 15）。
+3. **趋势首帧加载 + 空闲可见**：面板 init() 首帧并行拉取历史曲线（此前 hist=null → 趋势
+   不渲染，直到 5s 后 tick）；MiniTrend 数据不足时显示"数据积累中…"；Y 轴动态区间
+   （最小跨度 10）+ 折线加粗 2px + 浅色基线——GPU 空闲（全 0%）时折线不再贴底不可见。
+4. **进程展示优化**（需求）：进程表加 GPU%/CPU%/内存 列（GPU 优先读 `gpuUtilPct` 回退 `gpu`）；
+   常见默认进程聚合分组（浏览器/编辑器/Docker/系统/其他应用）折叠展示。
+5. **watchProcs 进程注册**（需求）：`LabMonitorConfig.watchProcs: string[]` 静态配置 +
+   `lab_ctl watch` 运行时动态注册；命中进程在快照 `watchedPids` 标记（面板置顶高亮预留）。
+   `lab_status` 输出附加 `watchlist` 字段。
+6. **KV 缓存调研**（需求）：docs/research/17 结论——当前「promptInjection 默认关 + lab_status 工具」
+   已是 KV 最优；如开启注入须「静态前缀 + 动态尾部(order 990) + 变化限频」三条约束。
+7. **诊断命令误报**（已知项）：`curl | python3 -c` 等管道命令命中 `python -c` 训练特征生成假实验，
+   属检测策略权衡（收紧可能漏真实训练），待用户决策是否加管道排除规则。
+
+### V2.2 修复与增强（2026-08-20，plugin-specialist 实施 + codex 交叉审查）
+
+1. **lossless JSON 输出修复**（核心 bug）：dsh-tools 注册表对工具返回值做 `isJsonValue`
+   校验（NaN/Infinity/undefined/BigInt/-0/环引用 → `value is not lossless JSON`），此前
+   `lab_status`/`lab_advice` 在 nvidia-smi/CIM 输出 `N/A`（解析得 NaN）时直接打挂。
+   双层修复：
+   a. **采样解析安全降级**：`parseSmiLine` num() 非有限数→0；CIM cpuPercent 非有限→null、
+   内存→0（WindowsBackend）；`sumCpu/sumMem/sumGpu` 改用 `Number.isFinite`（proc-aggregator）。
+   b. **出口统一清洗**：`sanitizeJson()` 递归拷贝（undefined→null、非有限→null、-0→+0、
+   深度上限 12）——`buildSnapshot()` 与 `lab_advice` 返回值全量过一遍，防任何残留路径
+   逃逸校验。verify-host [E] 新增 N/A 场景断言：快照/lab_status/lab_advice 全 lossless、
+   utilPct=0、cpu.percent=null。
+2. **settings 持久化（P2 2' 落地）**：`settings.register('lab-monitor', Schema.object({ thresholds,
+   watchProcs }))`——schemastery 为 devDep+peerDep（symlink 安装，Node 从项目 node_modules 解析）。
+   register 读磁盘文档 → `thresholds.apply(stored, true)` + watchProcs 过滤重挂 → `settingsScope.watch()`
+   响应外部修改；`persistState()` 在 setThresholds / rpcSnapshot(携带阈值) / `lab_ctl watch` 后写回。
+   verify-host [D]/[E]：写回 `user.thresholds.memWarn=80`；重启模拟（新 fiber + documents 保留）→
+   阈值恢复 80、watchlist 恢复并命中 llama-server(5555)。
+3. **客户端三项 UI（known-issues 2b/3/4）**：
+   a. **进程组展开**：`ProcsTable` 组件化，聚合组标题行可点击展开成员（▼/▸）；watchlist 命中行置顶。
+   b. **告警聚合**：`AlertList` 组件化，同 rule 合并计数（×N）、msg 120 字截断 + title、级别着色、
+      默认 2 条 + 「还有 N 条（点击展开全部）」。
+   c. **刷新同步**：tick 内 `Promise.all([refresh(), fetchHistory()])` 合并拉取；status 行显示
+      「数据 <快照时刻>」+ title 提示（替代 lastFetchAt）。
+   mock-test [4] 渲染树断言增强：walk 支持函数组件浅渲染（独立 hook 容器，防 useState 索引串扰）。
+4. **测试脚本配套**：verify-host.js settingsMock 拆 `documents`（持久化文档层，可预置模拟重启）
+   与 `namespaces`（注册表，register 从 documents 初始化）——修复重启模拟时 register 误判
+   "already registered" 的问题。
+
+> 注意：1/2/4 的 **host 半改动需 DSH 重启生效**（进程内加载旧 lib/index.js）；3 为 client 半改动，浏览器刷新即生效。

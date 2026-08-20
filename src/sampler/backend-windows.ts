@@ -53,11 +53,16 @@ export class WindowsBackend implements SamplerBackend {
    * 解析 nvidia-smi CSV noheader 行（7 列，实测）：
    *   "0, NVIDIA GeForce RTX 5060 Ti, 7 %, 1867 MiB, 16311 MiB, 43, 20.77 W\r"
    *   → { id, name, utilPct, memUsedMiB, memTotalMiB, tempC, powerW }（单位后缀剥离；\r 容忍）
+   * 2026-08-20：数值字段安全解析——nvidia-smi 在异常/驱动降级时会输出 "N/A"，parseFloat 得
+   * NaN 后直达工具输出破坏 lossless JSON 校验；非有限数一律视为 0（该通道不可用降级语义）。
    */
   private parseSmiLine(line: string): GpuSample | null {
     const f = line.replace(/\r$/, '').split(',').map((s) => s.trim())
     if (f.length < 7) return null
-    const num = (s: string): number => parseFloat(String(s).split(' ')[0])
+    const num = (s: string): number => {
+      const n = parseFloat(String(s).split(' ')[0])
+      return Number.isFinite(n) ? n : 0
+    }
     return {
       id: String(parseInt(f[0], 10)),
       name: f[1],
@@ -152,9 +157,19 @@ export class WindowsBackend implements SamplerBackend {
     }
     const res = {
       ok: true,
-      cpuPercent: parseFloat(parts[0]), // Win32_Processor.LoadPercentage 瞬时快照值（非差分）
-      totalMiB: Math.round(parseInt(parts[1], 10) / 1024),
-      availableMiB: Math.round(parseInt(parts[2], 10) / 1024),
+      // 2026-08-20：CIM 字段安全解析（LoadPercentage 可为 "N/A"/空 → NaN；不可用回 null）
+      cpuPercent: (() => {
+        const n = parseFloat(parts[0])
+        return Number.isFinite(n) ? n : null
+      })(),
+      totalMiB: (() => {
+        const n = parseInt(parts[1], 10)
+        return Number.isFinite(n) ? Math.round(n / 1024) : 0
+      })(),
+      availableMiB: (() => {
+        const n = parseInt(parts[2], 10)
+        return Number.isFinite(n) ? Math.round(n / 1024) : 0
+      })(),
       ppidMap,
     }
     this.cacheSet('_cimCache', res)
@@ -166,6 +181,10 @@ export class WindowsBackend implements SamplerBackend {
    * `nvidia-smi pmon -c 3 -s u` 多帧窗口：跳过 # 注释行，列 pid/type/sm/mem/enc/dec/command；
    * sm（compute%）`-` 视 0；同 pid 多帧取 max（R2：防单帧 `-` 低估）。
    * 失败/驱动不支持 → { ok:false }，上层 gpuUtilPct 留空（整卡指标不受影响）。
+   * 2026-08-20 修复：新版 pmon 表头为 `gpu pid type sm mem enc dec jpg ofa command`（9 列，
+   * 首列 gpu 索引 + jpg/ofa 列），旧版为 `pid type sm mem enc dec command`（6 列）。解析
+   * 不再按固定列序，改为**按表头列名映射索引**——兼容两种格式，避免把 gpu 索引当 pid、
+   * 把 type（C+G）当 sm 导致全部行被过滤（GPU 占用列恒 '-' 的根因）。
    */
   private async queryPmon(): Promise<{ ok: boolean; byPid: Map<number, number>; reason?: string }> {
     const cached = this.cacheGet(this.pmonCache, WIN.TTL.CIM)
@@ -176,14 +195,26 @@ export class WindowsBackend implements SamplerBackend {
       return { ok: false, byPid: new Map(), reason: 'pmon 失败 code=' + r.code + ' ' + (r.stderr || '') }
     }
     const byPid = new Map<number, number>()
+    // 表头列名 → 列索引（# gpu pid type sm mem enc dec jpg ofa command / # pid type sm mem enc dec command）
+    let colIdx: Record<string, number> | null = null
     for (const line of (r.stdout || '').split('\n')) {
       const t = line.trim()
-      if (!t || t.startsWith('#')) continue
+      if (!t) continue
+      if (t.startsWith('#')) {
+        // 表头行：`# gpu pid type sm ... command`（去掉 # 前缀与第二行 `# Idx # C/G % ...`）
+        const names = t.replace(/^#+\s*/, '').split(/\s+/)
+        if (names.includes('pid') && names.includes('sm')) {
+          colIdx = {}
+          for (let i = 0; i < names.length; i++) colIdx[names[i]] = i
+        }
+        continue
+      }
+      if (!colIdx || colIdx.pid === undefined || colIdx.sm === undefined) continue
       const f = t.split(/\s+/)
-      // pmon -s u 行: pid type sm mem enc dec command
-      if (f.length < 6) continue
-      const pid = parseInt(f[0], 10)
-      const sm = f[2] === '-' || f[2] === undefined ? 0 : parseFloat(f[2])
+      if (f.length <= Math.max(colIdx.pid, colIdx.sm)) continue
+      const pid = parseInt(f[colIdx.pid], 10)
+      const smRaw = f[colIdx.sm]
+      const sm = smRaw === '-' || smRaw === '' || smRaw === undefined ? 0 : parseFloat(smRaw)
       if (!Number.isFinite(pid) || !Number.isFinite(sm)) continue
       const prev = byPid.get(pid)
       if (prev === undefined || sm > prev) byPid.set(pid, sm)

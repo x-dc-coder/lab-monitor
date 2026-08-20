@@ -11,7 +11,6 @@ export interface ProcStat {
   memMiB: number | null
   gpuUtilPct?: number | null
 }
-
 /** 实验进程组聚合（5s 周期；主=CPU/内存/存在性，辅=GPU 每进程，预留=显存恒 null） */
 export interface GroupStats {
   cpuPct: number | null
@@ -113,6 +112,8 @@ export interface MonitorSnapshot {
   procs: ProcSample[]
   /** 1.2：非实验组（系统其他进程）统计 */
   system: SystemStats | null
+  /** 2026-08-20：命中 watchProcs 关键词的进程 pid 列表（面板高亮+置顶；空=未配置/未命中） */
+  watchedPids?: number[]
   alerts: Alert[]
   alertsCriticalCount: number
   experiment: ExperimentSnapshot | null

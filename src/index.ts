@@ -16,6 +16,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import Schema from '@deepseek-ai/schemastery'
 
 import { createBackend, collectSnapshot, probeBackend } from './sampler/index.js'
 import type { ProcSample, Runner, SamplerBackend, Snapshot } from './sampler/backend-interface.js'
@@ -31,6 +32,7 @@ import {
   matchTrainFeature,
   normalizeCmdForMatch,
 } from './core/constants.js'
+import type { Thresholds } from './core/constants.js'
 import type { MonitorSnapshot, SamplePoint } from './core/types.js'
 
 // ── 类型 ─────────────────────────────────────────────────────────────────────
@@ -43,6 +45,19 @@ export interface LabMonitorConfig {
   sampleMs: number
   /** UI 轮询周期 ms */
   pollMs: number
+  /**
+   * 自定义监控进程关键词（2026-08-20 新增）：命中（命令名/命令行 contains）的进程在
+   * 监控面板高亮 + 置顶展示，并纳入聚合统计。例：["llama-server", "vllm"]。
+   * 来源：配置文件（settings.yaml 的 lab-monitor 段）静态基线 + lab_ctl watch 运行时动态合并。
+   */
+  watchProcs: string[]
+}
+
+/** dsh-settings 命名空间句柄（SettingsScope 子集：get/watch/update） */
+interface SettingsScopeLike {
+  get(): unknown
+  watch?(cb: (next: unknown, prev: unknown) => void): () => void
+  update?(patch: Record<string, unknown>): unknown
 }
 
 // ── runner 适配（shell 服务 → SamplerBackend 通道契约）────────────────────────
@@ -150,6 +165,36 @@ function fmtGiBx(mib: number | null | undefined): string {
   return g >= 100 ? String(Math.round(g)) : String(Math.round(g * 10) / 10)
 }
 
+/**
+ * 递归 JSON 清洗（2026-08-20 修复：lab_status/lab_advice 报 `value is not lossless JSON`）。
+ * dsh-tools 工具注册表对返回值做 lossless JSON 校验（NaN/Infinity/undefined/BigInt/-0/循环
+ * 一律拒绝，见 dsh-tools lib/index.js `isJsonValue`）。采样/解析层偶发非有限数（nvidia-smi
+ * 的 "N/A"、CIM 空字段等）会直达工具输出 → 完整版 lab_status/lab_advice 调用失败（brief 文本
+ * 模式不受影响）。本函数在对外输出边界递归清洗：非有限数 → null、undefined → null、-0 → 0；
+ * 返回**新对象**（复制语义，不污染 balancer/backend 内部共享引用）。
+ */
+function sanitizeJson<T>(value: T, depth = 0): T {
+  if (depth > 12) return value
+  if (value === undefined) return null as unknown as T
+  if (typeof value === 'number') {
+    if (Number.isFinite(value)) return (value === 0 ? 0 : value) as T // -0 → +0（lossless 语义）
+    return null as unknown as T
+  }
+  if (Array.isArray(value)) {
+    const src = value as unknown[]
+    const out: unknown[] = new Array(src.length)
+    for (let i = 0; i < src.length; i++) out[i] = sanitizeJson(src[i], depth + 1)
+    return out as unknown as T
+  }
+  if (value !== null && typeof value === 'object') {
+    const src = value as Record<string, unknown>
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(src)) out[k] = sanitizeJson(src[k], depth + 1)
+    return out as unknown as T
+  }
+  return value // string / boolean / null
+}
+
 function promptLine(snap: MonitorSnapshot): string {
   const g = snap.gpu && snap.gpu.length ? snap.gpu[0] : null
   const parts: string[] = []
@@ -187,6 +232,14 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     promptInjection: config.promptInjection ?? false,
     sampleMs: config.sampleMs ?? SAMPLE_MS,
     pollMs: config.pollMs ?? THRESHOLD_DEFAULTS.pollMs,
+    watchProcs: Array.isArray(config.watchProcs) ? config.watchProcs.slice() : [],
+  }
+
+  // ── 运行时 watchlist（2026-08-20：用户配置静态基线 ∪ lab_ctl watch 动态注册）──
+  // 动态注册仅存于本 fiber 生命周期（DSH 重启即还原）；持久化由 settings 段承担
+  const runtimeWatch = new Set<string>()
+  function watchSet(): string[] {
+    return Array.from(new Set([...cfg.watchProcs, ...runtimeWatch]))
   }
 
   // ── 状态容器（apply 内初始化，闭包共享）────────────────────────────────
@@ -379,6 +432,21 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
 
   // ── 快照构建（对外协议）────────────────────────────────────────────────
   let callCount = 0
+  /**
+   * GPU 活动进程优先排序（2026-08-20 修复：tasklist 输出按 pid 序，前 15 行全是系统进程，
+   * 真实 GPU 活动进程（chrome/explorer/llama-server…）排在数百行之后被 slice(0,15) 截断，
+   * 导致 GPU% 列恒 '-'。改为：有 gpu 值（或 gpuUtilPct）的进程置顶、按利用率降序，再补足到 N）。
+   */
+  function prioritizeGpuProcs(procs: ProcSample[], n: number): ProcSample[] {
+    const gpuVal = (p: ProcSample): number => {
+      const v = p.gpuUtilPct !== undefined && p.gpuUtilPct !== null ? p.gpuUtilPct : p.gpu
+      return typeof v === 'number' && !Number.isNaN(v) ? v : -1
+    }
+    const gpuOnes = procs.filter((p) => gpuVal(p) >= 0)
+    const gpuOff = procs.filter((p) => gpuVal(p) < 0)
+    gpuOnes.sort((a, b) => gpuVal(b) - gpuVal(a))
+    return [...gpuOnes, ...gpuOff].slice(0, n)
+  }
   function buildSnapshot(): MonitorSnapshot {
     callCount += 1
     const base = backendState.lastSnap || {
@@ -396,6 +464,20 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     if (exp) {
       exp.groupStats = lastGroupStats
     }
+    // 2026-08-20：watchProcs 命中标记（进程名 contains 关键词，大小写不敏感）
+    const watchList = watchSet()
+    const watchedPids: number[] = []
+    if (watchList.length && Array.isArray(base.procs)) {
+      for (let i = 0; i < base.procs.length; i++) {
+        const cmd = base.procs[i].cmd || ''
+        for (let j = 0; j < watchList.length; j++) {
+          if (cmd.toLowerCase().includes(watchList[j].toLowerCase())) {
+            watchedPids.push(base.procs[i].pid)
+            break
+          }
+        }
+      }
+    }
     const snap: MonitorSnapshot = {
       ts: Date.now(),
       platform: base.platform || 'linux',
@@ -409,8 +491,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       gpuState,
       cpu: base.cpu ? { percent: base.cpu.percent, cores: base.cpu.cores !== undefined ? base.cpu.cores : null } : { percent: null, cores: null },
       mem: base.mem ? { totalMiB: base.mem.totalMiB, availableMiB: base.mem.availableMiB } : { totalMiB: null, availableMiB: null },
-      procs: (base.procs || []).slice(0, 15),
+      procs: prioritizeGpuProcs(base.procs || [], 15),
       system: lastSystemStats,
+      watchedPids,
       alerts: balancer.snapshotAlerts(),
       alertsCriticalCount: balancer.count(),
       experiment: exp,
@@ -418,7 +501,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       ui: { betterSidebarVisible: uiVisible() },
     }
     if (base.degraded) snap.degraded = base.degraded
-    return snap
+    // 2026-08-20：对外输出统一 lossless 清洗（NaN/Infinity/undefined → null；-0 → 0）
+    return sanitizeJson(snap) as MonitorSnapshot
   }
 
   // 设置探测：better-sidebar 可见性（aionui-panel 互斥，docs/05 §3.2）
@@ -447,9 +531,64 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     /* 服务不可用 → 默认可见 */
   }
 
+  // ── 阈值/watchProcs 持久化（2026-08-20：P2 2' 落地——settings.register + update）──
+  // 命名空间 lab-monitor：{ thresholds: {utilWarn,memWarn,tempWarn,pollMs}, watchProcs: string[] }
+  // 语义：settings 为唯一事实来源（schema 默认值 ∪ 用户 settings.yaml 覆盖）→ 初始化内存态；
+  // 内存态变更（lab_ctl set-threshold / watch / 请求携带覆盖）→ update 写回持久化。
+  let settingsScope: SettingsScopeLike | null = null
+  try {
+    const settingsSvc = ctx.get('settings') as unknown as {
+      register?(ns: string, schema: unknown, opts?: { base?: unknown; applies?: string }): SettingsScopeLike
+    } | undefined
+    if (settingsSvc && typeof settingsSvc.register === 'function') {
+      const persistSchema = Schema.object({
+        thresholds: Schema.object({
+          utilWarn: Schema.number().default(THRESHOLD_DEFAULTS.utilWarn),
+          memWarn: Schema.number().default(THRESHOLD_DEFAULTS.memWarn),
+          tempWarn: Schema.number().default(THRESHOLD_DEFAULTS.tempWarn),
+          pollMs: Schema.number().default(THRESHOLD_DEFAULTS.pollMs),
+        }),
+        watchProcs: Schema.array(Schema.string()).default([]),
+      })
+      settingsScope = settingsSvc.register('lab-monitor', persistSchema, { applies: 'live' })
+      // 读回持久化基线（重启后 lab_ctl 改的阈值 / watch 动态注册不再丢失）
+      const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[] } | null
+      if (stored && stored.thresholds) thresholds.apply(stored.thresholds as never, true)
+      if (stored && Array.isArray(stored.watchProcs)) {
+        cfg.watchProcs = stored.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
+      }
+      // 外部修改（用户手改 settings.yaml / 其他配置面）实时生效
+      if (typeof settingsScope.watch === 'function') {
+        settingsScope.watch((next) => {
+          const v = next as { thresholds?: Partial<Thresholds>; watchProcs?: string[] } | null
+          if (v && v.thresholds) thresholds.apply(v.thresholds as never, true)
+          if (v && Array.isArray(v.watchProcs)) {
+            cfg.watchProcs = v.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
+          }
+        })
+      }
+      console.log('[lab-monitor] 阈值/watchlist 持久化已启用（settings 命名空间 lab-monitor）')
+    }
+  } catch (e) {
+    console.warn('[lab-monitor] settings 持久化不可用，回退内存模式（阈值/watchlist 重启即还原）:', (e as Error).message)
+  }
+
+  // 写入辅助：内存态变更 → 持久化（失败静默降级内存，不影响运行）
+  function persistState() {
+    if (!settingsScope || typeof settingsScope.update !== 'function') return
+    try {
+      settingsScope.update({ thresholds: thresholds.get(), watchProcs: watchSet() })
+    } catch (e) {
+      console.warn('[lab-monitor] 设置持久化写入失败（保留内存值）:', (e as Error).message)
+    }
+  }
+
   // ── RPC 方法集合（webServer HTTP 数据面）───────────────────────────────
   function rpcSnapshot(args?: { thresholds?: Partial<Record<string, number>> }) {
-    if (args && args.thresholds) thresholds.apply(args.thresholds as never, false)
+    if (args && args.thresholds) {
+      // M3：携带值视作「建议更新」，晚于生效时间戳才覆盖；覆盖成功即持久化
+      if (thresholds.apply(args.thresholds as never, false)) persistState()
+    }
     return buildSnapshot()
   }
   function rpcHistory(args?: { sinceMs?: number; bucketMs?: number }) {
@@ -467,6 +606,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       if (typeof a[k] === 'number' && isFinite(a[k])) applied[k] = a[k]
     }
     thresholds.apply(applied, true) // 直连 = 即时生效（M3）
+    persistState() // 2026-08-20：P2 2' —— 阈值写回 settings 持久化（重启不丢失）
     return { ok: true, applied: thresholds.get() }
   }
   function rpcControl(args?: { action?: string }) {
@@ -547,7 +687,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         toolsService.register(
           defineTool({
             name: 'lab_status',
-            description: '查询 Lab Monitor 实时资源快照（GPU/CPU/内存/进程/实验/告警）。返回完整 JSON 快照；brief:true 取一行摘要。',
+            description: '查询 Lab Monitor 实时资源快照（GPU/CPU/内存/进程/实验/告警/watchlist）。返回完整 JSON 快照；brief:true 取一行摘要。',
             parameters: {
               brief: { type: 'boolean', description: '为 true 时只返回一行摘要字符串' },
             },
@@ -560,6 +700,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             },
             async execute(args: { brief?: boolean }) {
               const snap = buildSnapshot()
+              // 2026-08-20：附加 watchlist（Agent 可见当前监控注册配置）
+              ;(snap as unknown as { watchlist: string[] }).watchlist = watchSet()
               if (args && args.brief === true) return { ok: true, line: promptLine(snap) } as never
               return snap as never
             },
@@ -578,7 +720,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             },
             async execute() {
               const a = rpcAdvice()
-              return { ok: true, advice: a.advice, generatedAt: a.generatedAt } as never
+              // 2026-08-20：advice 携带 evidence（共享 balancer 内部引用）——复制清洗防
+              // NaN/undefined 破坏 lossless JSON 校验，且不污染内部告警流
+              return sanitizeJson({ ok: true, advice: a.advice, generatedAt: a.generatedAt }) as never
             },
           }),
         ),
@@ -587,9 +731,14 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         toolsService.register(
           defineTool({
             name: 'lab_ctl',
-            description: '控制 Lab Monitor 监控/告警引擎（start/pause/resume/set-threshold）。护栏：只控制监控引擎，绝不触碰实验进程。',
+            description: '控制 Lab Monitor 监控/告警引擎（start/pause/resume/set-threshold/watch）。护栏：只控制监控引擎，绝不触碰实验进程。',
             parameters: {
-              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold'], description: '操作类型' },
+              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch'], description: '操作类型' },
+              keywords: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'watch 时的进程名关键词列表（如 ["llama-server","vllm"]）；空数组=清空动态注册',
+              },
               thresholds: {
                 type: 'object',
                 additionalProperties: true,
@@ -606,8 +755,17 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
               schema: { type: 'json' },
               render: (_args: Record<string, unknown>, value: unknown) => renderText(value),
             },
-            async execute(args: { action?: string; thresholds?: Record<string, unknown> }) {
+            async execute(args: { action?: string; keywords?: string[]; thresholds?: Record<string, unknown> }) {
               const a = args || {}
+              if (a.action === 'watch') {
+                const kws = Array.isArray(a.keywords) ? a.keywords.filter((k) => typeof k === 'string' && k.trim()) : []
+                runtimeWatch.clear()
+                for (const k of kws) runtimeWatch.add(k.trim())
+                persistState() // 2026-08-20：动态 watchlist 写回 settings 持久化（重启不丢失）
+                // 命中预览：立即返回当前快照中命中 watchlist 的进程（Agent 可见证据）
+                const wp = buildSnapshot().watchedPids || []
+                return { ok: true, state: 'watchlist-updated', keywords: watchSet(), matchedPids: wp } as never
+              }
               if (a.action === 'set-threshold') {
                 const thr: Record<string, number> = {}
                 const keys = ['utilWarn', 'memWarn', 'tempWarn', 'pollMs']

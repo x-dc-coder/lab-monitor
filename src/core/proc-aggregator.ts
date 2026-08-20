@@ -27,12 +27,15 @@ function toProcStat(p: ProcSample): ProcStat {
   }
 }
 
+/** 数值求和（2026-08-20：`Number.isFinite` 取代 `typeof number`——NaN 也会通过 typeof 检查并
+ * 污染聚合结果，直达工具输出破坏 lossless JSON 校验）。 */
 function sumCpu(ps: ProcStat[]): number | null {
   let s = 0
   let n = 0
   for (let i = 0; i < ps.length; i++) {
-    if (ps[i].cpuPct !== null && typeof ps[i].cpuPct === 'number') {
-      s += ps[i].cpuPct as number
+    const v = ps[i].cpuPct
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      s += v
       n += 1
     }
   }
@@ -43,8 +46,9 @@ function sumMem(ps: ProcStat[]): number | null {
   let s = 0
   let n = 0
   for (let i = 0; i < ps.length; i++) {
-    if (ps[i].memMiB !== null && typeof ps[i].memMiB === 'number') {
-      s += ps[i].memMiB as number
+    const v = ps[i].memMiB
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      s += v
       n += 1
     }
   }
@@ -55,8 +59,9 @@ function sumGpu(ps: ProcStat[]): number | null {
   let s = 0
   let n = 0
   for (let i = 0; i < ps.length; i++) {
-    if (ps[i].gpuUtilPct !== null && typeof ps[i].gpuUtilPct === 'number') {
-      s += ps[i].gpuUtilPct as number
+    const v = ps[i].gpuUtilPct
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      s += v
       n += 1
     }
   }

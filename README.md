@@ -50,7 +50,7 @@
 /home/dc/projects/lab-monitor/
 ├── README.md                        # 本文件：总览、架构图、快速开始
 ├── agent-preset/                    # v2「实验指挥」Agent 预设（★v2 启用，MVP 不实现——T3-3）
-│   └── lab-commander/
+│   └── lab-commander/               #   ⚠️ 2026-08-20 对照：仍未实现（仅 .gitkeep，persona/RULES/tools 三文件待补）
 │       ├── persona.md / RULES.md / tools.md
 ├── scripts/
 │   ├── verify.sh                    # CI 式自测：node --check + 目录完整 + 契约静态核对 + 四测套
@@ -224,3 +224,32 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
    "already registered" 的问题。
 
 > 注意：1/2/4 的 **host 半改动需 DSH 重启生效**（进程内加载旧 lib/index.js）；3 为 client 半改动，浏览器刷新即生效。
+
+## 未完成项清单（2026-08-20 对照 PLAN v1.4.5 + 04-milestones）
+
+> 对照依据：PLAN §0 三层组合 / §1 目录树 / §6 风险表 / §4 验收清单；04-milestones 勾选状态。
+> 分类：A = 计划明确要求但代码未实现；B = 验收遗留（需真实环境/GUI）；C = 可选增强（非阻塞）。
+
+### A 类：计划明确要求，代码未实现
+
+| # | 未完成项 | 文档依据 | 现状 |
+|---|---|---|---|
+| A1 | **指挥层 Agent 预设 lab-commander** | PLAN §0 三层组合第 2 层、§1 目录树（persona/RULES/tools 三文件，★v2 启用） | `agent-preset/lab-commander/` 仅 .gitkeep，三文件全缺 |
+| A2 | **多实验并行跟踪** | 风险 11（R-2「多轨并存留 v2」） | state-machine 仍单跟踪：新 start 归档旧 run 为 aborted（`src/core/state-machine.ts`） |
+| A3 | **webServer 自托管面板（出口④）** | 风险 14 + §3.2.4（「v2 前置」） | 仅实现 HTTP 数据面 `/lab-monitor/api/*`；自托管 HTML 面板未实现 |
+| A4 | **SSE `/lab/events` 远端扩展** | README v2 演进表「webServer SSE /lab/events（手机端/对接 monitor-panel）」 | 源码无 SSE/EventSource 实现 |
+
+### B 类：验收遗留（需真实环境/GUI）
+
+| # | 未完成项 | 说明 |
+|---|---|---|
+| B1 | **P0 2' 会话端到端**（callCount 与 UI 5s 节奏对照） | host 侧 callCount 字段已就绪；conversation.view 已生效（截图确认）→ 现可 GUI 复核 |
+| B2 | **P0 3' 真实无 GPU 机实证** | 环境受限（本机有 GPU）；降级路径由 verify-host 自测覆盖，留待目标环境 |
+| B3 | **P0 6' 互斥形态真实设置模拟**（aionui-panel.rightPanel） | 逻辑由 mock-test [10] + verify-host [F] 覆盖；live 模拟需 better-sidebar 环境 |
+| B4 | **P2 5 better-sidebar 真实注册（GUI 实测）** | 用户确认保持 conversation.view（②）现状，③ 未启用——有意保持 |
+| B5 | **回归红线（§5.5）**：改 client 半后重跑 P0 验收 1/2/5/6 + 断连自愈 | 流程项；mock-test/verify-host 已全绿，真实 GUI 复核待安排 |
+
+### C 类：可选增强（非阻塞）
+
+- **告警静默窗口**（风险 6「静默窗口 v2」）：手动确认/临时忽略某类告警
+- **编排层 Agent-teams**（v3 可选）：多实验并行/超参扫描、共享 GPU 池调配——明确不在当前范围

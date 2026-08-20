@@ -724,4 +724,28 @@ P1 验收 1/2 会话内端到端实证完成（T1 done 零告警 / T2 crashed+CR
 - 回归：`scripts/verify.sh` 全绿（typecheck/构建/verify-host 47 断言/mock-test 10 组/verify-sampler 真实 interop/e2e 可选）。
 - 安装：`dsh plugin --profile web add /home/dc/projects/lab-monitor`（link:）→ `dsh.profile.bundles` 入列 + `dsh --dump-config` 验证 lab-monitor 行。
 - **DSH 重启后插件实际加载**（进程红线：用户手动重启）；重启后验证：`dsh --dump-config` 行 + better-sidebar tab + `/lab-monitor/api/snapshot` HTTP 可达。
-- 遗留（待 GUI/后续）：P0 2' 会话端到端、P2 5 better-sidebar 真实注册（GUI 实测）、P2 2' settings 持久化界面。
+
+## V2.2 完成记录（2026-08-20，plugin-specialist 实施 + codex 交叉审查 + 截图核验）
+
+已完成的修复（详细见 README V2.2 段 + docs/research/18-known-issues.md 状态勾选）：
+
+1. **lossless JSON 输出修复**（lab_status/lab_advice 在 N/A 场景报 `value is not lossless JSON`）：采样解析安全降级（N/A→0/null）+ `sanitizeJson()` 出口统一清洗（undefined→null、非有限→null、-0→+0、深度上限 12 + WeakSet 防环）；codex 审查补 lab_ctl 输出清洗。
+2. **settings 持久化（P2 2' 落地）**：`settings.register('lab-monitor', Schema.object({thresholds, watchProcs}))`——register 读文档 → apply → watch 响应外部修改；persistState() 写回。重启模拟恢复阈值/watchlist（verify-host [D]/[E]）。
+3. **客户端三项 UI（known-issues 2b/3/4）**：进程组展开、告警同 rule 合并/截断/折叠、tick 合并拉取。
+4. **趋势图真根因修复**（known-issues 问题 1，截图核验定位）：polyline 用 path 格式 points 非法 → 改 path 元素 + stroke 硬编码。
+5. **展示层核验三项**（截图驱动）：普通进程行「其他进程」分隔、<0.1G 内存显示。
+6. **测试配套**：verify-host settingsMock documents/namespaces 拆分、mock-test 函数组件浅渲染。
+
+## V2 遗留（2026-08-20 对照清单，未完成）
+
+- **P0 2' 会话端到端（callCount 与 UI 5s 节奏对照）**：conversation.view 已生效 → 现可 GUI 复核（B1）。
+- **P0 3' 真实无 GPU 机实证**：环境受限，降级路径自测覆盖，留待目标环境（B2）。
+- **P0 6' 互斥形态真实设置模拟**：逻辑已由 mock-test [10]/verify-host [F] 覆盖（B3）。
+- **P2 5 better-sidebar 真实注册（GUI 实测）**：用户确认保持 ②，③ 有意不启用（B4）。
+- **回归红线 + 断连自愈（T2-3）**：自测全绿；GUI 复核待安排（B5）。
+- **A1 指挥层 Agent 预设 lab-commander**（§0 三层组合第 2 层，★v2 启用）：`agent-preset/lab-commander/` 空目录，persona/RULES/tools 三文件未实现。
+- **A2 多实验并行跟踪**（风险 11 R-2「多轨并存留 v2」）：state-machine 仍单跟踪（新 start 归档旧 run aborted）。
+- **A3 webServer 自托管面板（出口④）**（风险 14 + §3.2.4）：仅 API 数据面，自托管 HTML 面板未实现（可选）。
+- **A4 SSE /lab/events 远端扩展**（README v2 演进表）：未实现（可选，手机端/对接 monitor-panel）。
+
+> 完整 A/B/C 未完成清单见 README「未完成项清单」+ 04-milestones「V2 阶段未完成项」。

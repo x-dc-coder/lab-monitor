@@ -63,6 +63,7 @@
 - [x] ✅ **2. 轮询节流 + 零渲染口径（自测：mock-test [5] 5s 节流、T2-3 退避、[6] 卸载即停；host 侧 callCount 断言）**
 - [ ] ⬜ **2'. 会话端到端**（callCount 与 UI 5s 节奏对照）：数据消费者轮询生效（conversation.view 无 visible 语义 → 常驻 5s 节流）；**断言手段（T4-2）host 侧计数**：`callCount` 经 snapshot 字段暴露，对照「callCount 增量符合 5s 节流节奏」（callCount 只断言轮询频率）；**零渲染可操作定义**：组件卸载即停，或 label thunk 仅在 `last` 变化时更新 label（口径待样例②实证后定稿）；visible=false 暂停/保活断言移至 P2 验收 5；
   - **结论回填（integ / 2026-08-19）：部分验证，UI 侧受限**——5s 节流/退避/卸载即停由 mock-test [5][6] 自测覆盖；client 半运行确认（host.call 回环）；但 conversation.view 未注册（样例②）→ UI 轮询与 callCount 增量无会话内观测（lab_status 工具路径 callCount 恒 0 系设计：snapshotProvider 硬编码，不计数工具调用）；callCount 节奏断言留待 UI 出口修复后按 T4-2 复核。
+  - **V2 状态（2026-08-20）**：conversation.view 已生效（V2.1 修复注册姿势，GUI 截图确认三个 tab 正常、5s 轮询节奏可见）→ callCount 会话内对照现可执行（GUI 实测 T4-2）；标记 B1 待 GUI 复核。
 - [x] ✅ **3. 无 GPU 降级（自测：buildSnapshot 无 gpu → gpuState=unavailable + CPU/内存照常，sources 标注）**
 - [ ] ⬜ **3'. 真实无 GPU 机实证**：probe() 失败（nvidia-smi.exe 不存在/interop 断）→ `sources.gpu='unavailable'` + CPU/内存/进程照常，**不抛错不挂起**；
   - **结论回填（integ / 2026-08-19）**：本机有 GPU（RTX 5060 Ti），无真实无 GPU 场景可实证；降级路径（buildSnapshot 无 gpu → gpuState='unavailable' + CPU/内存照常）由 verify-host 自测覆盖；真实无 GPU 机实证留待目标环境执行。
@@ -129,6 +130,7 @@
 - [x] ✅ 每次 `cordis_define` 后：`cordis_inspect_self(pluginId, packageId)` 无 diagnostics（队长执行）——**2026-08-19 会话内每次装载/更新后均核对通过（运行态与停止态）**；
 - [x] ✅ 每里程碑结束：① `scripts/verify.sh`（2026-08-18 实现：node --check + 目录完整 + 契约静态核对 + dev-run + verify-host + mock-test + verify-sampler）（node --check 全部 js、目录完整性、契约文件存在）；② 本清单勾选；③ 结果回报队长；
 - [ ] **回归红线**：改 client 半后重 define + 重跑 P0 验收 1/2/5/6（轮询节流、核心独立、兜底同数据、重复激活不回归）；**断连自愈回归（T2-3）**：插件重启/页面刷新后轮询自动恢复（退避重试 + 恢复立即刷新）。
+  - **V2 状态（2026-08-20）**：V2.2 批次改动后 `scripts/verify.sh` 全绿（verify-host 47 断言 / mock-test 10 组 / verify-sampler）覆盖 P0 验收 1/2/5/6 自测语义；真实 GUI 复核（callCount 节奏 / 断连自愈）标记 B5 待安排。
 
 ## 关联文档
 
@@ -142,3 +144,31 @@
 - 本文件内容在 V2 保持不变（数据模型/协议/验收语义与形态无关）。
 - V2 差异：client 数据面由 `host.call('labMonitor.*')` 改为 **HTTP `/lab-monitor/api/*`**（协议字段不变）；工具注册走官方 `ctx.tools.register(defineTool(...))`；prompt 注入默认关闭（KV 缓存友好，`lab_status` 工具替代）。
 - 完整迁移设计：`docs/research/12-v2-migration.md`；架构差异：`docs/01-architecture.md` §8-11。
+
+## V2 阶段未完成项（2026-08-20 对照 PLAN + 本清单）
+
+> 分类：A = 计划明确要求但代码未实现；B = 验收遗留（需真实环境/GUI）；C = 可选增强。
+> 完整清单（含 A/B/C 表）见 README「未完成项清单」章节；下文为勾选状态与追踪。
+
+### A 类（计划明确要求，代码未实现）
+
+| 项 | 追踪 | 状态 |
+|---|---|---|
+| A1 指挥层 Agent 预设 lab-commander | 待实施（persona/RULES/tools 三文件） | ⬜ |
+| A2 多实验并行跟踪（R-2 留 v2） | 待实施（state-machine 单轨 → 多轨） | ⬜ |
+| A3 webServer 自托管面板（出口④） | 可选（v2 前置已满足：API 数据面就绪） | ⬜ |
+| A4 SSE /lab/events 远端扩展 | 可选（手机端/对接 monitor-panel） | ⬜ |
+
+### B 类（验收遗留，需真实环境/GUI）
+
+| 项 | 追踪 | 状态 |
+|---|---|---|
+| B1 P0 2' callCount 与 UI 5s 节奏对照 | 现可 GUI 复核（conversation.view 已生效） | ⬜ |
+| B2 P0 3' 真实无 GPU 机实证 | 环境受限（留待目标环境） | ⬜ |
+| B3 P0 6' 互斥形态真实设置模拟 | 逻辑已覆盖（mock-test [10]/verify-host [F]） | ⬜ |
+| B4 P2 5 better-sidebar 真实注册 | 用户确认保持 ②，③ 有意不启用 | ⬜（有意保持） |
+| B5 回归红线 + 断连自愈（T2-3） | 自测全绿；GUI 复核待安排 | ⬜ |
+
+### C 类（可选增强，非阻塞）
+
+- 告警静默窗口（风险 6「静默窗口 v2」）；编排层 Agent-teams（v3，明确不在当前范围）。

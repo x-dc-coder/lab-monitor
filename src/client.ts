@@ -296,8 +296,11 @@ function TagGroups(props: { tags: TagGroupView[] }): React.ReactElement {
         key: g.rule.id,
         style: { border: '1px solid ' + C.border, borderRadius: 8, padding: '6px 10px', background: C.layer1 },
       },
-        // 组头：色点 + label + kind 徽标 + 聚合统计
+        // 组头：标签徽章 + label + kind 徽标 + 聚合统计（2026-08-20：加「标签」胶囊徽章，
+        // 与内置默认聚合组（浏览器/编辑器等）明显区分——用户反馈分不清标签分组与默认分组）
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+          React.createElement('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: color, color: '#fff' } },
+            '标签'),
           React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: color } }),
           React.createElement('span', { style: { fontWeight: 600, fontSize: 12 } }, g.rule.label || '未命名'),
           React.createElement('span', { style: { fontSize: 10, padding: '0 4px', borderRadius: 3, border: '1px solid ' + color, color: color } },
@@ -335,6 +338,109 @@ function TagGroups(props: { tags: TagGroupView[] }): React.ReactElement {
         ),
       )
     }),
+  )
+}
+
+/** 2026-08-20（标签管理 UI）：全量标签规则管理——列表（含未命中进程的规则）+ 添加表单 + 删除。
+ * 数据来自 host tag API（rpcTag list 返回全量 tagSet()）；add/remove 后重拉 + 快照随轮询刷新。 */
+function TagManager(props: { tags: TagGroupView[] }): React.ReactElement {
+  const [rules, setRules] = React.useState<{ id: string; label: string; patterns: string[]; kind: string; color?: string }[] | null>(null)
+  const [label, setLabel] = React.useState('')
+  const [patterns, setPatterns] = React.useState('')
+  const [kind, setKind] = React.useState('process')
+  const [color, setColor] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const [msg, setMsg] = React.useState<string | null>(null)
+
+  // 2026-08-20：不用 useCallback（mock-test 的 hook 容器未 mock useCallback；且组件每次 poll 重建，
+  // useCallback 收益有限）——普通函数 + useEffect 挂载时拉一次规则列表。
+  function refreshRules() {
+    apiCall<{ ok?: boolean; tags?: { id: string; label: string; patterns: string[]; kind: string; color?: string }[] }>('tag', { tag: { op: 'list' } })
+      .then((r) => {
+        if (r && (r as { ok?: boolean }).ok && Array.isArray((r as { tags?: unknown[] }).tags)) setRules((r as { tags: { id: string; label: string; patterns: string[]; kind: string; color?: string }[] }).tags)
+      })
+      .catch(() => {})
+  }
+  React.useEffect(() => { refreshRules() }, [])
+
+  function act(body: Record<string, unknown>) {
+    setBusy(true)
+    setMsg(null)
+    apiCall<{ ok?: boolean; error?: string }>('tag', { tag: body })
+      .then((r) => {
+        if (r && (r as { ok?: boolean }).ok === true) { refreshRules() }
+        else setMsg((r as { error?: string } | undefined)?.error || '操作失败')
+      })
+      .catch(() => setMsg('调用失败'))
+      .finally(() => setBusy(false))
+  }
+
+  const add = () => {
+    const ls = label.trim()
+    const ps = patterns.split(/[,，\n]/).map((s) => s.trim()).filter(Boolean)
+    if (!ls) { setMsg('需要标签名'); return }
+    if (!ps.length) { setMsg('需要至少一个匹配模式（正则）'); return }
+    const body: Record<string, unknown> = { op: 'add', label: ls, patterns: ps, kind }
+    if (color.trim()) body.color = color.trim()
+    act(body)
+    setLabel(''); setPatterns('')
+  }
+
+  // 无标签规则时显示引导；有规则时折叠式管理
+  const hasRules = Array.isArray(rules) && rules.length > 0
+  return React.createElement('div', { style: { border: '1px solid ' + C.border, borderRadius: 8, padding: '8px 10px', background: C.layer1 } },
+    React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+      React.createElement('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: C.brand, color: '#fff' } }, '标签管理'),
+      React.createElement('span', { style: { fontSize: 11, color: C.label2 } },
+        hasRules ? rules.length + ' 条规则' : '无规则——添加后按命令匹配分组展示'),
+    ),
+    // 规则列表（每条：色点 + label + kind + patterns + 删除）
+    hasRules
+      ? React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 3, marginTop: 6 } },
+          (rules as { id: string; label: string; patterns: string[]; kind: string; color?: string }[]).map((r) => {
+            const c = r.color || C.brand
+            return React.createElement('div', { key: r.id, style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 } },
+              React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: c, flexShrink: 0 } }),
+              React.createElement('span', { style: { fontWeight: 600 } }, r.label),
+              React.createElement('span', { style: { fontSize: 10, padding: '0 4px', borderRadius: 3, border: '1px solid ' + C.border, color: C.label2 } },
+                r.kind === 'experiment' ? '实验' : '进程'),
+              React.createElement('span', { style: { color: C.label2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 } },
+                r.patterns.join(' | ')),
+              React.createElement('button', {
+                onClick: () => act({ op: 'remove', id: r.id }),
+                style: { background: 'transparent', border: '1px solid ' + C.border, color: C.error, borderRadius: 4, fontSize: 10, padding: '1px 6px', cursor: 'pointer' },
+              }, '删除'),
+            )
+          }),
+        )
+      : null,
+    // 添加表单
+    React.createElement('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: hasRules ? 8 : 6 } },
+      React.createElement('input', {
+        value: label, onChange: (e: React.ChangeEvent<HTMLInputElement>) => setLabel(e.target.value),
+        placeholder: '标签名', style: { flex: '0 1 110px', background: C.layer1, border: '1px solid ' + C.border, color: C.label, borderRadius: 4, padding: '3px 6px', fontSize: 11 },
+      }),
+      React.createElement('input', {
+        value: patterns, onChange: (e: React.ChangeEvent<HTMLInputElement>) => setPatterns(e.target.value),
+        placeholder: '正则，如 explorer\\.exe|Taskmgr\\.exe', style: { flex: '1 1 200px', background: C.layer1, border: '1px solid ' + C.border, color: C.label, borderRadius: 4, padding: '3px 6px', fontSize: 11 },
+      }),
+      React.createElement('select', {
+        value: kind, onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setKind(e.target.value),
+        style: { background: C.layer1, border: '1px solid ' + C.border, color: C.label, borderRadius: 4, padding: '3px 4px', fontSize: 11 },
+      },
+        React.createElement('option', { value: 'process' }, '进程'),
+        React.createElement('option', { value: 'experiment' }, '实验'),
+      ),
+      React.createElement('input', {
+        value: color, onChange: (e: React.ChangeEvent<HTMLInputElement>) => setColor(e.target.value),
+        placeholder: '#颜色', style: { width: 64, background: C.layer1, border: '1px solid ' + C.border, color: C.label, borderRadius: 4, padding: '3px 6px', fontSize: 11 },
+      }),
+      React.createElement('button', {
+        onClick: add, disabled: busy,
+        style: { background: C.brand, color: '#fff', border: 'none', borderRadius: 4, fontSize: 11, padding: '3px 10px', cursor: 'pointer' },
+      }, '添加'),
+    ),
+    msg ? React.createElement('div', { style: { fontSize: 11, color: C.error, marginTop: 4 } }, msg) : null,
   )
 }
 
@@ -708,7 +814,10 @@ function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
     ),
     // ── 实验状态（2026-08-20 多轨：主实验 + 并行实验列表）────────────────────
     expBlock(s),
-    // ── 标签分组（2026-08-20：手动打标签的分组展示；进程表之前）───────────────
+    // ── 标签（2026-08-20：标签管理 UI + 命中分组展示；进程表之前）──────────────
+    // 2026-08-20（用户反馈「没看到标签的显示」）：管理区始终可见（含未命中规则），
+    // 命中进程的分组卡片在其下；标签有「标签」胶囊徽章，与内置默认聚合组区分。
+    React.createElement(TagManager, { tags: (s && Array.isArray(s.tags) ? s.tags : []) as TagGroupView[], key: 'tagmgr' }),
     s && Array.isArray(s.tags) && s.tags.length
       ? React.createElement(TagGroups, { tags: s.tags, key: 'tags' })
       : null,

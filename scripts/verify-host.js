@@ -363,7 +363,9 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   assert(!!occ && occ.level === 'info', '无实验 + 整卡高 → other-occupancy(info)（不误报实验 oom）', occ)
   assert(!snap.alerts.some((a) => a.rule === 'oom'), '无实验时不触发 oom 规则', snap.alerts && snap.alerts[0])
   assert(snap.alertsCriticalCount === c0, 'other-occupancy 不新增 critical（计数不变）', c0 + '→' + snap.alertsCriticalCount)
-  assert(occ && occ.evidence && occ.evidence.procs.some((p) => p.pid === 8888), 'other-occupancy evidence 含占卡进程(8888)', occ && occ.evidence)
+  assert(occ && occ.evidence && occ.evidence.procs.some((p) => p.pid === 1234 || p.pid === 9999), 'other-occupancy evidence 含 Windows 侧进程(tasklist 1234/9999)', occ && occ.evidence)
+  // 2026-08-20（归因修复）：evidence 不得含 WSL CPU Top 的 node（8888）——避免 dsh web 式误报（CPU 高 ≠ 占显存）
+  assert(occ && occ.evidence && !occ.evidence.procs.some((p) => p.pid === 8888), 'other-occupancy evidence 不含 WSL node(8888)（防 CPU-top 误判占卡）', occ && occ.evidence)
 
   // 分支①：实验活跃（组 CPU 95 ≥30）+ 整卡高 → oom critical + evidence 含实验 pid
   await pre({ name: 'bash', arguments: { command: 'python train_demo.py --epochs 10' } }, async () => ({ kind: 'allow' }))

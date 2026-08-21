@@ -216,13 +216,32 @@ const RULES: Rule[] = [
       if (!g || !g.memTotalMiB) return { ok: false }
       const usedPct = (g.memUsedMiB / g.memTotalMiB) * 100
       if (usedPct < thr.memWarn || w.experimentActive) return { ok: false }
-      const top = (w.system && w.system.topN) || []
-      const topStr = top.length ? '（Top: ' + top.slice(0, 3).map((p) => p.pid + ' ' + (p.cmd || '?')).join(', ') + '）' : ''
+      // 2026-08-20（归因修复）：显存占卡的候选进程 = Windows 侧 backend procs（tasklist+pmon）
+      // 按 GPU 利用率 >0 优先、其次内存 Top——**不再用 system.topN（WSL CPU 排行）**：
+      // 实测 topN 把 CPU 最高的 dsh web(node) 误判为占卡 15.2G（node 进程根本不占显存）。
+      // 真实占卡者（llama-server.exe/vmmemWSL/WSL GPU 直通进程）均落在 tasklist 侧，
+      // 其显存池映射为 vmmemWSL 或 GPU 活跃进程，mem/gpu 维度可覆盖。
+      const gp = w.group ? w.group.members : []
+      const gpuCandidates = (w.procs || [])
+        .filter((p) => !gp.some((m) => m.pid === p.pid) && typeof p.gpuUtilPct === 'number' && p.gpuUtilPct > 0)
+        .sort((a, b) => (b.gpuUtilPct ?? 0) - (a.gpuUtilPct ?? 0))
+      const memCandidates = (w.procs || [])
+        .filter((p) => !gp.some((m) => m.pid === p.pid) && !(typeof p.gpuUtilPct === 'number' && p.gpuUtilPct > 0))
+        .sort((a, b) => (b.memMiB ?? 0) - (a.memMiB ?? 0))
+      const top = [...gpuCandidates, ...memCandidates].slice(0, 3)
+      const topStat: ProcStat[] = top.map((p) => ({
+        pid: p.pid,
+        cmd: p.cmd ?? null,
+        cpuPct: typeof p.cpuPct === 'number' ? p.cpuPct : null,
+        memMiB: typeof p.memMiB === 'number' ? p.memMiB : null,
+        gpuUtilPct: typeof p.gpuUtilPct === 'number' ? p.gpuUtilPct : null,
+      }))
+      const topStr = topStat.length ? '（Top: ' + topStat.map((p) => p.pid + ' ' + (p.cmd || '?')).join(', ') + '）' : ''
       return {
         ok: true,
         msg: `当前无实验但 GPU 显存占用 ${Math.round(usedPct)}%（${fmtGiB(g.memUsedMiB)}/${fmtGiB(g.memTotalMiB)}G），系统其他进程占卡${topStr}`,
-        actions: [top[0] ? `检查 pid ${top[0].pid} (${top[0].cmd || '?'}) 等占卡进程` : '检查系统其他进程占卡'],
-        evidence: { procs: top.slice(0, 5) },
+        actions: [topStat[0] ? `检查 pid ${topStat[0].pid} (${topStat[0].cmd || '?'}) 等占卡进程` : '检查系统其他进程占卡'],
+        evidence: { procs: topStat.slice(0, 5) },
       }
     },
     msg: '当前无实验但 GPU 显存被系统其他进程占用',

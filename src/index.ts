@@ -818,6 +818,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     setThresholds: (body) => rpcSetThresholds(body as Record<string, number>),
     control: (body) => rpcControl({ action: body.action as string | undefined }),
     advice: () => rpcAdvice(),
+    // 2026-08-20（标签管理 UI）：浏览器端 lab_ctl tag 等效路由（add/remove/list）
+    tag: (body) => rpcTag((body.tag || {}) as Record<string, unknown>),
   }
 
   function httpHandler(req: IncomingMessage, res: ServerResponse) {

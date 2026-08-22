@@ -1226,7 +1226,7 @@ function labelThunk(): string {
 
 const SIDEBAR_TAB_ID = 'lab-monitor:gpu'
 
-/** better-sidebar tab 图标：内联 GPU 芯片 SVG（16px 描边 line-icon，与其它 tab 风格一致，零第三方依赖）。
+/** better-sidebar tab 图标：内联仪表盘/Gauge SVG（16px 描边 line-icon，与其它 tab 风格一致，零第三方依赖）。
  *  契约：icon: (size: number) => ReactNode（better-sidebar 用 currentColor 染色，跟随 tab 前景色）。 */
 function gpuTabIcon(size: number): React.ReactElement {
   const s = size || 16
@@ -1234,16 +1234,12 @@ function gpuTabIcon(size: number): React.ReactElement {
     width: s, height: s, viewBox: '0 0 16 16', fill: 'none',
     stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round',
   },
-    React.createElement('rect', { x: 4.5, y: 4.5, width: 7, height: 7, rx: 1.5 }),
-    React.createElement('rect', { x: 7, y: 7, width: 2, height: 2 }),
-    React.createElement('path', { d: 'M6 2v2.5' }),
-    React.createElement('path', { d: 'M10 2v2.5' }),
-    React.createElement('path', { d: 'M6 11.5V14' }),
-    React.createElement('path', { d: 'M10 11.5V14' }),
-    React.createElement('path', { d: 'M2 6h2.5' }),
-    React.createElement('path', { d: 'M2 10h2.5' }),
-    React.createElement('path', { d: 'M11.5 6H14' }),
-    React.createElement('path', { d: 'M11.5 10H14' }),
+    // 表盘弧（顶部半圆，指针起点=分度中心）
+    React.createElement('path', { d: 'M3.5 10.5 A5 5 0 0 1 12.5 10.5' }),
+    // 指针（中心偏右上，指向高利用率）
+    React.createElement('path', { d: 'M8 10.5 L10.7 6.6' }),
+    // 中心枢轴点
+    React.createElement('circle', { cx: 8, cy: 10.5, r: 1, fill: 'currentColor', stroke: 'none' }),
   )
 }
 
@@ -1311,6 +1307,13 @@ function registerSidebarAdapter(ctx: CtxLike, disposeViewRef: () => (() => void)
             return React.createElement(MonitorPanel, { visible: props.visible, store: props.store })
           }
           dispose3 = (bs as { registerTab(desc: unknown): () => void }).registerTab(desc)
+          // 默认打开：让 monitor 成为 better-sidebar 默认 tab（single:true 自带 dedupeKey，不会重复建/聚焦已开）
+          try {
+            const open = (bs as { openTab?: (seed: { type: string }) => void }).openTab
+            if (open) open({ type: SIDEBAR_TAB_ID })
+          } catch (e) {
+            console.warn('[lab-monitor] 自动打开 GPU 监控 tab 失败（不影响注册）:', e)
+          }
           // ③ 注册成功 → 注销 ②（互斥降级矩阵生效）
           const dv = disposeViewRef()
           if (dv) {

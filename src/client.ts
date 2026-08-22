@@ -247,19 +247,20 @@ function utilColor(pct: number | null | undefined): string {
   return C.success
 }
 
-/** 一行摘要（label thunk 与面板状态行共用）。O(1) 读 last。 */
+/** 面板状态行一行摘要（紧凑 `·` 分隔，不含 tab 标题前缀；O(1) 读 last）。 */
 function summaryLine(s: SnapView): string {
   const g = s.gpu && s.gpu[0]
   const parts: string[] = []
   if (g && s.gpuState !== 'unavailable') {
-    parts.push('GPU' + g.id + ' ' + g.utilPct + '%')
-    if (g.memTotalMiB) parts.push(fmtGiB(g.memUsedMiB) + '/' + fmtGiB(g.memTotalMiB) + 'G')
+    parts.push('GPU ' + g.utilPct + '%')
   } else if (s.gpuState === 'unavailable') {
     parts.push('GPU 无')
   }
   if (s.cpu && typeof s.cpu.percent === 'number') parts.push('CPU ' + Math.round(s.cpu.percent) + '%')
+  const mem = s.mem && s.mem.totalMiB ? Math.round(((s.mem.totalMiB - (s.mem.availableMiB ?? 0)) / s.mem.totalMiB) * 100) : null
+  if (mem !== null) parts.push('内存 ' + mem + '%')
   if (s.alertsCriticalCount) parts.push(s.alertsCriticalCount + '告警')
-  return parts.length ? '监控 ' + parts.join(' ') : '监控'
+  return parts.length ? parts.join(' · ') : '监控'
 }
 
 /** 2026-08-20（A2 多轨）：实验状态块——主实验 + 并行实验列表（每行 runId/状态/时长/pid/cmd） */
@@ -1207,14 +1208,15 @@ function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
 }
 
 /** 出口 label thunk：O(1) 读 last，输出一行摘要；R-4 try/catch。 */
+/** 出口 tab 标题（O(1) 读 last）：简洁名 + 关键告警计数，不再堆状态串。 */
 function labelThunk(): string {
   try {
-    if (!last) return '监控'
-    if ((last as { error?: boolean }).error) return '监控 · 重试中'
-    return summaryLine(last)
+    if (!last) return 'GPU 监控'
+    const c = (last as SnapView).alertsCriticalCount || 0
+    return c ? 'GPU 监控（' + c + '）' : 'GPU 监控'
   } catch (e) {
     console.error('[lab-monitor] label thunk 错误:', e)
-    return '监控'
+    return 'GPU 监控'
   }
 }
 

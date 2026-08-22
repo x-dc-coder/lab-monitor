@@ -163,6 +163,16 @@
 4. **协议升级 1.4**：`docs/03-protocol.md` 追加 `ended[]`/`thresholds`/`enabled`（纯增量，老 client 向后兼容）。
 5. **回归**：`scripts/verify.sh --e2e` 全绿（verify-host/mock-test/verify-sampler/e2e 246s）；e2e timeout 200→300（真实采样 tick 抖动）。**端到端实证（2026-08-22 真实 DSH）**：DSH 工具通道跑 `python3 -c 'time.sleep(20)'` → run-20260822-001 `done` 归档，`ended[]` 含完整摘要（gpuUtilMax 20/avg 10/durationSec 41/dataPartial=false），面板「实验历史（1）」可见；终端直接跑命令不产生历史 —— 设计行为（无 pre-execute 事件），非 bug。
 
+## V2.6 完成记录（2026-08-22，P2 实验历史持久化 + HTTP 暴露面实证）
+
+> 触发：V2.5 端到端验证（Playwright MCP 浏览器实测）发现「实验历史重启即失」——history 纯内存。README「V2.6」section 为完整记录；本文件补勾选状态与验收映射。
+
+1. **实验历史持久化（settings 命名空间 lab-monitor `history` 键）**：状态机新增 `restoreEnded(EndedRunSnapshot[])`（读回投影重建最小 RunRecord 追加 history 尾部，上限 `MAX_HISTORY=20` 常量）；`persistState()` 载荷加 `history`（ended 投影倒序）；**惰性写回**——`buildSnapshot` 出口检测 `history[0].endTs` 变化才落盘（新归档 ≤1 轮询周期写入，正常轮询零写入，重启恢复后不重复写）；schema 加 `history` 键。自测：verify-host 重启模拟 3 断言（重启后 ended[] 恢复 / runId 精确 runA done+runB crashed / summary 结构完整）。
+2. **HTTP 暴露面实证（修正认知）**：Tailscale IP（100.64.0.2:13080）访问 `/lab-monitor/api/*` 实测超时不可达（000）→ `--trusted-host` 未暴露该端口，暴露面 = **localhost only**；「零鉴权」风险降级为防御性 backlog（未来开放端口转发需先加鉴权）。
+3. **端到端实证（2026-08-22 真实 DSH + 浏览器）**：重启后跑 `python3 -c 'import time; time.sleep(6)'` → 归档 → **settings.yaml 落盘 `history` 键**（run-20260822-001 done，summary 完整）→ 面板「实验历史（1）」展开显示与持久化数据一致（GPU峰值 6%/均 4%/显存峰值 1.9G/10s）。
+4. **回归**：verify.sh --e2e 全绿（verify-host 含 3 新断言 / mock-test / verify-sampler / e2e）。
+5. **UI 微调（同批遗留提交）**：GPU 卡进度条 height 6→8 / borderRadius 3→4（视觉增强）。
+
 ## V2 阶段未完成项（2026-08-20 对照 PLAN + 本清单）
 
 > 分类：A = 计划明确要求但代码未实现；B = 验收遗留（需真实环境/GUI）；C = 可选增强。

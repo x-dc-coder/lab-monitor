@@ -324,7 +324,11 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
    此前「HTTP API 零鉴权」风险在当前网络配置下不成立，降级为防御性 backlog（若未来配置端口转发需先加鉴权）。
 3. **测试配套**：verify-host 重启模拟段（ctxd3 documents 保留 → 新 fiber apply）新增 3 断言——
    重启后 ended[] 恢复 / runId 精确（runA done + runB crashed）/ summary 结构完整；全量回归绿。
-4. **顺带记录**：known-issues 问题 6 补充「实验历史只存内存」为已修复（V2.6）。
+4. **端到端实证（2026-08-22 真实 DSH + Playwright MCP 浏览器）**：重启后 DSH 工具通道跑
+   `python3 -c 'import time; time.sleep(6)'` → 归档后 **`~/.dsh/settings.yaml` 落盘 `history` 键**
+   （run-20260822-001 done，summary 含 gpuUtilMax 6/avg 4/memPeak 1917/durationSec 10）→ 面板
+   「实验历史（1）」展开显示与持久化数据一致（GPU峰值 6%/均 4%/显存峰值 1.9G/10s）——写回链路实测闭环。
+5. **顺带记录**：known-issues 问题 6 补充「实验历史只存内存」为已修复（V2.6）。
 
 > 注意：本段 **host 半改动（持久化链路），需 DSH 重启生效**（client 无改动，浏览器刷新即可）。
 

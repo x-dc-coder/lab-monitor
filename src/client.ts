@@ -642,7 +642,7 @@ const tdStyle: React.CSSProperties = {
 function gpuCard(g: GpuView) {
   const pct = g.utilPct
   const barStyle: React.CSSProperties = {
-    height: 6, borderRadius: 3, marginTop: 6, background: 'rgba(0,0,0,0.08)',
+    height: 8, borderRadius: 4, marginTop: 6, background: 'rgba(0,0,0,0.08)',
     overflow: 'hidden',
   }
   const fillStyle: React.CSSProperties = {

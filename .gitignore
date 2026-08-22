@@ -12,6 +12,9 @@ dist/
 # AgentTeams 运行时状态（与项目无关）
 .agent-teams/
 
+# zcode 编辑器运行时产物
+.zcode/
+
 # github-workflow shared ignore rules
 Thumbs.db
 .idea/

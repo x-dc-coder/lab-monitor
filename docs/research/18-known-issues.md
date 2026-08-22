@@ -108,6 +108,18 @@
 
 ---
 
+## 问题 6：P1 功能端到端实证 + 「终端跑命令不产生实验历史」疑问（2026-08-22，V2.5 批次）
+
+- **状态**：✅ 已实证/已解释（V2.5 落地后真实 DSH 验证）
+- **背景**：V2.5（ended[] 实验历史 + 设置面 + 使用文档）交付后，用户在 WSL 终端直接跑短训练命令，面板未出现实验历史——疑似 bug。
+- **结论（实测）**：
+  - **DSH 工具通道跑**（pre-execute 命中 → run 建立 → 进程组关联 → 结束归档）：`python3 -c 'import time; time.sleep(20)'` → `run-20260822-001` `state=done`，`ended[]` 含完整摘要（gpuUtilMax 20 / gpuUtilAvg 10 / memPeak 1751 / durationSec 41 / dataPartial false），面板「实验历史（1）」可见 ✅；
+  - **终端直接跑**（无 pre-execute 事件）：进程只出现在 ps 快照，状态机不会凭空建 run → 无历史、无告警——**设计行为，非 bug**（跟踪依赖工具事件链路）；匹配规则见 `TRAIN_PATTERNS`（python train*.py / python -c / python -m / torchrun / deepspeed）。
+- **顺带发现**：① 阈值极端值 1/1/10 曾出现在生效阈值中——排查确认系测试通道写入未复位（e2e 独立进程不写真实 settings；实际为用户/工具测试残留），后恢复；② 设置面补全前 pollMs 无任何配置入口（死字段）——V2.5 由 snapshot.thresholds.pollMs 动态驱动（1000–60000 钳制），`lab_ctl set-threshold pollMs=3000` 或面板即改即生效。
+- **文档同步**：README V2.5 / docs/usage.md（A1）/ docs/03-protocol.md 1.4（ended/thresholds/enabled）/ 04-milestones V2.5 完成记录。
+
+---
+
 ## 附录 A：数据面健康快照（2026-08-20 14:0x 实测）
 
 - DSH 进程：PID 174318，13:48 启动（host 半 = lib 13:30 构建，含全部修复）

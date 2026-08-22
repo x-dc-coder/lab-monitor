@@ -153,6 +153,16 @@
 2. **标签分组（用户需求：手动打标签分组展示）**：`TagRule {id,label,patterns,kind,color}`——cmdline 正则匹配（**脚本形态天然覆盖**：解释器进程 cmdline 含脚本路径）；`lab_ctl tag add/remove/list`（add 支持 `patterns` 正则或 `pid` 快速打标自动生成规则）；settings 持久化（lab-monitor 命名空间 `tags` 键）；snapshot 追加 `tags[]` 聚合（组内 GPU/CPU/内存 + `runIds`）；UI 标签分组展示（experiment 组显示状态/时长/曲线，process 组显示资源占用）。verify-host [E2] 覆盖（add/pid 打标/list/remove/非法正则守卫/持久化）。
 3. **追踪主键语义**：实验 = runId（每次 start 新 runId）+ cmdline 指纹；标签进程 = 规则（cmdline 正则）；pid 均为关联结果——**进程重启/pid 变化自动重关联**（R3 机制复用）。
 
+## V2.5 完成记录（2026-08-22，P1 实验历史 + 设置面 + 使用文档）
+
+> 延续 plugin-specialist 排查批次（V2.4 三件 P0 修复后用户指示「继续 P1」）。README「V2.5」section 为完整记录；本文件补勾选状态与验收映射。
+
+1. **实验历史保留 + 复盘（新增验收语义，P1 扩展）**：状态机归档时生成指标摘要（GPU 峰值/均值、显存峰值、组 CPU/内存峰值、时长）入 history（上限 20）；快照新增 `ended[]`（`{runId,state,cmd,cmdFeature,startTs,endTs,summary}`，done/crashed/aborted 全覆盖）；UI「实验历史」折叠块复盘展示。自测：verify-host P1 断言段（ended 初始空/协议完整性/done/crashed/runId 精确匹配/aborted 归档，含修复 cap 场景测试盲区——psLines 覆盖致 crash 抢先，上限 aborted 分支此前未被覆盖）。
+2. **设置面补全（ControlPanel，新验收语义）**：面板阈值编辑+保存（HTTP setThresholds 即时生效 + settings 持久化）、暂停/恢复（`control`，暂停跳过采样但快照照常）、清除告警（clear-alerts 带计数）；快照新增 `thresholds`/`enabled` 透出；**轮询周期由 `thresholds.pollMs` 动态驱动**（1000–60000 钳制，lab_ctl/面板改值即生效）。自测：verify-host 阈值透出（memWarn=80/pollMs=3000/enabled pause↔resume）+ mock-test 5 条渲染断言。
+3. **使用文档（A1 落地）**：`docs/usage.md`（工具用法手册 + UI 指引 + 阈值/标签/多轨语义 + 持久化 + 变更记录）。A1 状态：🔶 → ✅（用户决策不做 Agent 预设，以使用文档交付）。
+4. **协议升级 1.4**：`docs/03-protocol.md` 追加 `ended[]`/`thresholds`/`enabled`（纯增量，老 client 向后兼容）。
+5. **回归**：`scripts/verify.sh --e2e` 全绿（verify-host/mock-test/verify-sampler/e2e 246s）；e2e timeout 200→300（真实采样 tick 抖动）。**端到端实证（2026-08-22 真实 DSH）**：DSH 工具通道跑 `python3 -c 'time.sleep(20)'` → run-20260822-001 `done` 归档，`ended[]` 含完整摘要（gpuUtilMax 20/avg 10/durationSec 41/dataPartial=false），面板「实验历史（1）」可见；终端直接跑命令不产生历史 —— 设计行为（无 pre-execute 事件），非 bug。
+
 ## V2 阶段未完成项（2026-08-20 对照 PLAN + 本清单）
 
 > 分类：A = 计划明确要求但代码未实现；B = 验收遗留（需真实环境/GUI）；C = 可选增强。
@@ -162,7 +172,7 @@
 
 | 项 | 追踪 | 状态 |
 |---|---|---|
-| A1 指挥层 Agent 预设 lab-commander | 🔶 **2026-08-20 用户决策：不做预设**，改为「使用文档」形式（lab_status/lab_advice/lab_ctl 用法手册）；prompt 注入增强待讨论（KV 缓存影响） | 🔶 重新定位 |
+| A1 指挥层 Agent 预设 lab-commander | ✅ **2026-08-22 落地（V2.5）**：用户决策不做预设，改为使用文档——`docs/usage.md`（lab_status/lab_advice/lab_ctl 用法手册 + 面板 UI + 语义 + 持久化）；prompt 注入增强待讨论（KV 缓存影响） | ✅ 完成（以文档形式） |
 | A2 多实验并行跟踪（R-2 留 v2） | ✅ **2026-08-20 实施完成**：多轨（上限 4 + per-run 判定 + runId 归属）+ 标签分组（TagRule 规则式打标 + lab_ctl tag + tags 聚合 + UI 分组展示）；verify-host [B3]/[E2] 全绿；见「V2 完成记录」 | ✅ 完成 |
 | A3 webServer 自托管面板（出口④） | 可选（v2 前置已满足：API 数据面就绪） | ⬜ |
 | A4 SSE /lab/events 远端扩展 | 可选（手机端/对接 monitor-panel） | ⬜ |

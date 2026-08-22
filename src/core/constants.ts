@@ -23,9 +23,13 @@ export const MAX_PARALLEL_RUNS = 4
 /** 2026-08-22（P2 实验历史）：已结束实验历史上限（ended[] 投影与 settings 持久化共用） */
 export const MAX_HISTORY = 20
 
-export const THRESHOLD_DEFAULTS = { utilWarn: 90, memWarn: 95, tempWarn: 85, pollMs: 5000 }
+export const THRESHOLD_DEFAULTS = {
+  utilWarn: 90, memWarn: 95, tempWarn: 85, pollMs: 5000,
+  // 2026-08-23：进程排序（取前 N + 权重，均可调）
+  procTopN: 30, wGpu: 1, wCpu: 1, wMem: 1,
+}
 export type Thresholds = typeof THRESHOLD_DEFAULTS
-export const THRESH_KEYS = ['utilWarn', 'memWarn', 'tempWarn', 'pollMs'] as const
+export const THRESH_KEYS = ['utilWarn', 'memWarn', 'tempWarn', 'pollMs', 'procTopN', 'wGpu', 'wCpu', 'wMem'] as const
 
 /** 训练命令关键词表（T4-1：python train*.py / python -c / python3 -c / torchrun / deepspeed / python -m） */
 export const TRAIN_PATTERNS: { name: string; re: RegExp }[] = [

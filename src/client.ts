@@ -22,7 +22,7 @@ const POLL_MS_MIN = 1000
 const POLL_MS_MAX = 60000
 const KEEPALIVE_MS = 30000 // D-B2：better-sidebar visible=false → 30s 低频保活（badge 更新）
 const BACKOFFS = [5000, 10000, 30000] // T2-3：失败指数退避 5s→10s→30s 封顶
-const THRESH_KEYS = ['utilWarn', 'memWarn', 'tempWarn', 'pollMs']
+const THRESH_KEYS = ['utilWarn', 'memWarn', 'tempWarn', 'pollMs', 'procTopN', 'wGpu', 'wCpu', 'wMem']
 const API_BASE = '/lab-monitor/api'
 
 // 快照类型（客户端视角，与 host MonitorSnapshot 对齐）
@@ -68,7 +68,7 @@ interface SnapView {
   /** 2026-08-22（P1 实验历史）：已结束实验（done/crashed/aborted）——复盘展示 */
   ended?: EndedView[]
   /** 2026-08-22（P1 设置面）：当前生效阈值（轮询周期由 pollMs 驱动） */
-  thresholds?: { utilWarn: number; memWarn: number; tempWarn: number; pollMs: number }
+  thresholds?: { utilWarn: number; memWarn: number; tempWarn: number; pollMs: number; procTopN?: number; wGpu?: number; wCpu?: number; wMem?: number }
   /** 2026-08-22（P1 设置面）：监控引擎启停状态 */
   enabled?: boolean
   /** 2026-08-20（标签分组）：用户标签规则命中聚合 */
@@ -393,6 +393,11 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
   const [utilWarn, setUtilWarn] = React.useState<string>(thr ? String(thr.utilWarn) : '')
   const [memWarn, setMemWarn] = React.useState<string>(thr ? String(thr.memWarn) : '')
   const [tempWarn, setTempWarn] = React.useState<string>(thr ? String(thr.tempWarn) : '')
+  // 2026-08-23：进程排序配置（取前 N + CPU/GPU/内存 权重，均可调）
+  const [procTopN, setProcTopN] = React.useState<string>(thr && typeof thr.procTopN === 'number' ? String(thr.procTopN) : '30')
+  const [wGpu, setWGpu] = React.useState<string>(thr && typeof thr.wGpu === 'number' ? String(thr.wGpu) : '1')
+  const [wCpu, setWCpu] = React.useState<string>(thr && typeof thr.wCpu === 'number' ? String(thr.wCpu) : '1')
+  const [wMem, setWMem] = React.useState<string>(thr && typeof thr.wMem === 'number' ? String(thr.wMem) : '1')
   const [busy, setBusy] = React.useState(false)
   const [msg, setMsg] = React.useState<string | null>(null)
   const paused = s && s.enabled === false
@@ -403,8 +408,12 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
       setUtilWarn(String(thr.utilWarn))
       setMemWarn(String(thr.memWarn))
       setTempWarn(String(thr.tempWarn))
+      if (typeof thr.procTopN === 'number') setProcTopN(String(thr.procTopN))
+      if (typeof thr.wGpu === 'number') setWGpu(String(thr.wGpu))
+      if (typeof thr.wCpu === 'number') setWCpu(String(thr.wCpu))
+      if (typeof thr.wMem === 'number') setWMem(String(thr.wMem))
     }
-  }, [thr && thr.utilWarn, thr && thr.memWarn, thr && thr.tempWarn])
+  }, [thr && thr.utilWarn, thr && thr.memWarn, thr && thr.tempWarn, thr && thr.procTopN, thr && thr.wGpu, thr && thr.wCpu, thr && thr.wMem])
 
   const inputStyle: React.CSSProperties = {
     width: '100%', boxSizing: 'border-box', background: C.layer1, border: '1px solid ' + C.border, color: C.label,
@@ -427,6 +436,11 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
     if (u !== null) body.utilWarn = Math.max(0, Math.min(100, u))
     if (m !== null) body.memWarn = Math.max(0, Math.min(100, m))
     if (t !== null) body.tempWarn = Math.max(0, Math.min(120, t))
+    const n = num(procTopN); const g = num(wGpu); const c = num(wCpu); const mm = num(wMem)
+    if (n !== null) body.procTopN = Math.max(5, Math.min(200, Math.round(n)))
+    if (g !== null) body.wGpu = Math.max(0, Math.min(20, g))
+    if (c !== null) body.wCpu = Math.max(0, Math.min(20, c))
+    if (mm !== null) body.wMem = Math.max(0, Math.min(20, mm))
     if (!Object.keys(body).length) { setMsg('阈值格式无效'); return }
     setBusy(true); setMsg(null)
     apiCall<{ ok?: boolean; applied?: Record<string, number> }>('setThresholds', body)
@@ -481,6 +495,13 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
       field('GPU利用%', utilWarn, setUtilWarn, 'GPU 利用率告警阈值'),
       field('显存%', memWarn, setMemWarn, '显存占用告警阈值'),
       field('温度°C', tempWarn, setTempWarn, '温度告警阈值'),
+    ),
+    // 进程排序：取前 N + CPU/GPU/内存 权重（2026-08-23）
+    React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(104px, 1fr))', gap: 10, marginTop: 8 } },
+      field('取前N进程', procTopN, setProcTopN, '按加权打分取前 N 个高占用进程（5..200）'),
+      field('权重GPU', wGpu, setWGpu, 'GPU 利用率权重（0..20）'),
+      field('权重CPU', wCpu, setWCpu, 'CPU 利用率权重（0..20）'),
+      field('权重内存', wMem, setWMem, '内存占用权重（0..20）'),
     ),
     // 操作行：保存 / 暂停/恢复 / 清除告警
     React.createElement('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 } },
@@ -794,20 +815,26 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
   const all = (s && Array.isArray(s.procs)) ? s.procs : []
   if (!all.length || !s) return null
   const watched = new Set<number>(Array.isArray(s.watchedPids) ? s.watchedPids : [])
-  // 资源占用打分（GPU/CPU/内存 0-100 归一化均衡——避免 GPU 独占前排，让重内存的进程（虚拟机/浏览器渲染）也能进前 15）
+  // 进程排序配置：从快照 thresholds 读 取前N + CPU/GPU/内存 权重（默认 30 / 1:1:1，设置页可调）
+  const thr = (s && s.thresholds) as { procTopN?: number; wGpu?: number; wCpu?: number; wMem?: number } | undefined
+  const procTopN = (thr && typeof thr.procTopN === 'number') ? Math.max(5, Math.round(thr.procTopN)) : 30
+  const wGpu = (thr && typeof thr.wGpu === 'number') ? thr.wGpu : 1
+  const wCpu = (thr && typeof thr.wCpu === 'number') ? thr.wCpu : 1
+  const wMem = (thr && typeof thr.wMem === 'number') ? thr.wMem : 1
+  // 加权打分：GPU/CPU/内存（0-100 归一化）× 权重（权重可调，默认均衡）
   const memTotal = s.mem && s.mem.totalMiB
   const score = (p: ProcView): number => {
     const gpu = procGpu(p) || 0
     const cpu = p.cpuPct || 0
     const memPct = (memTotal && p.memMiB) ? (p.memMiB / memTotal) * 100 : 0
-    return gpu + cpu + memPct
+    return wGpu * gpu + wCpu * cpu + wMem * memPct
   }
   const watchedRows = all.filter((p) => watched.has(p.pid))
   const total = all.length
-  // **对全量非监控进程分组**（host 已发全量；组头计数/聚合=该组全部成员）——准确聚合 Chrome/虚拟机内存（不再只取前 15）
-  const nonWatched = all.filter((p) => !watched.has(p.pid)).slice().sort((a, b) => score(b) - score(a))
+  // ① 先按加权打分选前 N 个高占用（watch 置顶已含，N 在设置页可调）→ ② 再对它们分组展示
+  const top = all.filter((p) => !watched.has(p.pid)).slice().sort((a, b) => score(b) - score(a)).slice(0, Math.max(1, procTopN - watchedRows.length))
   const groupRows: { key: string; label: string; members: ProcView[] }[] = []
-  const remaining = nonWatched.slice()
+  const remaining = top.slice()
   for (const g of DEFAULT_PROC_GROUPS) {
     const members = remaining.filter((p) => g.match(p.cmd || ''))
     if (!members.length) continue
@@ -907,8 +934,9 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
     }
   }
   return React.createElement('div', { key: 'procs', style: { marginTop: 4 } },
-    React.createElement('div', { style: sectionTitle, title: '进程按组聚合（计数/内存=该组全部进程），组内可展开查看成员' },
+    React.createElement('div', { style: sectionTitle, title: '按加权打分（GPU/CPU/内存 权重可调）取前 ' + procTopN + ' 个高占用进程，再分组' },
       '进程' + (s && s.sources && s.sources.procs ? '（' + s.sources.procs + '）' : '') + ' · 共 ' + total +
+      (total > procTopN ? ' · 显示前' + procTopN : '') +
       (watchedRows.length ? ' · 监控 ' + watchedRows.length : '')),
     React.createElement('div', { style: { overflowX: 'auto' } },
       React.createElement('table', { style: { borderCollapse: 'collapse', width: '100%' } },

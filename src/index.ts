@@ -673,6 +673,11 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             memWarn: Schema.number().default(THRESHOLD_DEFAULTS.memWarn),
             tempWarn: Schema.number().default(THRESHOLD_DEFAULTS.tempWarn),
             pollMs: Schema.number().default(THRESHOLD_DEFAULTS.pollMs),
+            // 2026-08-23：进程排序（取前 N + CPU/GPU/内存 权重）
+            procTopN: Schema.number().default(THRESHOLD_DEFAULTS.procTopN),
+            wGpu: Schema.number().default(THRESHOLD_DEFAULTS.wGpu),
+            wCpu: Schema.number().default(THRESHOLD_DEFAULTS.wCpu),
+            wMem: Schema.number().default(THRESHOLD_DEFAULTS.wMem),
           }),
           watchProcs: Schema.array(Schema.string()).default([]),
           // 2026-08-20（标签分组）：进程标签规则持久化
@@ -809,10 +814,14 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   function rpcSetThresholds(args?: Record<string, number>) {
     const a = args || {}
     const applied: Record<string, number> = {}
-    const keys = ['utilWarn', 'memWarn', 'tempWarn', 'pollMs']
+    const keys = ['utilWarn', 'memWarn', 'tempWarn', 'pollMs', 'procTopN', 'wGpu', 'wCpu', 'wMem']
     for (let n = 0; n < keys.length; n++) {
       const k = keys[n]
-      if (typeof a[k] === 'number' && isFinite(a[k])) applied[k] = a[k]
+      if (typeof a[k] !== 'number' || !isFinite(a[k])) continue
+      let v = a[k]
+      if (k === 'procTopN') v = Math.max(5, Math.min(200, Math.round(v))) // 进程排序取前 N（5..200）
+      else if (k === 'wGpu' || k === 'wCpu' || k === 'wMem') v = Math.max(0, Math.min(20, v)) // 权重 0..20
+      applied[k] = v
     }
     thresholds.apply(applied, true) // 直连 = 即时生效（M3）
     persistState() // 2026-08-20：P2 2' —— 阈值写回 settings 持久化（重启不丢失）

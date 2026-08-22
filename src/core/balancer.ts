@@ -25,7 +25,7 @@ export function createThresholds(): ThresholdCtrl {
   let appliedAt = 0
   return {
     get(): Thresholds {
-      return { utilWarn: t.utilWarn, memWarn: t.memWarn, tempWarn: t.tempWarn, pollMs: t.pollMs }
+      return { utilWarn: t.utilWarn, memWarn: t.memWarn, tempWarn: t.tempWarn, pollMs: t.pollMs, procTopN: t.procTopN, wGpu: t.wGpu, wCpu: t.wCpu, wMem: t.wMem }
     },
     effectiveTimestamp(): number {
       return appliedAt
@@ -33,7 +33,7 @@ export function createThresholds(): ThresholdCtrl {
     apply(patch: Partial<Thresholds> | null | undefined, isDirect: boolean): boolean {
       if (!patch || typeof patch !== 'object') return false
       if (!isDirect && Date.now() < appliedAt) return false // 携带值晚于生效时间戳才覆盖（M3/R2）
-      const keys = ['utilWarn', 'memWarn', 'tempWarn', 'pollMs'] as const
+      const keys = ['utilWarn', 'memWarn', 'tempWarn', 'pollMs', 'procTopN', 'wGpu', 'wCpu', 'wMem'] as const
       let changed = false
       for (let n = 0; n < keys.length; n++) {
         const k = keys[n]

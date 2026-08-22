@@ -88,6 +88,26 @@
 
 ---
 
+## 问题 5：lab_status brief 摘要恒显示「GPU 无」+ watchlist 命中行 UI 不可见 + 告警无生命周期（2026-08-22 排查新增）
+
+- **状态**：✅ 已修（2026-08-22 V2.4，plugin-specialist 排查定位，verify-host [C2] 回归）
+- **现象**（运行时实测）：
+  a. `lab_status brief:true` 返回 `[Lab Monitor] GPU 无 · 告警: 无`，但完整快照 GPU 正常（RTX 5060 Ti / 36°C / 1016MiB used）——Agent 摘要与真相矛盾；
+  b. `watchedPids=[41184]`（llama-server 命中）但快照 procs 15 行里没有 41184 → 面板 watch 置顶高亮形同虚设；
+  c. 告警列表 8 条全是 11 小时前的 experiment-crash（critical），`alertsCriticalCount=8` 只增不减，`lab_advice` 恒返回这 5 条旧 crash——badge/建议被历史噪音淹没。
+- **根因**：
+  a. defineTool render 对 brief 模式把 execute 返回的信封 `{ok,line}` 当快照二次调 `promptLine(value)` → `value.gpu` undefined → 恒走「GPU 无」分支（src/index.ts render 分支，execute 生成的正确 line 被丢弃）；
+  b. `prioritizeGpuProcs` 只按 GPU 利用率排序，无 GPU 活动的 watch 进程（空闲 llama-server）被 15 行截断切掉；
+  c. balancer alerts 纯内存只进不出：TTL/确认/清除机制全无，ALERT_MAX 截断也不扣 criticalCount。
+- **修复（2026-08-22）**：
+  a. render brief 分支直接使用信封 line（无则回退 JSON 序列化）；
+  b. buildSnapshot 排序改为 watch 命中先行 + 其余 GPU 优先补足 15 行；
+  c. balancer 加 `ALERT_TTL_MS=24h` 过期清理（snapshot/advice/count 读取时兜底）+ `clear(filter?)`（全清 / runId / rule 定向清除）+ 截断计数修正；`lab_ctl` 加 `clear-alerts` 动作（返回 cleared/remaining/criticalCount），HTTP control 路由同步支持。
+- **验证方法**：DSH 重启后 `lab_status brief:true` 摘要含 `GPU0 ...%`；`lab_ctl clear-alerts` 后 badge 归零；watch 命中进程（如运行 llama-server）出现在面板进程表顶部高亮。
+- **修复落地的回归**：verify-host.js 新增 [C2] 段（8 断言：TTL 过期回落 / rule+runId 定向清除 / 全清归零）+ watch 置顶断言；e2e-host.js 补 settings/ctx 桩后 ALL PASS；`scripts/verify.sh --e2e` 全绿。
+
+---
+
 ## 附录 A：数据面健康快照（2026-08-20 14:0x 实测）
 
 - DSH 进程：PID 174318，13:48 启动（host 半 = lib 13:30 构建，含全部修复）

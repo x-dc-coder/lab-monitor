@@ -542,7 +542,14 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     // prioritizeGpuProcs 15 截断子集，无 GPU 进程（如 llama-server.exe）被截掉 → 标签组永远为空。
     // 截断（procsAll）只用于快照 procs 字段的 UI 展示，不参与标签匹配。
     const baseProcsFull = Array.isArray(base.procs) ? base.procs : []
-    const procsAll = prioritizeGpuProcs(baseProcsFull, 15)
+    // 2026-08-22（P0 修复，实测 bug）：watchlist 命中必须置顶可见——
+    // 此前 prioritizeGpuProcs 只按 GPU 利用率排序，无 GPU 活动的 watch 进程
+    // （如空闲 llama-server）被 15 行截断切掉 → watchedPids 有标记但 UI 永远看不到命中行。
+    // 修复：命中 watchlist 的进程先行（组内仍按 GPU 优先），其余进程补足到 15 行。
+    const watchPidSet = new Set(watchedPids)
+    const watchedFirst = baseProcsFull.filter((p) => watchPidSet.has(p.pid))
+    const others = baseProcsFull.filter((p) => !watchPidSet.has(p.pid))
+    const procsAll = [...prioritizeGpuProcs(watchedFirst, 15), ...prioritizeGpuProcs(others, 15)].slice(0, 15)
     const tagGroups: TagGroup[] = []
     const rules = tagSet()
     if (rules.length && baseProcsFull.length) {
@@ -754,12 +761,15 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     persistState() // 2026-08-20：P2 2' —— 阈值写回 settings 持久化（重启不丢失）
     return { ok: true, applied: thresholds.get() }
   }
-  function rpcControl(args?: { action?: string }) {
+  function rpcControl(args?: { action?: string; runId?: string | null; rule?: string | null }) {
     const action = args && args.action
     if (action === 'start') enabled = true
     else if (action === 'pause') enabled = false
     else if (action === 'resume') enabled = true
-    else return { ok: false, error: '未知 action: ' + action }
+    else if (action === 'clear-alerts') {
+      // 2026-08-22（P0 告警生命周期）：清除告警——无过滤=全清；支持 runId/rule 定向清除
+      return { ok: true, state: 'alerts-cleared', ...balancer.clear({ runId: args && args.runId, rule: args && args.rule }) }
+    } else return { ok: false, error: '未知 action: ' + action }
     return { ok: true, state: enabled ? 'running' : 'paused' }
   }
   function rpcAdvice() {
@@ -885,8 +895,16 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             output: {
               schema: { type: 'json' },
               render: (args: { brief?: boolean }, value: unknown) => {
-                const snap = value as MonitorSnapshot
-                return renderText(args && args.brief === true ? promptLine(snap) : value)
+                // 2026-08-22（P0 修复，实测 bug）：brief 模式 execute 返回信封 {ok,line}，
+                // 此前 render 把信封当快照再调 promptLine(value) → gpu 必为 undefined →
+                // 摘要永远显示「GPU 无 · 告警: 无」（与真实数据矛盾）。
+                // 修复：brief 时直接使用 execute 生成的 line（无则回退 JSON 序列化）。
+                if (args && args.brief === true) {
+                  const env = value as { line?: unknown } | null
+                  const line = env && typeof env.line === 'string' ? env.line : JSON.stringify(value)
+                  return renderText(line)
+                }
+                return renderText(value)
               },
             },
             async execute(args: { brief?: boolean }) {
@@ -922,9 +940,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         toolsService.register(
           defineTool({
             name: 'lab_ctl',
-            description: '控制 Lab Monitor 监控/告警引擎（start/pause/resume/set-threshold/watch/tag）。护栏：只控制监控引擎，绝不触碰实验进程。',
+            description: '控制 Lab Monitor 监控/告警引擎（start/pause/resume/set-threshold/watch/tag/clear-alerts）。护栏：只控制监控引擎，绝不触碰实验进程。',
             parameters: {
-              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch', 'tag'], description: '操作类型' },
+              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch', 'tag', 'clear-alerts'], description: '操作类型' },
               keywords: {
                 type: 'array',
                 items: { type: 'string' },
@@ -955,12 +973,20 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                 },
                 description: 'tag 操作的参数（action=tag 时使用）',
               },
+              runId: {
+                type: 'string',
+                description: 'clear-alerts 时可选：只清除指定 runId 实验产生的告警（如 run-20260822-017）',
+              },
+              rule: {
+                type: 'string',
+                description: 'clear-alerts 时可选：只清除指定规则（rule）的告警，如 experiment-crash、oom、thermal',
+              },
             },
             output: {
               schema: { type: 'json' },
               render: (_args: Record<string, unknown>, value: unknown) => renderText(value),
             },
-            async execute(args: { action?: string; keywords?: string[]; thresholds?: Record<string, unknown>; tag?: Record<string, unknown> }) {
+            async execute(args: { action?: string; keywords?: string[]; thresholds?: Record<string, unknown>; tag?: Record<string, unknown>; runId?: string; rule?: string }) {
               const a = args || {}
               if (a.action === 'watch') {
                 const kws = Array.isArray(a.keywords) ? a.keywords.filter((k) => typeof k === 'string' && k.trim()) : []
@@ -983,6 +1009,11 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
               }
               if (a.action === 'tag') {
                 return sanitizeJson(rpcTag(a.tag || {})) as never
+              }
+              if (a.action === 'clear-alerts') {
+                // 2026-08-22（P0）：返回完整清除结果（cleared/remaining/criticalCount），
+                // 而非仅 state——Agent 可见清除数量证据（回退走下方统一路径会丢字段）
+                return sanitizeJson(rpcControl({ action: 'clear-alerts', runId: a.runId ?? null, rule: a.rule ?? null })) as never
               }
               return { ok: true, state: rpcControl({ action: a.action }).state } as never
             },

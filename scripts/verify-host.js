@@ -414,6 +414,52 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   await tick(3)
   FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 92 %, 19200 MiB, 24576 MiB, 80, 350.00 W'
 
+  console.log('\n[C2] 告警生命周期（2026-08-22 P0：TTL 过期 + clear-alerts 全清/定向清除）')
+  // 前置：当前告警含 [C] 生成的 other-occupancy/oom/io/thermal（最近一条是 thermal）
+  const tCtlC2 = H.toolDefs.find((t) => t.name === 'lab_ctl') // tCtl 正式定义在 [E]；此处同源取句柄
+  // ① TTL：推进 24h+ → 读取触发 prune → 旧告警全部过期、criticalCount 回落
+  advance(24 * 60 * 60 * 1000 + 1000)
+  snap = await G('snapshot')({})
+  assert(Array.isArray(snap.alerts) && snap.alerts.length === 0, 'TTL 24h：旧告警全部过期（alerts 空）', snap.alerts && snap.alerts.length)
+  assert(snap.alertsCriticalCount === 0, 'TTL 24h：criticalCount 回落为 0', snap.alertsCriticalCount)
+  // ② 再造一条 oom（实验活跃 + 整卡高）→ 验证 clear-alerts
+  await pre({ name: 'bash', arguments: { command: 'python train_demo.py --epochs 10' } }, async () => ({ kind: 'allow' }))
+  FAKE.psLines = ['1234 1 95.0 3000000 python train_demo.py --epochs 10', '8888 1 0.5 300000 node server.js']
+  FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 95 %, 24000 MiB, 24576 MiB, 81, 350.00 W'
+  await tick(3) // ps 周期：组关联
+  await tick(5) // 10s 持续 → oom critical
+  snap = await G('snapshot')({})
+  const oomC2 = snap.alerts.find((a) => a.rule === 'oom')
+  assert(!!oomC2 && oomC2.level === 'critical', 'TTL 过期后仍能触发 oom critical', oomC2 && oomC2.level)
+  const oomRunId = oomC2 && oomC2.runId
+  // ③ 定向清除（rule / runId 两条路径走同一 clear() 过滤）
+  const vClrRule = await tCtlC2.execute({ action: 'clear-alerts', rule: 'oom' })
+  assert(vClrRule && vClrRule.ok === true && vClrRule.state === 'alerts-cleared', 'lab_ctl clear-alerts(rule=oom) → alerts-cleared', vClrRule && vClrRule.state)
+  snap = await G('snapshot')({})
+  assert(!snap.alerts.some((a) => a.rule === 'oom'), 'rule=oom 定向清除后无 oom 告警', snap.alerts && snap.alerts.map((a) => a.rule))
+  // 再造一条 oom（需跳过 5min 防重窗口）
+  advance(5 * 60 * 1000 + 100)
+  await tick(5)
+  snap = await G('snapshot')({})
+  const oomC2b = snap.alerts.find((a) => a.rule === 'oom')
+  assert(!!oomC2b && oomC2b.level === 'critical', '再造 oom（跳过防重）', oomC2b && oomC2b.level)
+  const vClrRun = await tCtlC2.execute({ action: 'clear-alerts', runId: oomC2b && oomC2b.runId })
+  assert(vClrRun && vClrRun.ok === true && vClrRun.cleared >= 1, 'clear-alerts(runId) 定向清除命中', vClrRun && vClrRun.cleared)
+  // ④ 全清：alerts 空 + criticalCount 0
+  const vClrAll = await tCtlC2.execute({ action: 'clear-alerts' })
+  assert(vClrAll && vClrAll.ok === true && typeof vClrAll.cleared === 'number' && vClrAll.criticalCount === 0,
+    'clear-alerts 全清 → cleared 数值 + criticalCount=0', vClrAll)
+  snap = await G('snapshot')({})
+  assert(snap.alertsCriticalCount === 0 && snap.alerts.length === 0, '全清后 badge/告警均为 0', snap.alertsCriticalCount + '/' + snap.alerts.length)
+  // 清理实验（配对 result + 进程消失 → done），复位场景
+  FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 92 %, 19200 MiB, 24576 MiB, 80, 350.00 W'
+  FAKE.psLines = ['8888 1 0.5 300000 node server.js', '7777 1 0.2 200000 /usr/lib/firefox/firefox']
+  const resC2 = C.events['tools/result'][0]
+  resC2({ name: 'bash', arguments: { command: 'python train_demo.py --epochs 10' } }, { isError: false, content: [] })
+  await tick(3)
+  snap = await G('snapshot')({})
+  assert(snap.experiment === null, 'C2 场景实验清理完毕', snap.experiment)
+
   console.log('\n[B3b] 相似命令指纹分离（2026-08-20 多轨修复：pyc: 截断 28→48 防指纹相同）')
   // python -c 内联形态：sleep(30) vs sleep(35)——v1 的 28 字符截断使两指纹相同 → 都关联第一进程
   await pre({ name: 'bash', arguments: { command: 'python3 -c "import time; time.sleep(30)" && echo "RUN-A"' } }, async () => ({ kind: 'allow' }))
@@ -631,6 +677,8 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   const snapR = await callApi(H3, 'snapshot')({})
   assert(Array.isArray(snapR.watchedPids) && snapR.watchedPids.indexOf(5555) !== -1,
     '重启后 watchlist 恢复并命中 llama-server(5555)', snapR.watchedPids)
+  assert(Array.isArray(snapR.procs) && snapR.procs.length > 0 && snapR.procs[0].pid === 5555,
+    'watch 命中进程置顶可见（P0 修复：不再被 15 行截断切掉）', snapR.procs && snapR.procs.slice(0, 3).map((p) => p.pid))
   FAKE.tasklist = '"python.exe","1234","Console","1","12,345 K"\n"python.exe","5678","Console","1","8,000 K"\n"chrome.exe","9999","Console","1","20,000 K"'
   // promptInjection=true 时注入生效（KV 缓存默认关；此处显式验证开启路径）
   const cfg2 = { promptInjection: true }

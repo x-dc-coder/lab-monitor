@@ -96,6 +96,10 @@ function makeCtx() {
   const settingsMock = {
     get(ns) { return ns === 'aionui-panel' ? undefined : undefined },
     on(name, fn) { (events[name] = events[name] || []).push(fn); return () => {} },
+    // 2026-08-22：V2 apply 会 settings.register（M4 重探链路）；无此桩 → register 缺失走
+    // ctx.setTimeout 重探 → e2e mock ctx 无 setTimeout → 装载即崩。补最小桩（e2e 不验持久化，
+    // verify-host [D]/[E] 已覆盖）——返回空作用域即可。
+    register(ns, schema, opts) { return { get: () => ({}), watch: () => () => {}, update: async () => ({}) } },
   }
   const promptService = {
     variable(name, provider) { promptState.variables[name] = provider; return () => {} },
@@ -111,6 +115,9 @@ function makeCtx() {
     on(name, fn) { (events[name] = events[name] || []).push(fn); return () => {} },
     interval(fn, ms) { const iv = setInterval(fn, ms); return () => clearInterval(iv) },
     timeout(fn, ms) { const t = setTimeout(fn, ms); return () => clearTimeout(t) },
+    // 2026-08-22：settingsRetry 用 ctx.setTimeout 重探（真实 cordis Context 两者兼有）；
+    // e2e mock ctx 此前只有 timeout → 补 setTimeout 桩（返回同款句柄）
+    setTimeout(fn, ms) { const t = setTimeout(fn, ms); return () => clearTimeout(t) },
     effect(fn, label) { const d = fn() || (() => {}); teardowns.push(d); return d },
     emit(name, payload) { (events[name] || []).forEach((fn) => { try { fn(payload) } catch (e) { console.error('emit err', name, e) } }) },
   }

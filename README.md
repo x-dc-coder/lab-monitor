@@ -252,6 +252,29 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 
 > 注意：本段 **host 半改动（state-machine/协议/tag 引擎）需 DSH 重启生效**；client 半（实验块/标签分组 UI）浏览器刷新即生效。
 
+### V2.4 P0 三件修复（2026-08-22，plugin-specialist 排查 + 实施）
+
+> 来源：完整排查报告（运行时实测 + 源码审计）。核心引擎健康（采样/状态机/多轨/标签/持久化全绿），
+> 本段修复用户视角最扎眼的三个体验/正确性缺陷，均含 verify-host 新增断言回归。
+
+1. **`lab_status brief` 摘要恒显示「GPU 无 · 告警: 无」**（显示 bug，实测矛盾）：brief 模式 execute 返回
+   信封 `{ok:true,line}`，render 把信封当快照二次调 `promptLine()` → gpu 必为 undefined → Agent/UI
+   永远看到假摘要。修复：render brief 分支直接使用信封内 line（无则回退 JSON 序列化）。
+2. **告警生命周期（修复"badge 恒 8 / advice 被 11h 前旧 crash 污染"）**：
+   a. **TTL 24h 自动过期**：`balancer.pruneExpired()`——超过 24h 的告警自动从列表弹出并扣减
+      criticalCount（pause 状态下 snapshot/advice/count 读取时兜底清理）；
+   b. **`lab_ctl clear-alerts`**：全清（alerts + criticalCount 归零）或按 `runId`/`rule` 定向清除
+      （如 `lab_ctl clear-alerts rule=experiment-crash`），HTTP 面 `control` 路由同步支持；
+   c. **容量截断计数修正**：ALERT_MAX 截断时同步扣减被截 critical（此前 count 只增不减）。
+3. **watchlist 命中进程置顶可见**（修复"watchedPids 有标记但 UI 永远看不到命中行"）：buildSnapshot
+   进程排序改为 watch 命中先行 + 其余 GPU 优先补足 15 行——空闲 llama-server 等无 GPU 活动进程
+   不再被 15 行截断切掉，面板置顶高亮真实生效。
+4. **测试配套**：verify-host 新增 [C2] 告警生命周期段（TTL 过期回落 / rule+runId 定向清除 / 全清归零，
+   8 断言）+ watch 置顶断言；修复 e2e-host.js mock ctx 缺 `setTimeout`/settings `register` 桩
+   （V2 apply 的 M4 重探链路在 e2e 脚手架下崩溃，补桩后 e2e 恢复 ALL PASS）。
+
+> 注意：本段全部为 **host 半改动（render/balancer/buildSnapshot/工具注册），需 DSH 重启生效**（进程内加载旧 lib/index.js）。
+
 ## 未完成项清单（2026-08-20 对照 PLAN v1.4.5 + 04-milestones）
 
 > 对照依据：PLAN §0 三层组合 / §1 目录树 / §6 风险表 / §4 验收清单；04-milestones 勾选状态。

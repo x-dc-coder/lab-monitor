@@ -251,6 +251,14 @@ const RULES: Rule[] = [
 
 const MIN_HITS = Math.max(1, Math.round(10000 / SAMPLE_MS)) // 10s 阈值持续 → 5（2s 采样）
 const MIN_INTERVAL_MS = 5 * 60 * 1000
+/** 告警 TTL（2026-08-22：告警生命周期——超过 24h 的旧告警自动过期，不再永久堆积污染 badge/advice） */
+const ALERT_TTL_MS = 24 * 60 * 60 * 1000
+
+/** 清除过滤器（2026-08-22：lab_ctl clear-alerts 支持按 runId / rule 定向清除） */
+export interface AlertClearFilter {
+  runId?: string | null
+  rule?: string | null
+}
 
 interface BalancerDeps {
   thresholds(): Thresholds
@@ -268,6 +276,7 @@ export interface Balancer {
   advice(): AdviceResult
   count(): number
   pushExternal(alert: Omit<Alert, 'ts'>): Alert
+  clear(filter?: AlertClearFilter): { cleared: number; remaining: number; criticalCount: number }
 }
 
 export function createBalancer(deps: BalancerDeps): Balancer {
@@ -275,6 +284,64 @@ export function createBalancer(deps: BalancerDeps): Balancer {
   let criticalCount = 0
   const hitByRule: Record<string, number> = {} // rule → 连续命中窗口数（阈值持续 10s = 5 个 2s 采样）
   const lastByRule: Record<string, number> = {} // rule → 最近一次发出时间（同类最小间隔 5 分钟）
+
+  /** 2026-08-22：过期清理——alerts 倒序存放（unshift 最新到头、尾部最旧），
+   * 尾部连续超过 TTL 的旧告警弹出，同步扣减 criticalCount（count 只统计未过期告警）。
+   * O(1) 均摊（通常尾部 0~1 条过期）。 */
+  function pruneExpired(): { removed: number } {
+    if (!alerts.length) return { removed: 0 }
+    const now = Date.now()
+    let removed = 0
+    while (alerts.length) {
+      const last = alerts[alerts.length - 1]
+      if (now - last.ts <= ALERT_TTL_MS) break
+      alerts.pop()
+      if (last.level === 'critical') criticalCount = Math.max(0, criticalCount - 1)
+      removed += 1
+    }
+    return { removed }
+  }
+
+  /** 2026-08-22：容量截断（alerts.length > ALERT_MAX 时丢最旧）——同步扣减被截 critical 计数 */
+  function truncate() {
+    if (alerts.length <= ALERT_MAX) return
+    const dropped = alerts.slice(ALERT_MAX)
+    for (let i = 0; i < dropped.length; i++) {
+      if (dropped[i].level === 'critical') criticalCount = Math.max(0, criticalCount - 1)
+    }
+    alerts.length = ALERT_MAX
+  }
+
+  function clear(filter?: AlertClearFilter | null): { cleared: number; remaining: number; criticalCount: number } {
+    pruneExpired()
+    let cleared = 0
+    if (filter && (filter.runId || filter.rule)) {
+      // 定向清除：按 runId / rule 过滤，其余保留；只扣减被清 critical 计数
+      const keep: Alert[] = []
+      let removedCritical = 0
+      for (let i = 0; i < alerts.length; i++) {
+        const a = alerts[i]
+        const hit = (filter.runId && a.runId === filter.runId) || (filter.rule && a.rule === filter.rule)
+        if (hit) {
+          cleared += 1
+          if (a.level === 'critical') removedCritical += 1
+        } else {
+          keep.push(a)
+        }
+      }
+      if (cleared) {
+        alerts.length = 0
+        for (let i = 0; i < keep.length; i++) alerts.push(keep[i])
+        criticalCount = Math.max(0, criticalCount - removedCritical)
+      }
+    } else {
+      // 全清：告警列表 + critical 计数归零
+      cleared = alerts.length
+      alerts.length = 0
+      criticalCount = 0
+    }
+    return { cleared, remaining: alerts.length, criticalCount }
+  }
 
   function evaluate(windowSnaps: SamplePoint[], runId: string | null): Alert[] {
     if (!windowSnaps || !windowSnaps.length) return []
@@ -312,7 +379,7 @@ export function createBalancer(deps: BalancerDeps): Balancer {
       }
       alerts.unshift(alert)
       if (alert.level === 'critical') criticalCount += 1
-      if (alerts.length > ALERT_MAX) alerts.length = ALERT_MAX
+      truncate() // 2026-08-22：容量截断同步扣减被截 critical 计数（此前 count 只增不减）
       deps.emitLab('lab/alert', {
         level: alert.level,
         rule: alert.rule,
@@ -327,6 +394,7 @@ export function createBalancer(deps: BalancerDeps): Balancer {
   }
 
   function snapshotAlerts(): Alert[] {
+    pruneExpired() // 2026-08-22：pause 状态下 evaluate 不跑，读取时兜底过期清理
     return alerts.slice(0, 10)
   }
 
@@ -344,11 +412,12 @@ export function createBalancer(deps: BalancerDeps): Balancer {
     }
     alerts.unshift(a)
     if (a.level === 'critical') criticalCount += 1
-    if (alerts.length > ALERT_MAX) alerts.length = ALERT_MAX
+    truncate() // 2026-08-22：容量截断同步扣减（此前 count 只增不减）
     return a
   }
 
   function advice(): AdviceResult {
+    pruneExpired() // 2026-08-22：advice 不携带已过期告警（旧 crash 不再污染 Agent 建议）
     return {
       advice: alerts.slice(0, 5).map((a) => ({
         level: a.level,
@@ -366,7 +435,11 @@ export function createBalancer(deps: BalancerDeps): Balancer {
     evaluate,
     snapshotAlerts,
     advice,
-    count: () => criticalCount,
+    count: () => {
+      pruneExpired() // 2026-08-22：badge 计数只统计未过期告警
+      return criticalCount
+    },
     pushExternal,
+    clear,
   }
 }

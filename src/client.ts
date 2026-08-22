@@ -396,7 +396,8 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
     background: 'transparent', border: '1px solid ' + C.border, borderRadius: 4,
     fontSize: 11, padding: '2px 8px', cursor: 'pointer', color: C.label,
   }
-  const okBtn: React.CSSProperties = { ...btnStyle, background: C.brand, color: '#fff', border: 'none' }
+  // 主操作按钮用「ink 底 + surface 字」反转色（主题无关高对比）；brand 在暗色主题为白色，配 #fff 会白底白字不可见
+  const okBtn: React.CSSProperties = { ...btnStyle, background: C.label, color: C.layer1, border: 'none' }
 
   const setThr = () => {
     const num = (v: string): number | null => {
@@ -440,7 +441,7 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
 
   return React.createElement('div', { key: 'ctrl', style: { border: '1px solid ' + C.border, borderRadius: 8, padding: '8px 10px', background: C.layer1, marginTop: 10 } },
     React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
-      React.createElement('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: C.brand, color: '#fff' } }, '控制'),
+      React.createElement('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: C.label, color: C.layer1 } }, '控制'),
       React.createElement('span', { style: { fontSize: 11, color: paused ? C.warn : C.success } },
         paused ? '监控已暂停' : '监控运行中'),
       React.createElement('span', { style: { fontSize: 11, color: C.label2, marginLeft: 4 } },
@@ -467,7 +468,7 @@ function TagGroups(props: { tags: TagGroupView[] }): React.ReactElement {
   const groups = props.tags || []
   return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
     groups.map((g) => {
-      const color = g.rule && g.rule.color ? g.rule.color : C.brand
+      const color = g.rule && g.rule.color ? g.rule.color : C.label
       const isExp = g.rule && g.rule.kind === 'experiment'
       return React.createElement('div', {
         key: g.rule.id,
@@ -476,7 +477,7 @@ function TagGroups(props: { tags: TagGroupView[] }): React.ReactElement {
         // 组头：标签徽章 + label + kind 徽标 + 聚合统计（2026-08-20：加「标签」胶囊徽章，
         // 与内置默认聚合组（浏览器/编辑器等）明显区分——用户反馈分不清标签分组与默认分组）
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
-          React.createElement('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: color, color: '#fff' } },
+          React.createElement('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: color, color: g.rule && g.rule.color ? '#fff' : C.layer1 } },
             '标签'),
           React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: color } }),
           React.createElement('span', { style: { fontWeight: 600, fontSize: 12 } }, g.rule.label || '未命名'),
@@ -567,7 +568,7 @@ function TagManager(props: { tags: TagGroupView[] }): React.ReactElement {
   const hasRules = Array.isArray(rules) && rules.length > 0
   return React.createElement('div', { style: { border: '1px solid ' + C.border, borderRadius: 8, padding: '8px 10px', background: C.layer1 } },
     React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
-      React.createElement('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: C.brand, color: '#fff' } }, '标签管理'),
+      React.createElement('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: C.label, color: C.layer1 } }, '标签管理'),
       React.createElement('span', { style: { fontSize: 11, color: C.label2 } },
         hasRules ? rules.length + ' 条规则' : '无规则——添加后按命令匹配分组展示'),
     ),
@@ -614,7 +615,7 @@ function TagManager(props: { tags: TagGroupView[] }): React.ReactElement {
       }),
       React.createElement('button', {
         onClick: add, disabled: busy,
-        style: { background: C.brand, color: '#fff', border: 'none', borderRadius: 4, fontSize: 11, padding: '3px 10px', cursor: 'pointer' },
+        style: { background: C.label, color: C.layer1, border: 'none', borderRadius: 4, fontSize: 11, padding: '3px 10px', cursor: 'pointer' },
       }, '添加'),
     ),
     msg ? React.createElement('div', { style: { fontSize: 11, color: C.error, marginTop: 4 } }, msg) : null,
@@ -627,9 +628,28 @@ function TagManager(props: { tags: TagGroupView[] }): React.ReactElement {
 
 const rowStyle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }
 const cardStyle: React.CSSProperties = {
-  flex: '1 1 180px', minWidth: 180, padding: '10px 12px', borderRadius: 8,
+  flex: '1 1 190px', minWidth: 190, padding: '12px 14px', borderRadius: 10,
   border: '1px solid ' + C.border, background: C.layer1, fontSize: 12, color: C.label,
 }
+/** 统一的区块小标题（层级/字号/间距单一来源）——让「趋势/进程/告警」等区块观感一致 */
+const sectionTitle: React.CSSProperties = {
+  fontWeight: 600, fontSize: 12, color: C.label, marginBottom: 6, letterSpacing: 0.2,
+}
+/** 指标卡标题行：左标题 + 右主数值（基线对齐） */
+const cardHead: React.CSSProperties = { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }
+/** 指标卡主数值：统一放大字号建立层级（大数字=hero 值） */
+const cardValue: React.CSSProperties = { color: C.label, fontWeight: 700, fontSize: 16, fontVariantNumeric: 'tabular-nums' }
+/** 指标卡进度条（GPU/CPU/内存 共用的状态色 bar，高度一致） */
+function pctBar(pct: number | null | undefined, height = 8): React.ReactElement {
+  const clamped = Math.max(0, Math.min(100, pct === null || pct === undefined ? 0 : pct))
+  return React.createElement('div', {
+    key: 'bar', style: { height, borderRadius: height / 2, marginTop: 8, background: C.border, overflow: 'hidden' },
+  },
+    React.createElement('div', { style: { height: '100%', width: clamped + '%', background: utilColor(pct), borderRadius: height / 2 } }),
+  )
+}
+/** 指标卡细节行：次要信息（显存/温度/核数/已用等） */
+const cardMeta: React.CSSProperties = { marginTop: 8, color: C.label2, display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 11 }
 const thStyle: React.CSSProperties = {
   textAlign: 'left', fontWeight: 600, padding: '4px 6px',
   borderBottom: '1px solid ' + C.border, whiteSpace: 'nowrap', fontSize: 12,
@@ -641,22 +661,14 @@ const tdStyle: React.CSSProperties = {
 
 function gpuCard(g: GpuView) {
   const pct = g.utilPct
-  const barStyle: React.CSSProperties = {
-    height: 8, borderRadius: 4, marginTop: 6, background: 'rgba(0,0,0,0.08)',
-    overflow: 'hidden',
-  }
-  const fillStyle: React.CSSProperties = {
-    height: '100%', width: Math.max(0, Math.min(100, pct)) + '%',
-    background: utilColor(pct), borderRadius: 3,
-  }
   return React.createElement('div', { key: g.id, style: cardStyle },
-    React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 6 } },
-      React.createElement('span', { style: { fontWeight: 600 } },
+    React.createElement('div', { style: cardHead },
+      React.createElement('span', { style: { fontWeight: 600, color: C.label } },
         (g.name ? g.name + ' ' : '') + 'GPU' + g.id),
-      React.createElement('span', { style: { color: utilColor(pct), fontWeight: 600 } }, pct + '%'),
+      React.createElement('span', { style: { ...cardValue, color: utilColor(pct) } }, pct + '%'),
     ),
-    React.createElement('div', { style: barStyle }, React.createElement('div', { style: fillStyle })),
-    React.createElement('div', { style: { marginTop: 6, color: C.label2, display: 'flex', gap: 8, flexWrap: 'wrap' } },
+    pctBar(pct),
+    React.createElement('div', { style: cardMeta },
       React.createElement('span', null, '显存 ' + fmtGiB(g.memUsedMiB) + '/' + fmtGiB(g.memTotalMiB) + 'G'),
       typeof g.tempC === 'number' ? React.createElement('span', null, g.tempC + '°C') : null,
       typeof g.powerW === 'number' ? React.createElement('span', null, Math.round(g.powerW) + 'W') : null,
@@ -668,11 +680,14 @@ function gpuCard(g: GpuView) {
 function cpuCard(s: SnapView | null) {
   const pct = s && s.cpu ? s.cpu.percent : null
   return React.createElement('div', { key: 'cpu', style: cardStyle },
-    React.createElement('div', { style: { fontWeight: 600 } }, 'CPU'),
-    React.createElement('div', { style: { marginTop: 6, color: utilColor(pct), fontWeight: 600 } },
-      pct === null ? '-' : Math.round(pct) + '%'),
-    React.createElement('div', { style: { marginTop: 6, color: C.label2 } },
-      s && s.cpu && s.cpu.cores ? '核数 ' + s.cpu.cores : ''),
+    React.createElement('div', { style: cardHead },
+      React.createElement('span', { style: { fontWeight: 600, color: C.label } }, 'CPU'),
+      React.createElement('span', { style: { ...cardValue, color: utilColor(pct) } }, pct === null ? '-' : Math.round(pct) + '%'),
+    ),
+    pctBar(pct),
+    React.createElement('div', { style: cardMeta },
+      React.createElement('span', null, s && s.cpu && s.cpu.cores ? '核数 ' + s.cpu.cores : '—'),
+    ),
   )
 }
 
@@ -680,11 +695,14 @@ function memCard(s: SnapView | null) {
   const mem = s && s.mem
   const pct = mem && mem.totalMiB ? ((mem.totalMiB - (mem.availableMiB ?? 0)) / mem.totalMiB) * 100 : null
   return React.createElement('div', { key: 'mem', style: cardStyle },
-    React.createElement('div', { style: { fontWeight: 600 } }, '内存'),
-    React.createElement('div', { style: { marginTop: 6, color: utilColor(pct), fontWeight: 600 } },
-      pct === null ? '-' : Math.round(pct) + '%'),
-    React.createElement('div', { style: { marginTop: 6, color: C.label2 } },
-      mem && mem.totalMiB ? fmtGiB(mem.totalMiB - (mem.availableMiB ?? 0)) + '/' + fmtGiB(mem.totalMiB) + 'G' : ''),
+    React.createElement('div', { style: cardHead },
+      React.createElement('span', { style: { fontWeight: 600, color: C.label } }, '内存'),
+      React.createElement('span', { style: { ...cardValue, color: utilColor(pct) } }, pct === null ? '-' : Math.round(pct) + '%'),
+    ),
+    pctBar(pct),
+    React.createElement('div', { style: cardMeta },
+      React.createElement('span', null, mem && mem.totalMiB ? fmtGiB(mem.totalMiB - (mem.availableMiB ?? 0)) + '/' + fmtGiB(mem.totalMiB) + 'G' : '—'),
+    ),
   )
 }
 
@@ -770,8 +788,8 @@ function ProcsTable(props: { snap: SnapView | null }) {
     ))
     for (const p of otherRows) tbodyRows.push(row(p, { background: 'rgba(0,0,0,0.02)' }))
   }
-  return React.createElement('div', { key: 'procs', style: { marginTop: 10 } },
-    React.createElement('div', { style: { fontWeight: 600, fontSize: 12, marginBottom: 4 } },
+  return React.createElement('div', { key: 'procs', style: { marginTop: 4 } },
+    React.createElement('div', { style: sectionTitle },
       '进程' + (s && s.sources && s.sources.procs ? '（' + s.sources.procs + '）' : '') +
       (watchedRows.length ? ' · 监控 ' + watchedRows.length : '')),
     React.createElement('div', { style: { overflowX: 'auto' } },
@@ -830,8 +848,9 @@ function AlertList(props: { alerts: AlertView[] }) {
     )
   })
   const rest = merged.length - visible.length
-  return React.createElement('div', { key: 'alerts', style: { marginTop: 10 } },
-    React.createElement('div', { style: { fontWeight: 600, fontSize: 12, marginBottom: 4 } }, '告警'),
+  return React.createElement('div', { key: 'alerts', style: { marginTop: 4 } },
+    React.createElement('div', { style: sectionTitle },
+      '告警' + (merged.length ? '（' + merged.length + '）' : '')),
     ...items,
     rest > 0
       ? React.createElement('div', {
@@ -852,8 +871,10 @@ function MiniTrend(props: { points: HistPoint[] }) {
   const vals = points.map((pt) => pt.gpuUtil).filter((v): v is number => typeof v === 'number' && !Number.isNaN(v))
   // 2026-08-20 修复：数据不足时渲染明确占位文案（此前返回空 div = 视觉"空白"，无任何反馈）
   if (vals.length < 2) {
-    return React.createElement('div', { key: 'trend', style: { fontSize: 11, color: C.label2, marginTop: 6 } },
-      React.createElement('span', { style: { marginRight: 6, fontWeight: 600, color: C.label } }, 'GPU 利用率趋势'),
+    return React.createElement('div', { key: 'trend', style: { marginTop: 2 } },
+      React.createElement('div', { style: { display: 'flex', alignItems: 'baseline', gap: 6 } },
+        React.createElement('span', { style: sectionTitle }, 'GPU 利用率趋势'),
+      ),
       React.createElement('div', { style: { padding: '12px 0', fontSize: 11, color: C.label2 } }, '数据积累中…（采样 2 点后出图）'),
     )
   }
@@ -872,9 +893,11 @@ function MiniTrend(props: { points: HistPoint[] }) {
   }
   const line = d.join(' ')
   const baseY = H - PAD // yMin 基线
-  return React.createElement('div', { key: 'trend', style: { fontSize: 11, color: C.label2, marginTop: 6 } },
-    React.createElement('span', { style: { marginRight: 6, fontWeight: 600, color: C.label } }, 'GPU 利用率趋势'),
-    React.createElement('span', { style: { fontSize: 10 } }, yMin + '%–' + yMax + '%'),
+  return React.createElement('div', { key: 'trend', style: { marginTop: 2 } },
+    React.createElement('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8 } },
+      React.createElement('span', { style: sectionTitle }, 'GPU 利用率趋势'),
+      React.createElement('span', { style: { fontSize: 11, color: C.label2 } }, yMin + '%–' + yMax + '%'),
+    ),
     React.createElement('svg', { viewBox: '0 0 ' + W + ' ' + H, width: '100%', height: 56, style: { display: 'block', maxWidth: 640, minHeight: 56, background: C.layer1, borderRadius: 6, border: '1px solid ' + C.border } },
       React.createElement('line', { x1: PAD, y1: baseY, x2: W - PAD, y2: baseY, stroke: 'rgba(128,128,128,0.25)', strokeWidth: 1 }),
       // 2026-08-20 截图核验真根因：此前用 polyline 元素 + path 格式 points（"M4 52 L12 50"），
@@ -961,22 +984,22 @@ function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
   const s = snap
   return React.createElement('div', {
     style: {
-      display: 'flex', flexDirection: 'column', gap: 8, padding: 12,
+      display: 'flex', flexDirection: 'column', gap: 12, padding: 14,
       fontSize: 13, color: C.label, minWidth: 320, boxSizing: 'border-box',
     },
   },
     // ── 状态行 ─────────────────────────────────────────────────────────────
-    React.createElement('div', { style: rowStyle },
+    React.createElement('div', { style: { ...rowStyle, gap: 8 } },
       React.createElement('span', {
-        style: { width: 8, height: 8, borderRadius: 4, background: connecting ? C.error : C.success },
+        style: { width: 9, height: 9, borderRadius: 5, background: connecting ? C.error : C.success, flexShrink: 0 },
       }),
-      React.createElement('span', { style: { fontWeight: 600 } },
+      React.createElement('span', { style: { fontWeight: 700 } },
         connecting ? '连接中断，重试中…' : summaryLine(s as SnapView)),
       React.createElement('span', { style: { fontSize: 11, color: C.label2 }, title: '数据由 host 采样生成（快照时刻）' },
         s && s.ts ? '数据 ' + fmtTime(s.ts) : (lastFetchAt ? '更新于 ' + fmtTime(lastFetchAt) : '')),
       s && s.platform
-        ? React.createElement('span', { style: { fontSize: 11, color: C.label2 } },
-            '[' + s.platform + (s.sources && s.sources.gpu ? '·' + s.sources.gpu : '') + ']')
+        ? React.createElement('span', { style: { fontSize: 11, color: C.label2, padding: '1px 7px', borderRadius: 10, background: C.border } },
+            s.platform + (s.sources && s.sources.gpu ? '·' + s.sources.gpu : ''))
         : null,
     ),
     // ── 历史曲线（GPU 利用率，SVG 自绘零依赖）──────────────────────────────

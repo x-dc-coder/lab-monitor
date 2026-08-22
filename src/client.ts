@@ -1227,19 +1227,25 @@ function labelThunk(): string {
 const SIDEBAR_TAB_ID = 'lab-monitor:gpu'
 
 /** better-sidebar tab 图标：内联仪表盘/Gauge SVG（16px 描边 line-icon，与其它 tab 风格一致，零第三方依赖）。
- *  契约：icon: (size: number) => ReactNode（better-sidebar 用 currentColor 染色，跟随 tab 前景色）。 */
+ *  结构：外圈表盘弧 + 内圈刻度带 + 3 处刻度 + 指针 + 中心枢轴（比基础版更细化）。 */
 function gpuTabIcon(size: number): React.ReactElement {
   const s = size || 16
   return React.createElement('svg', {
     width: s, height: s, viewBox: '0 0 16 16', fill: 'none',
-    stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round',
+    stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round',
   },
-    // 表盘弧（顶部半圆，指针起点=分度中心）
-    React.createElement('path', { d: 'M3.5 10.5 A5 5 0 0 1 12.5 10.5' }),
-    // 指针（中心偏右上，指向高利用率）
-    React.createElement('path', { d: 'M8 10.5 L10.7 6.6' }),
+    // 外圈表盘弧（半圆，指针起点=分度中心）
+    React.createElement('path', { d: 'M2.8 10.8 A5.2 5.2 0 0 1 13.2 10.8' }),
+    // 内圈刻度带（同心弧）
+    React.createElement('path', { d: 'M4.4 10.8 A3.6 3.6 0 0 1 11.6 10.8' }),
+    // 刻度：顶部 + 左右 45°
+    React.createElement('path', { d: 'M8 5 L8 6.2' }),
+    React.createElement('path', { d: 'M11.11 7.69 L11.68 7.12' }),
+    React.createElement('path', { d: 'M4.89 7.69 L4.32 7.12' }),
+    // 指针（中心偏右上）
+    React.createElement('path', { d: 'M8 10.8 L10.7 6.4' }),
     // 中心枢轴点
-    React.createElement('circle', { cx: 8, cy: 10.5, r: 1, fill: 'currentColor', stroke: 'none' }),
+    React.createElement('circle', { cx: 8, cy: 10.8, r: 1, fill: 'currentColor', stroke: 'none' }),
   )
 }
 

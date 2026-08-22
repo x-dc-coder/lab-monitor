@@ -772,7 +772,7 @@ const DEFAULT_PROC_GROUPS: { key: string; label: string; match: (cmd: string) =>
   { key: 'ide', label: '编辑器/终端', match: (c) => /Code\.exe|WindowsTerminal|ShellHost|coodesker|explorer/i.test(c) },
   { key: 'docker', label: 'Docker/WSL', match: (c) => /Docker|docker|wsl/i.test(c) },
   { key: 'system', label: '系统进程', match: (c) => /System|Registry|smss|csrss|wininit|services|lsass|dwm|SearchHost|StartMenu|LockApp|TextInputHost|ApplicationFrame/i.test(c) },
-  { key: 'other-app', label: '其他应用', match: (c) => /Weixin|QQ|ToDesk|TaiShanNet|llama-server/i.test(c) },
+  { key: 'other-app', label: '常用应用', match: (c) => /Weixin|QQ|ToDesk|TaiShanNet|llama-server/i.test(c) },
 ]
 
 /** GPU 利用率取值：优先 gpuUtilPct（backend 填充），回退 v1.1 遗留 gpu 字段 */
@@ -866,13 +866,22 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
       for (const m of g.members) tbodyRows.push(row(m, 'group'))
     }
   }
-  // 其余普通进程（非默认组）：加「其他进程」标题行分隔
+  // 其余普通进程（非默认组）：做成**可折叠**组（默认收起，点击展开），与默认聚合组一致，避免刷屏
   if (otherRows.length) {
-    tbodyRows.push(React.createElement('tr', { key: 'grp-other' },
+    const open = !!expanded['other']
+    tbodyRows.push(React.createElement('tr', {
+      key: 'grp-other',
+      onClick: () => toggle('other'),
+      style: { cursor: 'pointer' },
+    },
       React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 11, borderTop: '1px solid ' + C.border, paddingTop: 6, marginTop: 6 } },
-        '其他进程（' + otherRows.length + '）' + (agg(otherRows) ? '  ' + agg(otherRows) : '')),
+        (open ? '▼ ' : '▸ ') + '其他进程（' + otherRows.length + '）' +
+        (agg(otherRows) ? '  ' + agg(otherRows) : '') +
+        (open ? '' : '  ' + otherRows.slice(0, 3).map((m) => m.cmd || '').join(' / '))),
     ))
-    for (const p of otherRows) tbodyRows.push(row(p, 'group'))
+    if (open) {
+      for (const p of otherRows) tbodyRows.push(row(p, 'group'))
+    }
   }
   return React.createElement('div', { key: 'procs', style: { marginTop: 4 } },
     React.createElement('div', { style: sectionTitle, title: total > CAP ? '资源占用前 ' + CAP + ' 个' : undefined },

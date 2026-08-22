@@ -813,12 +813,17 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
   // 组按总占用排序（GPU 主导 > CPU > 内存），最重的组排最前，便于追踪高占用
   const groupScore = (members: ProcView[]): number => members.reduce((a, p) => a + (procGpu(p) || 0) * 100 + (p.cpuPct || 0) + ((p.memMiB || 0) / 1000), 0)
   groupRows.sort((a, b) => groupScore(b.members) - groupScore(a.members))
-  const agg = (members: ProcView[]): string => {
+  // 组资源聚合：只显示非零项，做成彩色徽标（GPU/CPU 按利用率着色、内存灰）——干净且一眼定位吃哪类资源
+  const aggTokens = (members: ProcView[]): React.ReactElement[] => {
     const gpu = Math.round(members.reduce((a, p) => a + (procGpu(p) || 0), 0))
     const cpu = Math.round(members.reduce((a, p) => a + (p.cpuPct || 0), 0))
     const mem = members.reduce((a, p) => a + (p.memMiB || 0), 0)
-    // 始终显示 GPU/CPU/内存 三项（带标签），无论是否非零——便于跨组对比 + 定位高占用资源
-    return 'GPU ' + gpu + '% · CPU ' + cpu + '% · 内存 ' + (mem > 0 ? fmtGiB(mem) + 'G' : '0G')
+    const out: React.ReactElement[] = []
+    const tok = { marginLeft: 8, fontWeight: 600 } as React.CSSProperties
+    if (gpu > 0) out.push(React.createElement('span', { key: 'gpu', style: { ...tok, color: utilColor(gpu) } }, 'GPU ' + gpu + '%'))
+    if (cpu > 0) out.push(React.createElement('span', { key: 'cpu', style: { ...tok, color: utilColor(cpu) } }, 'CPU ' + cpu + '%'))
+    if (mem > 0) out.push(React.createElement('span', { key: 'mem', style: { ...tok, color: C.label2 } }, '内存 ' + fmtGiB(mem) + 'G'))
+    return out
   }
   const row = (p: ProcView, kind?: 'watch' | 'group') => {
     const gpu = procGpu(p) || 0
@@ -851,16 +856,18 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
   // 聚合组：标题行（点击展开/收起，含资源聚合）+ 展开时全部成员行
   for (const g of groupRows) {
     const open = !!expanded[g.key]
-    const gagg = agg(g.members)
     tbodyRows.push(React.createElement('tr', {
       key: 'grp-' + g.label,
       onClick: () => toggle(g.key),
       style: { cursor: 'pointer' },
     },
       React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 11 } },
-        (open ? '▼ ' : '▸ ') + g.label + '（' + g.members.length + '）' +
-        (gagg ? '  ' + gagg : '') +
-        (open ? '' : '  ' + g.members.slice(0, 3).map((m) => m.cmd || '').join(' / '))),
+        React.createElement('span', { key: 'label' },
+          (open ? '▼ ' : '▸ ') + g.label + '（' + g.members.length + '）'),
+        ...aggTokens(g.members),
+        (open ? null : React.createElement('span', { key: 'prev', style: { marginLeft: 8, color: C.label2 } },
+          g.members.slice(0, 3).map((m) => m.cmd || '').join(' / '))),
+      ),
     ))
     if (open) {
       for (const m of g.members) tbodyRows.push(row(m, 'group'))
@@ -875,9 +882,12 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
       style: { cursor: 'pointer' },
     },
       React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 11, borderTop: '1px solid ' + C.border, paddingTop: 6, marginTop: 6 } },
-        (open ? '▼ ' : '▸ ') + '其他进程（' + otherRows.length + '）' +
-        (agg(otherRows) ? '  ' + agg(otherRows) : '') +
-        (open ? '' : '  ' + otherRows.slice(0, 3).map((m) => m.cmd || '').join(' / '))),
+        React.createElement('span', { key: 'label' },
+          (open ? '▼ ' : '▸ ') + '其他进程（' + otherRows.length + '）'),
+        ...aggTokens(otherRows),
+        (open ? null : React.createElement('span', { key: 'prev', style: { marginLeft: 8, color: C.label2 } },
+          otherRows.slice(0, 3).map((m) => m.cmd || '').join(' / '))),
+      ),
     ))
     if (open) {
       for (const p of otherRows) tbodyRows.push(row(p, 'group'))

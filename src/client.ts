@@ -331,36 +331,42 @@ function EndedBlock(props: { ended: EndedView[] }): React.ReactElement | null {
     const mins = e.endTs ? Math.max(0, Math.round((e.endTs - e.startTs) / 60000)) : null
     const dur = s && typeof s.durationSec === 'number' ? (s.durationSec < 60 ? s.durationSec + 's' : Math.round(s.durationSec / 60) + 'min') : (mins !== null ? mins + 'min' : '-')
     const color = e.state === 'done' ? C.success : e.state === 'crashed' ? C.error : C.label2
-    return React.createElement('div', { key: e.runId, style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 11 } },
-      React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: color, flexShrink: 0 } }),
-      React.createElement('span', { style: { fontWeight: 600, fontSize: 11 } }, e.runId),
-      React.createElement('span', { style: { fontSize: 10, padding: '0 4px', borderRadius: 3, border: '1px solid ' + color, color: color } },
-        e.state === 'done' ? '完成' : e.state === 'crashed' ? '崩溃' : '中止'),
-      React.createElement('span', { style: { color: C.label2 } }, dur),
-      s && typeof s.gpuUtilMax === 'number'
-        ? React.createElement('span', { style: { color: utilColor(s.gpuUtilMax) } }, 'GPU峰值 ' + s.gpuUtilMax + '%')
-        : null,
-      s && typeof s.gpuUtilAvg === 'number'
-        ? React.createElement('span', { style: { color: C.label2 } }, '均 ' + s.gpuUtilAvg + '%')
-        : null,
-      s && typeof s.memPeak === 'number'
-        ? React.createElement('span', { style: { color: C.label2 } }, '显存峰值 ' + fmtGiB(s.memPeak) + 'G')
-        : null,
-      s && typeof s.groupCpuMax === 'number'
-        ? React.createElement('span', { style: { color: utilColor(s.groupCpuMax) } }, '组CPU峰值 ' + Math.round(s.groupCpuMax) + '%')
-        : null,
+    // 指标 stat：小标签在上 + 主值在下（栅格单元），替代原先挤一行的「GPU峰值/均值/显存峰值/组CPU峰值」
+    const stat = (label: string, val: number | string | null | undefined, valColor?: string) => (val === null || val === undefined)
+      ? null
+      : React.createElement('div', { key: label, style: { display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 } },
+          React.createElement('span', { style: { fontSize: 10, color: C.label2 } }, label),
+          React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: (valColor || C.label) } }, String(val)),
+        )
+    return React.createElement('div', { key: e.runId, style: { display: 'flex', flexDirection: 'column', gap: 4, padding: '6px 8px', background: C.layer1, border: '1px solid ' + C.border, borderRadius: 8 } },
+      // 标题行：状态点 + runId + 状态徽标 + 时长
+      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 11 } },
+        React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: color, flexShrink: 0 } }),
+        React.createElement('span', { style: { fontWeight: 600, fontSize: 11 } }, e.runId),
+        React.createElement('span', { style: { fontSize: 10, padding: '0 4px', borderRadius: 3, border: '1px solid ' + color, color: color } },
+          e.state === 'done' ? '完成' : e.state === 'crashed' ? '崩溃' : '中止'),
+        React.createElement('span', { style: { color: C.label2 } }, dur),
+      ),
+      // 指标栅格：2 列自适应（auto-fit），每字段「标签/值」上下排
+      React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(96px, 1fr))', gap: '4px 10px' } },
+        stat('GPU峰值', s && typeof s.gpuUtilMax === 'number' ? s.gpuUtilMax + '%' : null, s && typeof s.gpuUtilMax === 'number' ? utilColor(s.gpuUtilMax) : undefined),
+        stat('GPU均值', s && typeof s.gpuUtilAvg === 'number' ? s.gpuUtilAvg + '%' : null),
+        stat('显存峰值', s && typeof s.memPeak === 'number' ? fmtGiB(s.memPeak) + 'G' : null),
+        stat('组CPU峰值', s && typeof s.groupCpuMax === 'number' ? Math.round(s.groupCpuMax) + '%' : null, s && typeof s.groupCpuMax === 'number' ? utilColor(s.groupCpuMax) : undefined),
+      ),
+      // cmd 全宽行
       e.cmd
-        ? React.createElement('span', { style: { color: C.label2, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, e.cmd)
+        ? React.createElement('div', { style: { fontSize: 11, color: C.label2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, e.cmd)
         : null,
     )
   })
-  return React.createElement('div', { key: 'ended', style: { marginTop: 10 } },
+  return React.createElement('div', { key: 'ended', style: { marginTop: 2 } },
     React.createElement('div', {
       onClick: () => setOpen((v) => !v),
-      style: { fontWeight: 600, fontSize: 12, marginBottom: 4, cursor: 'pointer' },
+      style: { sectionTitle, cursor: 'pointer' },
     },
       (open ? '▼ ' : '▸ ') + '实验历史（' + ended.length + '）'),
-    open ? React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 3 } }, ...rows) : null,
+    open ? React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } }, ...rows) : null,
   )
 }
 
@@ -389,8 +395,8 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
   }, [thr && thr.utilWarn, thr && thr.memWarn, thr && thr.tempWarn])
 
   const inputStyle: React.CSSProperties = {
-    width: 52, background: C.layer1, border: '1px solid ' + C.border, color: C.label,
-    borderRadius: 4, padding: '2px 4px', fontSize: 11, textAlign: 'right',
+    width: '100%', boxSizing: 'border-box', background: C.layer1, border: '1px solid ' + C.border, color: C.label,
+    borderRadius: 4, padding: '4px 6px', fontSize: 11, textAlign: 'right',
   }
   const btnStyle: React.CSSProperties = {
     background: 'transparent', border: '1px solid ' + C.border, borderRadius: 4,
@@ -439,27 +445,39 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
       .finally(() => setBusy(false))
   }
 
-  return React.createElement('div', { key: 'ctrl', style: { border: '1px solid ' + C.border, borderRadius: 8, padding: '8px 10px', background: C.layer1, marginTop: 10 } },
-    React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
-      React.createElement('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: C.label, color: C.layer1 } }, '控制'),
+  const pollChip = thr
+    ? React.createElement('span', { style: { fontSize: 11, color: C.label2, marginLeft: 'auto', padding: '1px 7px', borderRadius: 10, background: C.border } },
+        '轮询 ' + Math.round(thr.pollMs / 1000) + 's')
+    : null
+  // 阈值字段：label 在上、input 在下（栅格列），替代原先「标签+输入」挤一行的密排
+  const field = (label: string, val: string, onChange: (v: string) => void, title: string) =>
+    React.createElement('div', { key: label, style: { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 } },
+      React.createElement('label', { style: { fontSize: 11, color: C.label2 } }, label),
+      React.createElement('input', { value: val, onChange: (e: React.ChangeEvent<HTMLInputElement>) => onChange(e.target.value), style: inputStyle, title }),
+    )
+
+  return React.createElement('div', { key: 'ctrl', style: sectionCard },
+    // 头部行：chip + 运行状态 + 轮询周期（右对齐 chip）
+    React.createElement('div', { style: sectionHead },
+      React.createElement('span', { style: sectionChip }, '控制'),
       React.createElement('span', { style: { fontSize: 11, color: paused ? C.warn : C.success } },
         paused ? '监控已暂停' : '监控运行中'),
-      React.createElement('span', { style: { fontSize: 11, color: C.label2, marginLeft: 4 } },
-        thr ? '轮询 ' + Math.round(thr.pollMs / 1000) + 's' : ''),
+      pollChip,
     ),
-    React.createElement('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginTop: 6, fontSize: 11 } },
-      React.createElement('span', { style: { color: C.label2 } }, 'GPU利用%'),
-      React.createElement('input', { value: utilWarn, onChange: (e: React.ChangeEvent<HTMLInputElement>) => setUtilWarn(e.target.value), style: inputStyle, title: 'GPU 利用率告警阈值' }),
-      React.createElement('span', { style: { color: C.label2 } }, '显存%'),
-      React.createElement('input', { value: memWarn, onChange: (e: React.ChangeEvent<HTMLInputElement>) => setMemWarn(e.target.value), style: inputStyle, title: '显存占用告警阈值' }),
-      React.createElement('span', { style: { color: C.label2 } }, '温度°C'),
-      React.createElement('input', { value: tempWarn, onChange: (e: React.ChangeEvent<HTMLInputElement>) => setTempWarn(e.target.value), style: inputStyle, title: '温度告警阈值' }),
+    // 阈值分组：3 列自适应栅格，每字段「标签在上 / 输入在下」降低密度
+    React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 10, marginTop: 8 } },
+      field('GPU利用%', utilWarn, setUtilWarn, 'GPU 利用率告警阈值'),
+      field('显存%', memWarn, setMemWarn, '显存占用告警阈值'),
+      field('温度°C', tempWarn, setTempWarn, '温度告警阈值'),
+    ),
+    // 操作行：保存 / 暂停/恢复 / 清除告警
+    React.createElement('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 } },
       React.createElement('button', { onClick: setThr, disabled: busy, style: okBtn }, '保存'),
       React.createElement('button', { onClick: () => setPaused(!paused), disabled: busy, style: btnStyle }, paused ? '恢复' : '暂停'),
       React.createElement('button', { onClick: clearAlerts, disabled: busy, style: btnStyle },
         '清除告警' + (s && s.alertsCriticalCount ? '（' + s.alertsCriticalCount + '）' : '')),
     ),
-    msg ? React.createElement('div', { style: { fontSize: 11, color: C.brand, marginTop: 4 } }, msg) : null,
+    msg ? React.createElement('div', { style: { fontSize: 11, color: C.brand, marginTop: 8 } }, msg) : null,
   )
 }
 
@@ -472,11 +490,11 @@ function TagGroups(props: { tags: TagGroupView[] }): React.ReactElement {
       const isExp = g.rule && g.rule.kind === 'experiment'
       return React.createElement('div', {
         key: g.rule.id,
-        style: { border: '1px solid ' + C.border, borderRadius: 8, padding: '6px 10px', background: C.layer1 },
+        style: sectionCard,
       },
         // 组头：标签徽章 + label + kind 徽标 + 聚合统计（2026-08-20：加「标签」胶囊徽章，
         // 与内置默认聚合组（浏览器/编辑器等）明显区分——用户反馈分不清标签分组与默认分组）
-        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+        React.createElement('div', { style: sectionHead },
           React.createElement('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: color, color: g.rule && g.rule.color ? '#fff' : C.layer1 } },
             '标签'),
           React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: color } }),
@@ -566,9 +584,9 @@ function TagManager(props: { tags: TagGroupView[] }): React.ReactElement {
 
   // 无标签规则时显示引导；有规则时折叠式管理
   const hasRules = Array.isArray(rules) && rules.length > 0
-  return React.createElement('div', { style: { border: '1px solid ' + C.border, borderRadius: 8, padding: '8px 10px', background: C.layer1 } },
-    React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
-      React.createElement('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: C.label, color: C.layer1 } }, '标签管理'),
+  return React.createElement('div', { style: sectionCard },
+    React.createElement('div', { style: sectionHead },
+      React.createElement('span', { style: sectionChip }, '标签管理'),
       React.createElement('span', { style: { fontSize: 11, color: C.label2 } },
         hasRules ? rules.length + ' 条规则' : '无规则——添加后按命令匹配分组展示'),
     ),
@@ -576,7 +594,7 @@ function TagManager(props: { tags: TagGroupView[] }): React.ReactElement {
     hasRules
       ? React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 3, marginTop: 6 } },
           (rules as { id: string; label: string; patterns: string[]; kind: string; color?: string }[]).map((r) => {
-            const c = r.color || C.brand
+            const c = r.color || C.label
             return React.createElement('div', { key: r.id, style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 } },
               React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: c, flexShrink: 0 } }),
               React.createElement('span', { style: { fontWeight: 600 } }, r.label),
@@ -634,6 +652,17 @@ const cardStyle: React.CSSProperties = {
 /** 统一的区块小标题（层级/字号/间距单一来源）——让「趋势/进程/告警」等区块观感一致 */
 const sectionTitle: React.CSSProperties = {
   fontWeight: 600, fontSize: 12, color: C.label, marginBottom: 6, letterSpacing: 0.2,
+}
+/** 统一的「section 容器」：控制/标签管理/标签 三张描边卡共用同一视觉语言 */
+const sectionCard: React.CSSProperties = {
+  border: '1px solid ' + C.border, borderRadius: 10, padding: '10px 12px',
+  background: C.layer1, marginTop: 0,
+}
+/** section 容器头部行：chip + 描述 左对齐，可右对齐的次要信息用 marginLeft:auto */
+const sectionHead: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }
+/** 统一的小型状态 chip（theme 无关反转色：暗色=白底深字，亮色=深底白字） */
+const sectionChip: React.CSSProperties = {
+  fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: C.label, color: C.layer1,
 }
 /** 指标卡标题行：左标题 + 右主数值（基线对齐） */
 const cardHead: React.CSSProperties = { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }

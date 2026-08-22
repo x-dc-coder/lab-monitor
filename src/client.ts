@@ -1224,6 +1224,27 @@ function labelThunk(): string {
 
 const SIDEBAR_TAB_ID = 'lab-monitor:gpu'
 
+/** better-sidebar tab 图标：内联 GPU 芯片 SVG（16px 描边 line-icon，与其它 tab 风格一致，零第三方依赖）。
+ *  契约：icon: (size: number) => ReactNode（better-sidebar 用 currentColor 染色，跟随 tab 前景色）。 */
+function gpuTabIcon(size: number): React.ReactElement {
+  const s = size || 16
+  return React.createElement('svg', {
+    width: s, height: s, viewBox: '0 0 16 16', fill: 'none',
+    stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round',
+  },
+    React.createElement('rect', { x: 4.5, y: 4.5, width: 7, height: 7, rx: 1.5 }),
+    React.createElement('rect', { x: 7, y: 7, width: 2, height: 2 }),
+    React.createElement('path', { d: 'M6 2v2.5' }),
+    React.createElement('path', { d: 'M10 2v2.5' }),
+    React.createElement('path', { d: 'M6 11.5V14' }),
+    React.createElement('path', { d: 'M10 11.5V14' }),
+    React.createElement('path', { d: 'M2 6h2.5' }),
+    React.createElement('path', { d: 'M2 10h2.5' }),
+    React.createElement('path', { d: 'M11.5 6H14' }),
+    React.createElement('path', { d: 'M11.5 10H14' }),
+  )
+}
+
 /** badge：CRITICAL 告警计数（=>99 封顶为 99），只读模块级 last；R-4 try/catch。 */
 function sidebarBadge(): number | null {
   try {
@@ -1264,6 +1285,7 @@ function registerSidebarAdapter(ctx: CtxLike, disposeViewRef: () => (() => void)
           const desc: Record<string, unknown> = {
             id: SIDEBAR_TAB_ID,
             title: () => 'GPU 监控',
+            icon: gpuTabIcon,
             order: 90,
             single: true,
           }

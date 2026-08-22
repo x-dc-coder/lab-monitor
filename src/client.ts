@@ -772,6 +772,7 @@ const DEFAULT_PROC_GROUPS: { key: string; label: string; match: (cmd: string) =>
   { key: 'ide', label: '编辑器/终端', match: (c) => /Code\.exe|WindowsTerminal|ShellHost|coodesker|explorer/i.test(c) },
   { key: 'docker', label: 'Docker/WSL', match: (c) => /Docker|docker|wsl/i.test(c) },
   { key: 'system', label: '系统进程', match: (c) => /System|Registry|smss|csrss|wininit|services|lsass|dwm|SearchHost|StartMenu|LockApp|TextInputHost|ApplicationFrame/i.test(c) },
+  { key: 'vm', label: '虚拟机', match: (c) => /vmmem|vmwp|vmms|VmCompute|HvHost|vmware|VirtualBox|VBoxHeadless|qemu|VGAuth/i.test(c) },
   { key: 'other-app', label: '常用应用', match: (c) => /Weixin|QQ|ToDesk|TaiShanNet|llama-server/i.test(c) },
 ]
 
@@ -793,16 +794,20 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
   const all = (s && Array.isArray(s.procs)) ? s.procs : []
   if (!all.length || !s) return null
   const watched = new Set<number>(Array.isArray(s.watchedPids) ? s.watchedPids : [])
-  // 资源占用打分：GPU 主导、CPU 次之、内存兜底（顶部=资源最重的进程，避免漏掉"吃货"）
-  const score = (p: ProcView): number => (procGpu(p) || 0) * 100 + (p.cpuPct || 0) + ((p.memMiB || 0) / 1000)
+  // 资源占用打分（GPU/CPU/内存 0-100 归一化均衡——避免 GPU 独占前排，让重内存的进程（虚拟机/浏览器渲染）也能进前 15）
+  const memTotal = s.mem && s.mem.totalMiB
+  const score = (p: ProcView): number => {
+    const gpu = procGpu(p) || 0
+    const cpu = p.cpuPct || 0
+    const memPct = (memTotal && p.memMiB) ? (p.memMiB / memTotal) * 100 : 0
+    return gpu + cpu + memPct
+  }
   const watchedRows = all.filter((p) => watched.has(p.pid))
-  const rest = all.filter((p) => !watched.has(p.pid)).slice().sort((a, b) => score(b) - score(a))
-  const CAP = 15
-  const shownRest = rest.slice(0, Math.max(1, CAP - watchedRows.length))
   const total = all.length
-  // 聚合组（默认组；成员已按占用排序），组头显示组资源聚合
+  // **对全量非监控进程分组**（host 已发全量；组头计数/聚合=该组全部成员）——准确聚合 Chrome/虚拟机内存（不再只取前 15）
+  const nonWatched = all.filter((p) => !watched.has(p.pid)).slice().sort((a, b) => score(b) - score(a))
   const groupRows: { key: string; label: string; members: ProcView[] }[] = []
-  const remaining = shownRest.slice()
+  const remaining = nonWatched.slice()
   for (const g of DEFAULT_PROC_GROUPS) {
     const members = remaining.filter((p) => g.match(p.cmd || ''))
     if (!members.length) continue
@@ -810,8 +815,8 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
     for (const m of members) remaining.splice(remaining.indexOf(m), 1)
   }
   const otherRows = remaining
-  // 组按总占用排序（GPU 主导 > CPU > 内存），最重的组排最前，便于追踪高占用
-  const groupScore = (members: ProcView[]): number => members.reduce((a, p) => a + (procGpu(p) || 0) * 100 + (p.cpuPct || 0) + ((p.memMiB || 0) / 1000), 0)
+  // 组按总占用排序（与打分一致），最重的组排最前
+  const groupScore = (members: ProcView[]): number => members.reduce((a, p) => a + score(p), 0)
   groupRows.sort((a, b) => groupScore(b.members) - groupScore(a.members))
   // 组资源聚合：只显示非零项，做成彩色徽标（GPU/CPU 按利用率着色、内存灰）——干净且一眼定位吃哪类资源
   const aggTokens = (members: ProcView[]): React.ReactElement[] => {
@@ -870,7 +875,11 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
       ),
     ))
     if (open) {
-      for (const m of g.members) tbodyRows.push(row(m, 'group'))
+      for (const m of g.members.slice(0, 30)) tbodyRows.push(row(m, 'group'))
+      if (g.members.length > 30) tbodyRows.push(React.createElement('tr', { key: 'more-' + g.key },
+        React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 10, padding: '2px 6px' } },
+          '… 还有 ' + (g.members.length - 30) + ' 个成员')),
+      )
     }
   }
   // 其余普通进程（非默认组）：做成**可折叠**组（默认收起，点击展开），与默认聚合组一致，避免刷屏
@@ -890,13 +899,16 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
       ),
     ))
     if (open) {
-      for (const p of otherRows) tbodyRows.push(row(p, 'group'))
+      for (const p of otherRows.slice(0, 30)) tbodyRows.push(row(p, 'group'))
+      if (otherRows.length > 30) tbodyRows.push(React.createElement('tr', { key: 'more-other' },
+        React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 10, padding: '2px 6px' } },
+          '… 还有 ' + (otherRows.length - 30) + ' 个成员')),
+      )
     }
   }
   return React.createElement('div', { key: 'procs', style: { marginTop: 4 } },
-    React.createElement('div', { style: sectionTitle, title: total > CAP ? '资源占用前 ' + CAP + ' 个' : undefined },
+    React.createElement('div', { style: sectionTitle, title: '进程按组聚合（计数/内存=该组全部进程），组内可展开查看成员' },
       '进程' + (s && s.sources && s.sources.procs ? '（' + s.sources.procs + '）' : '') + ' · 共 ' + total +
-      (total > CAP ? ' · 显示前' + CAP : '') +
       (watchedRows.length ? ' · 监控 ' + watchedRows.length : '')),
     React.createElement('div', { style: { overflowX: 'auto' } },
       React.createElement('table', { style: { borderCollapse: 'collapse', width: '100%' } },

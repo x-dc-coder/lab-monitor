@@ -549,7 +549,10 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     const watchPidSet = new Set(watchedPids)
     const watchedFirst = baseProcsFull.filter((p) => watchPidSet.has(p.pid))
     const others = baseProcsFull.filter((p) => !watchPidSet.has(p.pid))
-    const procsAll = [...prioritizeGpuProcs(watchedFirst, 15), ...prioritizeGpuProcs(others, 15)].slice(0, 15)
+    // 2026-08-23（统计准确性）：tasklist 全量约 400 进程，此前 `.slice(0,15)` 按 GPU 优先级截断，
+    // 导致 Chrome 多进程/虚拟机等被 host 丢弃 → 进程内存加总远小于系统已用。
+    // 修复：**发送全量进程**（watchedFirst 置顶 + 其余按 GPU 优先排序），由 client 端分组/折叠展示。
+    const procsAll = [...prioritizeGpuProcs(watchedFirst, baseProcsFull.length), ...prioritizeGpuProcs(others, baseProcsFull.length)]
     const tagGroups: TagGroup[] = []
     const rules = tagSet()
     if (rules.length && baseProcsFull.length) {

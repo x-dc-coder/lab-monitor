@@ -1273,7 +1273,11 @@ function registerSidebarAdapter(ctx: CtxLike, disposeViewRef: () => (() => void)
         console.warn('[lab-monitor] better-sidebar 被禁用（ui.betterSidebarVisible=false），保持 conversation.view')
         return
       }
-      if (bs === null) bs = ctx.get('betterSidebar')
+      if (bs === null) {
+        // cordis 服务可经 ctx.get 取；个别 client 组合里 provided 服务也以 ctx.betterSidebar 属性暴露（office 插件即此用法）。双通道取值。
+        try { bs = ctx.get('betterSidebar') } catch (e) { bs = null }
+        if (!bs) { try { bs = (ctx as unknown as { betterSidebar?: unknown }).betterSidebar } catch (e) { bs = null } }
+      }
       if (!bs) {
         attempts += 1
         if (attempts < MAX_ATTEMPTS) ctx.setTimeout(tryProbe, 2000)

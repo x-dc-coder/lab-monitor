@@ -92,7 +92,7 @@ lab_ctl tag tag={op:"add", label:"py实验", patterns:["python.*train"], kind:"e
 ## 6. 持久化与配置文件
 
 - 插件配置**一律在包外**（遵守全局 RULES §1.1）：
-  - **settings.yaml**（`$DSH_HOME/settings.yaml`，命名空间 `lab-monitor`）：`thresholds`、`watchProcs`、`tags` 三键持久化；
+  - **settings.yaml**（`$DSH_HOME/settings.yaml`，命名空间 `lab-monitor`）：`thresholds`、`watchProcs`、`tags`、`history`（实验历史，V2.6）四键持久化；
     运行时经 `lab_ctl` / 面板修改会自动写回，**无需手改**；如需手工预设，按同名键书写即可（启动时读取、运行时双向同步）。
   - 行级配置（如依次叠加的 patch）：profile 的 `cordis.patch.yml` 或 `$DSH_HOME/cordis.patch.yml` 中
     `lab-monitor` 行的 `config` 字段（见 docs/config-catalog.zh.md 对应条目）。
@@ -102,7 +102,7 @@ lab_ctl tag tag={op:"add", label:"py实验", patterns:["python.*train"], kind:"e
 
 - `POST /lab-monitor/api/snapshot|history|setThresholds|control|advice|tag`（webServer 注册时）。
 - 与 `lab_status`/`lab_ctl` 同一数据源、同一契约（docs/03-protocol.md 1.4）；`control` 与 `setThresholds` 与工具通道一致生效并持久化。
-- ⚠️ 该 HTTP 面**无鉴权**——仅在可信内网/本机使用（Tailscale 可达场景注意暴露面，A 类未完成项）。
+- ⚠️ 该 HTTP 面**无鉴权**——**V2.6 实测**：Tailscale IP（100.64.0.2:13080）访问 `/lab-monitor/api/*` 超时不可达（`--trusted-host` 未暴露该端口），**当前暴露面 = localhost only**；若未来配置端口转发/SSE 开放，需先加鉴权（防御性 backlog）。
 
 ## 8. 变更记录
 
@@ -110,3 +110,4 @@ lab_ctl tag tag={op:"add", label:"py实验", patterns:["python.*train"], kind:"e
 |---|---|
 | V2.4（2026-08-22） | brief 摘要修复；告警生命周期（TTL/clear-alerts/截断计数修正）；watch 置顶 |
 | V2.5（2026-08-22） | P1：实验历史 `ended[]` + 面板历史折叠块；设置面（阈值/暂停/清除告警 + pollMs 驱动）；本使用文档 |
+| V2.6（2026-08-22） | P2：实验历史持久化（settings `history` 键，重启恢复，上限 20）；HTTP 暴露面实证（Tailscale 实际不可达 → localhost only） |

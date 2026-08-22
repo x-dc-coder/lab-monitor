@@ -306,6 +306,28 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 
 > 注意：本段 **host 半改动（协议字段/状态机归档）需 DSH 重启生效**；client 半（实验历史块/控制面板/pollMs 驱动）浏览器刷新即生效。
 
+### V2.6 实验历史持久化 + HTTP 暴露面实证（2026-08-22，P2 批次）
+
+> 触发：V2.5 交付后浏览器端到端验证（Playwright MCP）发现「实验历史重启即失」——用户看到面板
+> 出现「实验历史（1）」后 DSH 重启即消失（history 纯内存）。本段修复该真实缺陷。
+
+1. **实验历史持久化（settings 命名空间 lab-monitor `history` 键）**：
+   - 状态机新增 `restoreEnded(EndedRunSnapshot[])`——settings 读回的 ended 投影重建为最小 RunRecord
+     追加 history 尾部（旧数据在后，新归档 unshift 在前），保持上限 20；已结束记录不进 runs 判定；
+   - 写回：`persistState()` 载荷增加 `history`（ended 投影，倒序与 snapshot() 一致）；**惰性触发**——
+     `buildSnapshot` 出口检测 `history[0].endTs` 变化才落盘（新归档 ≤1 轮询周期写入，正常轮询零写入；
+     重启恢复后与持久化比对一致不重复写）；
+   - schema：`history: Schema.array(Schema.object({runId,state,cmd,cmdFeature,startTs,endTs,summary}))`
+     `.default([])`（`MAX_HISTORY=20` 常量统一 history 上限）。
+2. **HTTP 暴露面实证（修正认知）**：Tailscale IP `100.64.0.2:13080` 访问 `/lab-monitor/api/*` 实测
+   **超时不可达（000）**——`--trusted-host` 当前未暴露该端口，暴露面 = **localhost only** ✅；
+   此前「HTTP API 零鉴权」风险在当前网络配置下不成立，降级为防御性 backlog（若未来配置端口转发需先加鉴权）。
+3. **测试配套**：verify-host 重启模拟段（ctxd3 documents 保留 → 新 fiber apply）新增 3 断言——
+   重启后 ended[] 恢复 / runId 精确（runA done + runB crashed）/ summary 结构完整；全量回归绿。
+4. **顺带记录**：known-issues 问题 6 补充「实验历史只存内存」为已修复（V2.6）。
+
+> 注意：本段 **host 半改动（持久化链路），需 DSH 重启生效**（client 无改动，浏览器刷新即可）。
+
 ## 未完成项清单（2026-08-20 对照 PLAN v1.4.5 + 04-milestones）
 
 > 对照依据：PLAN §0 三层组合 / §1 目录树 / §6 风险表 / §4 验收清单；04-milestones 勾选状态。

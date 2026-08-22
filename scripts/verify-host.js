@@ -708,6 +708,14 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   const snapR = await callApi(H3, 'snapshot')({})
   assert(Array.isArray(snapR.watchedPids) && snapR.watchedPids.indexOf(5555) !== -1,
     '重启后 watchlist 恢复并命中 llama-server(5555)', snapR.watchedPids)
+  // 2026-08-22（P2 实验历史持久化）：重启（新 fiber + documents 保留）→ ended[] 从 settings 恢复
+  assert(Array.isArray(snapR.ended) && snapR.ended.length >= 1,
+    'P2 重启后 ended[] 从 settings 恢复（history 持久化）', snapR.ended && snapR.ended.length)
+  const endedR = snapR.ended || []
+  assert(endedR.some((e) => e.runId === runA && e.state === 'done') && endedR.some((e) => e.runId === runB && e.state === 'crashed'),
+    'P2 恢复记录含 runA(done)/runB(crashed)（runId 精确）', endedR.map((e) => e.runId + ':' + e.state))
+  assert(endedR.every((e) => e.summary === null || typeof e.summary.gpuUtilMax === 'number'),
+    'P2 恢复记录 summary 结构完整（null 或含 gpuUtilMax）', endedR.slice(0, 3).map((e) => e.summary))
   assert(Array.isArray(snapR.procs) && snapR.procs.length > 0 && snapR.procs[0].pid === 5555,
     'watch 命中进程置顶可见（P0 修复：不再被 15 行截断切掉）', snapR.procs && snapR.procs.slice(0, 3).map((p) => p.pid))
   FAKE.tasklist = '"python.exe","1234","Console","1","12,345 K"\n"python.exe","5678","Console","1","8,000 K"\n"chrome.exe","9999","Console","1","20,000 K"'

@@ -2,7 +2,7 @@
  * state-machine（实验生命周期：idle/running/done/crashed/alerting/aborted）—— §4
  * 迁移自 host/index.js §4，逻辑等价（含 v1.4.3 / v1.4.5 会话内验收实证修正）
  */
-import { CRASH_PS_GAP, DONE_GRACE_TICKS, MAX_PARALLEL_RUNS, RING_MAX_MS, cmdFingerprint, makeRunId, normalizeCmdForMatch } from './constants.js'
+import { CRASH_PS_GAP, DONE_GRACE_TICKS, MAX_HISTORY, MAX_PARALLEL_RUNS, RING_MAX_MS, cmdFingerprint, makeRunId, normalizeCmdForMatch } from './constants.js'
 import type { Ring } from './ring.js'
 import type { Alert, EndedRunSnapshot, ExperimentSnapshot, RunRecord } from './types.js'
 
@@ -31,6 +31,7 @@ export interface StateMachine {
   tickGrace(run: RunRecord): void
   setAlerting(on: boolean, runId?: string | null): void
   snapshot(): { main: ExperimentSnapshot | null; all: ExperimentSnapshot[]; ended: EndedRunSnapshot[] }
+  restoreEnded(snapshots: EndedRunSnapshot[]): void
   cur(): RunRecord | null
   all(): RunRecord[]
   history: RunRecord[]
@@ -141,7 +142,7 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     run.summary = run.summary || buildSummary(run)
     state.runs.delete(run.runId)
     state.history.unshift(run)
-    if (state.history.length > 20) state.history.length = 20
+    if (state.history.length > MAX_HISTORY) state.history.length = MAX_HISTORY
   }
 
   function conclude(run: RunRecord, reason: 'done' | 'crashed'): void {
@@ -323,6 +324,38 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     }
   }
 
+  // 2026-08-22（P2）：实验历史持久化恢复——settings 读回的 ended 投影重建为最小 RunRecord，
+  // 追加到 history 尾部（旧数据在后的时间序；新归档 unshift 在前），保持上限 20。
+  // 已结束记录不进入 runs 判定（state 非 running，tick/判定流程不会触碰）。
+  function restoreEnded(snapshots: EndedRunSnapshot[]): void {
+    if (!Array.isArray(snapshots) || !snapshots.length) return
+    const known = new Set(state.history.map((r) => r.runId))
+    for (const s of snapshots) {
+      if (!s || typeof s.runId !== 'string' || known.has(s.runId)) continue
+      if (state.history.length >= MAX_HISTORY) break
+      known.add(s.runId)
+      state.history.push({
+        runId: s.runId,
+        cmd: typeof s.cmd === 'string' ? s.cmd : null,
+        cmdFeature: typeof s.cmdFeature === 'string' ? s.cmdFeature : null,
+        pid: null,
+        procGroup: null,
+        startTs: typeof s.startTs === 'number' ? s.startTs : 0,
+        endTs: typeof s.endTs === 'number' ? s.endTs : null,
+        state: s.state === 'done' ? 'done' : s.state === 'aborted' ? 'aborted' : 'crashed',
+        endReason: s.state || null,
+        resultSeen: s.state === 'done',
+        fingerprint: '',
+        graceTicks: 0,
+        alerting: false,
+        pidMissingStreak: 0,
+        groupStats: null,
+        sampleStats: null,
+        summary: s.summary && typeof s.summary === 'object' ? s.summary : undefined,
+      })
+    }
+  }
+
   function snapshot(): { main: ExperimentSnapshot | null; all: ExperimentSnapshot[]; ended: EndedRunSnapshot[] } {
     const runs = all()
     // 2026-08-22（P1 实验历史）：已结束实验（done/crashed/aborted）历史投影——倒序（最新在前），
@@ -338,5 +371,5 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     }
   }
 
-  return { start, associatePid, associateProc, markResult, tick, tickGrace, setAlerting, snapshot, cur, all, history: state.history }
+  return { start, associatePid, associateProc, markResult, tick, tickGrace, setAlerting, snapshot, restoreEnded, cur, all, history: state.history }
 }

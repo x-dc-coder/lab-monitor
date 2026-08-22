@@ -616,6 +616,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       ui: { betterSidebarVisible: uiVisible() },
     }
     if (base.degraded) snap.degraded = base.degraded
+    // 2026-08-22（P2 实验历史）：history 变化惰性持久化（新归档 ≤1 轮询周期落盘；正常零写入）
+    maybePersistHistory()
     // 2026-08-20：对外输出统一 lossless 清洗（NaN/Infinity/undefined → null；-0 → 0）
     return sanitizeJson(snap) as MonitorSnapshot
   }
@@ -653,6 +655,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   // M4 服务时序：settings 服务可能晚于本插件 apply（better-sidebar 大 bundle 同理）——
   // 一次性 ctx.get('settings') 会拿到 undefined → 静默降级（实测 tags 不落盘）。加重探。
   let settingsScope: SettingsScopeLike | null = null
+  // 2026-08-22（P2 实验历史）：已结束记录持久化惰性标记（声明前置：settingsRetry 恢复时引用）
+  let lastPersistedEndKey = 'none'
   const settingsRetry = (attempt: number): void => {
     if (settingsScope) return
     try {
@@ -676,16 +680,32 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             kind: Schema.union([Schema.const('experiment'), Schema.const('process')]),
             color: Schema.any(),
           })).default([]),
+          // 2026-08-22（P2 实验历史）：已结束实验记录持久化（ended 投影，重启恢复）
+          history: Schema.array(Schema.object({
+            runId: Schema.string(),
+            state: Schema.union([Schema.const('done'), Schema.const('crashed'), Schema.const('aborted')]),
+            cmd: Schema.any(),
+            cmdFeature: Schema.any(),
+            startTs: Schema.number(),
+            endTs: Schema.any(),
+            summary: Schema.any(),
+          })).default([]),
         })
         settingsScope = settingsSvc.register('lab-monitor', persistSchema, { applies: 'live' })
         // 读回持久化基线（重启后 lab_ctl 改的阈值 / watch 动态注册 / 标签不再丢失）
-        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[] } | null
+        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[]; history?: unknown[] } | null
         if (stored && stored.thresholds) thresholds.apply(stored.thresholds as never, true)
         if (stored && Array.isArray(stored.watchProcs)) {
           cfg.watchProcs = stored.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
         }
         if (stored && Array.isArray(stored.tags)) {
           cfg.tags = stored.tags.filter(isValidTagRule)
+        }
+        // 2026-08-22（P2 实验历史）：恢复已结束实验记录（settings 持久化 → 状态机 history）
+        if (stored && Array.isArray(stored.history) && typeof machine.restoreEnded === 'function') {
+          machine.restoreEnded(stored.history as never)
+          // 恢复后同步惰性标记：避免首次 snapshot 误触发整份写回（内容一致无需落盘）
+          lastPersistedEndKey = machine.history && machine.history.length ? String(machine.history[0].endTs) : 'none'
         }
         // 外部修改（用户手改 settings.yaml / 其他配置面）实时生效
         if (typeof settingsScope.watch === 'function') {
@@ -716,12 +736,40 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   settingsRetry(0)
 
   // 写入辅助：内存态变更 → 持久化（async 写队列；失败显式记录，不影响运行）
+  // 2026-08-22（P2 实验历史）：已结束记录持久化惰性标记——history[0].endTs 变化（新归档/上限截断）
+  // 才触发写回，正常轮询零写入；重启恢复后与已持久化比对一致 → 不重复写。
   async function persistState() {
     if (!settingsScope || typeof settingsScope.update !== 'function') return
     try {
-      await settingsScope.update({ thresholds: thresholds.get(), watchProcs: watchSet(), tags: tagSet() })
+      const endKey = machine.history && machine.history.length ? String(machine.history[0].endTs) : 'none'
+      await settingsScope.update({
+        thresholds: thresholds.get(),
+        watchProcs: watchSet(),
+        tags: tagSet(),
+        // 2026-08-22（P2）：ended 投影持久化（倒序投影与 snapshot() 一致；重启 restoreEnded 恢复）
+        history: (machine.history || []).map((r) => ({
+          runId: r.runId,
+          state: r.state === 'done' ? 'done' : r.state === 'aborted' ? 'aborted' : 'crashed',
+          cmd: r.cmd,
+          cmdFeature: r.cmdFeature,
+          startTs: r.startTs,
+          endTs: r.endTs,
+          summary: r.summary || null,
+        })),
+      })
+      lastPersistedEndKey = endKey
     } catch (e) {
       console.warn('[lab-monitor] 设置持久化写入失败（保留内存值）:', (e as Error).message)
+    }
+  }
+
+  /** P2：history 变化惰性持久化——buildSnapshot 出口检测（新 ended 归档后 ≤1 轮询周期落盘） */
+  function maybePersistHistory() {
+    if (!settingsScope) return
+    const endKey = machine.history && machine.history.length ? String(machine.history[0].endTs) : 'none'
+    if (endKey !== lastPersistedEndKey) {
+      lastPersistedEndKey = endKey
+      void persistState()
     }
   }
 

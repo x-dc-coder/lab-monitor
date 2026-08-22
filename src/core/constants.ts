@@ -20,6 +20,8 @@ export const CRASH_PS_GAP = 2
 export const DONE_GRACE_TICKS = 2
 /** 2026-08-20（A2 多轨）：并行实验跟踪上限（超出时归档最旧 running 为 aborted） */
 export const MAX_PARALLEL_RUNS = 4
+/** 2026-08-22（P2 实验历史）：已结束实验历史上限（ended[] 投影与 settings 持久化共用） */
+export const MAX_HISTORY = 20
 
 export const THRESHOLD_DEFAULTS = { utilWarn: 90, memWarn: 95, tempWarn: 85, pollMs: 5000 }
 export type Thresholds = typeof THRESHOLD_DEFAULTS

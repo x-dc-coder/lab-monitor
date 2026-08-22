@@ -898,11 +898,12 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     advice: () => rpcAdvice(),
     // 2026-08-20（标签管理 UI）：浏览器端 lab_ctl tag 等效路由（add/remove/list）
     tag: (body) => rpcTag((body.tag || {}) as Record<string, unknown>),
-    // 2026-08-23（监控目标 UI）：浏览器端 lab_ctl watch 等效路由（一次性覆盖动态 watchlist）
+    // 2026-08-23（监控目标 UI）：浏览器端 lab_ctl watch 等效路由。修复：完整列表写回 cfg.watchProcs（单一事实源，
+    // 能删掉「静态基线」关键词）+ 清空动态注册，再持久化。
     watch: (body) => {
-      const kws = Array.isArray(body.keywords) ? body.keywords.filter((k: unknown): k is string => typeof k === 'string' && !!k.trim()) : []
+      const kws = Array.isArray(body.keywords) ? body.keywords.filter((k: unknown): k is string => typeof k === 'string' && !!k.trim()).map((k: string) => k.trim()) : []
+      cfg.watchProcs = kws
       runtimeWatch.clear()
-      for (const k of kws) runtimeWatch.add(k.trim())
       persistState()
       return { ok: true, state: 'watchlist-updated', watchProcs: watchSet() }
     },
@@ -1065,9 +1066,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             async execute(args: { action?: string; keywords?: string[]; thresholds?: Record<string, unknown>; tag?: Record<string, unknown>; runId?: string; rule?: string }) {
               const a = args || {}
               if (a.action === 'watch') {
-                const kws = Array.isArray(a.keywords) ? a.keywords.filter((k) => typeof k === 'string' && k.trim()) : []
+                const kws = Array.isArray(a.keywords) ? a.keywords.filter((k) => typeof k === 'string' && k.trim()).map((k) => k.trim()) : []
+                cfg.watchProcs = kws
                 runtimeWatch.clear()
-                for (const k of kws) runtimeWatch.add(k.trim())
                 persistState() // 2026-08-20：动态 watchlist 写回 settings 持久化（重启不丢失）
                 // 命中预览：立即返回当前快照中命中 watchlist 的进程（Agent 可见证据）
                 const wp = buildSnapshot().watchedPids || []

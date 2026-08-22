@@ -712,12 +712,19 @@ const tdStyle: React.CSSProperties = {
   whiteSpace: 'nowrap', fontSize: 12,
 }
 
+/** GPU 短名：去 vendor 前缀取紧凑型号 + GPU 编号（"NVIDIA GeForce RTX 5060 Ti" → "RTX 5060 Ti · GPU0"）。 */
+function gpuShortName(g: GpuView): string {
+  const full = (g.name || '').trim()
+  const short = full.replace(/^(nvidia\s+)?(geforce\s+)?(amd\s+)?(radeon\s+)?(intel\s+)?(arc\s+)?(titan\s+)?/i, '').trim()
+  return (short ? short + ' · ' : '') + 'GPU' + g.id
+}
+
 function gpuCard(g: GpuView) {
   const pct = g.utilPct
   return React.createElement('div', { key: g.id, style: cardStyle },
     React.createElement('div', { style: cardHead },
       React.createElement('span', { style: { fontWeight: 600, color: C.label } },
-        (g.name ? g.name + ' ' : '') + 'GPU' + g.id),
+        gpuShortName(g)),
       React.createElement('span', { style: { ...cardValue, color: utilColor(pct) } }, pct + '%'),
     ),
     pctBar(pct),
@@ -783,34 +790,54 @@ function procGpu(p: ProcView): number | null {
 function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) => void }) {
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({})
   const s = props.snap
-  const procs = (s && Array.isArray(s.procs) ? s.procs : []).slice(0, 15)
-  if (!procs.length || !s) return null
+  const all = (s && Array.isArray(s.procs)) ? s.procs : []
+  if (!all.length || !s) return null
   const watched = new Set<number>(Array.isArray(s.watchedPids) ? s.watchedPids : [])
-  const watchedRows = procs.filter((p) => watched.has(p.pid))
-  const rest = procs.filter((p) => !watched.has(p.pid))
-  // 聚合组（标题行 + 组内成员；展开后渲染全部成员行）
+  // 资源占用打分：GPU 主导、CPU 次之、内存兜底（顶部=资源最重的进程，避免漏掉"吃货"）
+  const score = (p: ProcView): number => (procGpu(p) || 0) * 100 + (p.cpuPct || 0) + ((p.memMiB || 0) / 1000)
+  const watchedRows = all.filter((p) => watched.has(p.pid))
+  const rest = all.filter((p) => !watched.has(p.pid)).slice().sort((a, b) => score(b) - score(a))
+  const CAP = 15
+  const shownRest = rest.slice(0, Math.max(1, CAP - watchedRows.length))
+  const total = all.length
+  // 聚合组（默认组；成员已按占用排序），组头显示组资源聚合
   const groupRows: { key: string; label: string; members: ProcView[] }[] = []
+  const remaining = shownRest.slice()
   for (const g of DEFAULT_PROC_GROUPS) {
-    const members = rest.filter((p) => g.match(p.cmd || ''))
+    const members = remaining.filter((p) => g.match(p.cmd || ''))
     if (!members.length) continue
     groupRows.push({ key: g.key, label: g.label, members })
-    for (const m of members) rest.splice(rest.indexOf(m), 1)
+    for (const m of members) remaining.splice(remaining.indexOf(m), 1)
   }
-  const otherRows = rest
-
-  const row = (p: ProcView, extraStyle?: Record<string, string>) =>
-    React.createElement('tr', {
+  const otherRows = remaining
+  const agg = (members: ProcView[]): string => {
+    const gpu = members.reduce((a, p) => a + (procGpu(p) || 0), 0)
+    const cpu = members.reduce((a, p) => a + (p.cpuPct || 0), 0)
+    const mem = members.reduce((a, p) => a + (p.memMiB || 0), 0)
+    const parts: string[] = []
+    if (gpu > 0) parts.push('GPU ' + Math.round(gpu) + '%')
+    if (cpu > 0) parts.push('CPU ' + Math.round(cpu) + '%')
+    if (mem > 0) parts.push(fmtGiB(mem) + 'G')
+    return parts.join(' · ')
+  }
+  const row = (p: ProcView, kind?: 'watch' | 'group') => {
+    const gpu = procGpu(p) || 0
+    const cpu = p.cpuPct || 0
+    const hot = gpu >= 80 || cpu >= 80
+    const bg = kind === 'watch' ? 'rgba(57,100,254,0.06)' : hot ? 'rgba(220,38,38,0.07)' : (kind === 'group' ? 'rgba(0,0,0,0.02)' : undefined)
+    return React.createElement('tr', {
       key: 'p' + p.pid,
       onClick: () => props.onDetail(procDetailData(p)),
       title: '点击查看进程详情',
-      style: { ...(extraStyle || {}), cursor: 'pointer' },
+      style: { background: bg, cursor: 'pointer' },
     },
       React.createElement('td', { style: tdStyle }, String(p.pid)),
       React.createElement('td', { style: { ...tdStyle, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' } }, p.cmd || ''),
-      React.createElement('td', { style: tdStyle }, procGpu(p) !== null ? String(Math.round(procGpu(p) as number)) : '-'),
-      React.createElement('td', { style: tdStyle }, p.cpuPct !== undefined && p.cpuPct !== null ? String(Math.round(p.cpuPct)) : '-'),
+      React.createElement('td', { style: { ...tdStyle, color: gpu >= 80 ? C.error : undefined } }, procGpu(p) !== null ? String(Math.round(procGpu(p) as number)) : '-'),
+      React.createElement('td', { style: { ...tdStyle, color: cpu >= 80 ? C.error : undefined } }, p.cpuPct !== undefined && p.cpuPct !== null ? String(Math.round(p.cpuPct)) : '-'),
       React.createElement('td', { style: tdStyle }, p.memMiB !== undefined && p.memMiB !== null ? fmtGiB(p.memMiB) + 'G' : '-'),
     )
+  }
   const toggle = (key: string) =>
     setExpanded((prev) => {
       const next = { ...prev }
@@ -820,10 +847,11 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
     })
   const tbodyRows: unknown[] = []
   // watched 置顶（独立高亮行）
-  for (const p of watchedRows) tbodyRows.push(row(p, { background: 'rgba(57,100,254,0.06)' }))
-  // 聚合组：标题行（点击展开/收起）+ 展开时全部成员行
+  for (const p of watchedRows) tbodyRows.push(row(p, 'watch'))
+  // 聚合组：标题行（点击展开/收起，含资源聚合）+ 展开时全部成员行
   for (const g of groupRows) {
     const open = !!expanded[g.key]
+    const gagg = agg(g.members)
     tbodyRows.push(React.createElement('tr', {
       key: 'grp-' + g.label,
       onClick: () => toggle(g.key),
@@ -831,24 +859,25 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
     },
       React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 11 } },
         (open ? '▼ ' : '▸ ') + g.label + '（' + g.members.length + '）' +
-        (open ? '' : ' ' + g.members.slice(0, 3).map((m) => m.cmd || '').join(' / '))),
+        (gagg ? '  ' + gagg : '') +
+        (open ? '' : '  ' + g.members.slice(0, 3).map((m) => m.cmd || '').join(' / '))),
     ))
     if (open) {
-      for (const m of g.members) tbodyRows.push(row(m, { background: 'rgba(0,0,0,0.02)' }))
+      for (const m of g.members) tbodyRows.push(row(m, 'group'))
     }
   }
-  // 其余普通进程（非默认组）：加「其他进程」标题行分隔，避免与上方聚合组混淆
-  // （2026-08-20 截图核验：O+Connect 紧贴「其他应用」组被误读为组内第 4 项）
+  // 其余普通进程（非默认组）：加「其他进程」标题行分隔
   if (otherRows.length) {
     tbodyRows.push(React.createElement('tr', { key: 'grp-other' },
       React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 11, borderTop: '1px solid ' + C.border, paddingTop: 6, marginTop: 6 } },
-        '其他进程（' + otherRows.length + '）'),
+        '其他进程（' + otherRows.length + '）' + (agg(otherRows) ? '  ' + agg(otherRows) : '')),
     ))
-    for (const p of otherRows) tbodyRows.push(row(p, { background: 'rgba(0,0,0,0.02)' }))
+    for (const p of otherRows) tbodyRows.push(row(p, 'group'))
   }
   return React.createElement('div', { key: 'procs', style: { marginTop: 4 } },
-    React.createElement('div', { style: sectionTitle },
-      '进程' + (s && s.sources && s.sources.procs ? '（' + s.sources.procs + '）' : '') +
+    React.createElement('div', { style: sectionTitle, title: total > CAP ? '资源占用前 ' + CAP + ' 个' : undefined },
+      '进程' + (s && s.sources && s.sources.procs ? '（' + s.sources.procs + '）' : '') + ' · 共 ' + total +
+      (total > CAP ? ' · 显示前' + CAP : '') +
       (watchedRows.length ? ' · 监控 ' + watchedRows.length : '')),
     React.createElement('div', { style: { overflowX: 'auto' } },
       React.createElement('table', { style: { borderCollapse: 'collapse', width: '100%' } },

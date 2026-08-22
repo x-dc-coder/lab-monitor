@@ -63,6 +63,8 @@ interface SnapView {
   mem: { totalMiB: number | null; availableMiB: number | null }
   procs: ProcView[]
   watchedPids?: number[]
+  /** 2026-08-23（监控目标）：当前生效的 watchProcs 关键词（host watchSet()） */
+  watchProcs?: string[]
   /** 2026-08-20（A2 多轨）：全部 running 实验（experiment 保留为主实验） */
   experiments?: ExperimentView[]
   /** 2026-08-22（P1 实验历史）：已结束实验（done/crashed/aborted）——复盘展示 */
@@ -1161,6 +1163,55 @@ function DetailOverlay(props: { detail: DetailData | null; onClose: () => void }
 // 设置面板（控制阈值/启停/清告警 + 标签管理 —— 从主面板迁到 DSH 设置页二次处理）
 // ----------------------------------------------------------------------------
 /** settings.section 组件：自行轮询快照（阈值事实来源 在 host），渲染控制 + 标签管理。 */
+/** 2026-08-23：监控目标(watchProcs)管理——进程名包含关键词即置顶高亮并纳入统计。 */
+function WatchManager(props: { watchProcs: string[] }): React.ReactElement {
+  const [input, setInput] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const [msg, setMsg] = React.useState<string | null>(null)
+  const watched = props.watchProcs || []
+
+  const apply = (keywords: string[]) => {
+    setBusy(true); setMsg(null)
+    apiCall<{ ok?: boolean; state?: string }>('watch', { keywords })
+      .then((r) => { if (r && (r as { ok?: boolean }).ok) setMsg('已保存（持久化）'); else setMsg('操作失败') })
+      .catch(() => setMsg('调用失败'))
+      .finally(() => setBusy(false))
+  }
+  const add = () => {
+    const k = input.trim()
+    if (!k) return
+    if (watched.includes(k)) { setMsg('已存在'); return }
+    apply([...watched, k])
+    setInput('')
+  }
+  const remove = (k: string) => apply(watched.filter((x) => x !== k))
+
+  const inputBase: React.CSSProperties = { background: C.layer1, border: '1px solid ' + C.border, color: C.label, borderRadius: 4, padding: '3px 6px', fontSize: 11 }
+  return React.createElement('div', { key: 'watch', style: sectionCard },
+    React.createElement('div', { style: sectionHead },
+      React.createElement('span', { style: sectionChip }, '监控目标'),
+      React.createElement('span', { style: { fontSize: 11, color: C.label2 } },
+        watched.length + ' 个 · 命中即置顶高亮并纳入统计'),
+    ),
+    watched.length
+      ? React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 } },
+          watched.map((k) => React.createElement('span', { key: k, style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, padding: '2px 7px', borderRadius: 8, background: C.border, color: C.label } },
+            k,
+            React.createElement('button', { onClick: () => remove(k), disabled: busy, style: { background: 'transparent', border: 'none', color: C.error, fontSize: 13, lineHeight: 1, cursor: 'pointer', padding: 0 } }, '×'),
+          )))
+      : React.createElement('div', { style: { fontSize: 11, color: C.label2, marginTop: 8 } },
+          '暂无——添加进程名关键词（如 llama-server），命中进程会置顶高亮'),
+    React.createElement('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 8 } },
+      React.createElement('input', {
+        value: input, onChange: (e: React.ChangeEvent<HTMLInputElement>) => setInput(e.target.value),
+        placeholder: '进程名关键词，如 llama-server', style: { flex: '1 1 200px', ...inputBase },
+      }),
+      React.createElement('button', { onClick: add, disabled: busy, style: { background: C.label, color: C.layer1, border: 'none', borderRadius: 4, fontSize: 11, padding: '3px 10px', cursor: 'pointer' } }, '添加'),
+    ),
+    msg ? React.createElement('div', { style: { fontSize: 11, color: C.brand, marginTop: 4 } }, msg) : null,
+  )
+}
+
 function SettingsPanel(): React.ReactElement {
   const [snap, setSnap] = React.useState<SnapView | null>(last && !(last as { error?: boolean }).error ? last : null)
   React.useEffect(() => {
@@ -1170,9 +1221,14 @@ function SettingsPanel(): React.ReactElement {
     const dispose = ctxRef ? ctxRef.setInterval(tick, POLL_MS_CUR) : null
     return () => { alive = false; if (dispose) dispose() }
   }, [])
+  const watchProcs = (snap && Array.isArray(snap.watchProcs)) ? snap.watchProcs : []
   return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
-    React.createElement('div', { key: 'intro', style: { fontSize: 12, color: C.label2 } },
-      'Lab Monitor 的设置与标签规则：阈值立即生效并持久化（settings.yaml），标签按命令正则分组展示。'),
+    React.createElement('div', { key: 'head', style: { display: 'flex', alignItems: 'baseline', gap: 8 } },
+      React.createElement('span', { style: { fontWeight: 700, fontSize: 14 } }, 'Lab Monitor'),
+      React.createElement('span', { style: { fontSize: 12, color: C.label2 } },
+        '监控 / 排序 / 标签规则 — 保存即生效并持久化（settings.yaml）'),
+    ),
+    React.createElement(WatchManager, { watchProcs, key: 'watch' }),
     React.createElement(ControlPanel, { snap }),
     React.createElement(TagManager, { tags: (snap && Array.isArray(snap.tags) ? snap.tags : []) as TagGroupView[] }),
   )

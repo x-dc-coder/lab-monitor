@@ -604,6 +604,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       procs: procsAll,
       system: lastSystemStats,
       watchedPids,
+      // 2026-08-23（监控目标 UI）：透出当前生效 watchProcs 关键词——client 设置页展示
+      watchProcs: watchSet(),
       tags: tagGroups,
       alerts: balancer.snapshotAlerts(),
       alertsCriticalCount: balancer.count(),
@@ -896,6 +898,14 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     advice: () => rpcAdvice(),
     // 2026-08-20（标签管理 UI）：浏览器端 lab_ctl tag 等效路由（add/remove/list）
     tag: (body) => rpcTag((body.tag || {}) as Record<string, unknown>),
+    // 2026-08-23（监控目标 UI）：浏览器端 lab_ctl watch 等效路由（一次性覆盖动态 watchlist）
+    watch: (body) => {
+      const kws = Array.isArray(body.keywords) ? body.keywords.filter((k: unknown): k is string => typeof k === 'string' && !!k.trim()) : []
+      runtimeWatch.clear()
+      for (const k of kws) runtimeWatch.add(k.trim())
+      persistState()
+      return { ok: true, state: 'watchlist-updated', watchProcs: watchSet() }
+    },
   }
 
   function httpHandler(req: IncomingMessage, res: ServerResponse) {

@@ -810,15 +810,15 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
     for (const m of members) remaining.splice(remaining.indexOf(m), 1)
   }
   const otherRows = remaining
+  // 组按总占用排序（GPU 主导 > CPU > 内存），最重的组排最前，便于追踪高占用
+  const groupScore = (members: ProcView[]): number => members.reduce((a, p) => a + (procGpu(p) || 0) * 100 + (p.cpuPct || 0) + ((p.memMiB || 0) / 1000), 0)
+  groupRows.sort((a, b) => groupScore(b.members) - groupScore(a.members))
   const agg = (members: ProcView[]): string => {
-    const gpu = members.reduce((a, p) => a + (procGpu(p) || 0), 0)
-    const cpu = members.reduce((a, p) => a + (p.cpuPct || 0), 0)
+    const gpu = Math.round(members.reduce((a, p) => a + (procGpu(p) || 0), 0))
+    const cpu = Math.round(members.reduce((a, p) => a + (p.cpuPct || 0), 0))
     const mem = members.reduce((a, p) => a + (p.memMiB || 0), 0)
-    const parts: string[] = []
-    if (gpu > 0) parts.push('GPU ' + Math.round(gpu) + '%')
-    if (cpu > 0) parts.push('CPU ' + Math.round(cpu) + '%')
-    if (mem > 0) parts.push(fmtGiB(mem) + 'G')
-    return parts.join(' · ')
+    // 始终显示 GPU/CPU/内存 三项（带标签），无论是否非零——便于跨组对比 + 定位高占用资源
+    return 'GPU ' + gpu + '% · CPU ' + cpu + '% · 内存 ' + (mem > 0 ? fmtGiB(mem) + 'G' : '0G')
   }
   const row = (p: ProcView, kind?: 'watch' | 'group') => {
     const gpu = procGpu(p) || 0

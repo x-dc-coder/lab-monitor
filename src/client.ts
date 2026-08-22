@@ -263,7 +263,7 @@ function summaryLine(s: SnapView): string {
 }
 
 /** 2026-08-20（A2 多轨）：实验状态块——主实验 + 并行实验列表（每行 runId/状态/时长/pid/cmd） */
-function expBlock(s: SnapView | null): React.ReactElement | null {
+function expBlock(s: SnapView | null, onDetail: (d: DetailData) => void): React.ReactElement | null {
   if (!s) return null
   const main = s.experiment
   const all = Array.isArray(s.experiments) && s.experiments.length ? s.experiments : main ? [main] : []
@@ -284,7 +284,12 @@ function expBlock(s: SnapView | null): React.ReactElement | null {
     const isMain = main && e.runId === main.runId
     const gs = (e as { groupStats?: { cpuPct?: number | null; memMiB?: number | null; memberCount?: number } | null }).groupStats
     rows.push(
-      React.createElement('div', { key: e.runId, style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+      React.createElement('div', {
+        key: e.runId,
+        onClick: () => onDetail(runDetailData(e, 'running')),
+        title: '点击查看完整命令',
+        style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', cursor: 'pointer' },
+      },
         React.createElement('span', {
           style: {
             width: 8, height: 8, borderRadius: 4,
@@ -302,7 +307,7 @@ function expBlock(s: SnapView | null): React.ReactElement | null {
           ? React.createElement('span', { style: { fontSize: 11, color: C.label2 } }, 'pid ' + e.pid)
           : null,
         e.cmd
-          ? React.createElement('span', { style: { fontSize: 11, color: C.label2, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+          ? React.createElement('span', { style: { fontSize: 11, color: C.label2, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
               e.cmd)
           : null,
         gs && typeof gs.cpuPct === 'number'
@@ -311,6 +316,7 @@ function expBlock(s: SnapView | null): React.ReactElement | null {
         gs && typeof gs.memMiB === 'number'
           ? React.createElement('span', { style: { fontSize: 11, color: C.label2 } }, fmtGiB(gs.memMiB) + 'G')
           : null,
+        React.createElement('span', { style: { color: C.label2, fontSize: 11, marginLeft: 2 } }, '›'),
       ),
     )
   }
@@ -322,7 +328,7 @@ function expBlock(s: SnapView | null): React.ReactElement | null {
  * 每行 runId + 状态徽标 + 时长 + GPU 峰值摘要（util 峰值/均值、显存峰值、组 CPU 峰值）。
  * 数据来自 host ended[]（state-machine history 投影，最新在前，上限 20）。
  */
-function EndedBlock(props: { ended: EndedView[] }): React.ReactElement | null {
+function EndedBlock(props: { ended: EndedView[]; onDetail: (d: DetailData) => void }): React.ReactElement | null {
   const [open, setOpen] = React.useState(false)
   const ended = props.ended || []
   if (!ended.length) return null
@@ -338,7 +344,12 @@ function EndedBlock(props: { ended: EndedView[] }): React.ReactElement | null {
           React.createElement('span', { style: { fontSize: 10, color: C.label2 } }, label),
           React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: (valColor || C.label) } }, String(val)),
         )
-    return React.createElement('div', { key: e.runId, style: { display: 'flex', flexDirection: 'column', gap: 4, padding: '6px 8px', background: C.layer1, border: '1px solid ' + C.border, borderRadius: 8 } },
+    return React.createElement('div', {
+      key: e.runId,
+      onClick: () => props.onDetail(runDetailData(e, 'ended')),
+      title: '点击查看完整命令',
+      style: { display: 'flex', flexDirection: 'column', gap: 4, padding: '6px 8px', background: C.layer1, border: '1px solid ' + C.border, borderRadius: 8, cursor: 'pointer' },
+    },
       // 标题行：状态点 + runId + 状态徽标 + 时长
       React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 11 } },
         React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: color, flexShrink: 0 } }),
@@ -354,9 +365,9 @@ function EndedBlock(props: { ended: EndedView[] }): React.ReactElement | null {
         stat('显存峰值', s && typeof s.memPeak === 'number' ? fmtGiB(s.memPeak) + 'G' : null),
         stat('组CPU峰值', s && typeof s.groupCpuMax === 'number' ? Math.round(s.groupCpuMax) + '%' : null, s && typeof s.groupCpuMax === 'number' ? utilColor(s.groupCpuMax) : undefined),
       ),
-      // cmd 全宽行
+      // cmd 全宽行（点击查看完整命令）
       e.cmd
-        ? React.createElement('div', { style: { fontSize: 11, color: C.label2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, e.cmd)
+        ? React.createElement('div', { style: { fontSize: 11, color: C.label2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 320 } }, e.cmd)
         : null,
     )
   })
@@ -482,7 +493,7 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
 }
 
 /** 2026-08-20（标签分组）：用户标签规则命中的分组展示——组头（label+kind+聚合）+ 命中进程行 */
-function TagGroups(props: { tags: TagGroupView[] }): React.ReactElement {
+function TagGroups(props: { tags: TagGroupView[]; onDetail: (d: DetailData) => void }): React.ReactElement {
   const groups = props.tags || []
   return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
     groups.map((g) => {
@@ -516,19 +527,31 @@ function TagGroups(props: { tags: TagGroupView[] }): React.ReactElement {
                 '实验 ' + g.runIds.join(' / '))
             : null,
         ),
-        // 命中进程明细（折叠式简表）
-        React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 1, marginTop: 4 } },
+        // 命中进程明细（对齐栅格简表：列头 + 每行「PID / 命令 / GPU / CPU / 内存」，点行查看详情）
+        React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, marginTop: 6 } },
+          React.createElement('div', { style: { display: 'grid', gridTemplateColumns: '52px 1fr 44px 44px 44px', gap: 6, fontSize: 10, color: C.label2, paddingBottom: 2, borderBottom: '1px solid ' + C.border } },
+            React.createElement('span', null, 'PID'),
+            React.createElement('span', null, '命令'),
+            React.createElement('span', { style: { textAlign: 'right' } }, 'GPU'),
+            React.createElement('span', { style: { textAlign: 'right' } }, 'CPU'),
+            React.createElement('span', { style: { textAlign: 'right' } }, '内存'),
+          ),
           g.procs.map((p) => (
-            React.createElement('div', { key: p.pid, style: { display: 'flex', gap: 6, alignItems: 'center', fontSize: 11 } },
-              React.createElement('span', { style: { color: C.label2, width: 42 } }, 'pid ' + p.pid),
-              React.createElement('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, p.cmd || '-'),
+            React.createElement('div', {
+              key: p.pid,
+              onClick: () => props.onDetail(procDetailData(p, g.rule && g.rule.label)),
+              title: '点击查看进程详情',
+              style: { display: 'grid', gridTemplateColumns: '52px 1fr 44px 44px 44px', gap: 6, alignItems: 'center', fontSize: 11, cursor: 'pointer' },
+            },
+              React.createElement('span', { style: { color: C.label2, fontVariantNumeric: 'tabular-nums' } }, String(p.pid)),
+              React.createElement('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, p.cmd || '-'),
               typeof p.gpuUtilPct === 'number'
-                ? React.createElement('span', { style: { color: utilColor(p.gpuUtilPct), width: 42, textAlign: 'right' } }, p.gpuUtilPct + '%')
-                : React.createElement('span', { style: { width: 42 } }),
+                ? React.createElement('span', { style: { color: utilColor(p.gpuUtilPct), textAlign: 'right' } }, p.gpuUtilPct + '%')
+                : React.createElement('span', null, '-'),
               typeof p.cpuPct === 'number'
-                ? React.createElement('span', { style: { color: utilColor(p.cpuPct), width: 42, textAlign: 'right' } }, p.cpuPct + '%')
-                : React.createElement('span', { style: { width: 42 } }),
-              React.createElement('span', { style: { color: C.label2, width: 44, textAlign: 'right' } }, fmtGiB(p.memMiB) + 'G'),
+                ? React.createElement('span', { style: { color: utilColor(p.cpuPct), textAlign: 'right' } }, p.cpuPct + '%')
+                : React.createElement('span', null, '-'),
+              React.createElement('span', { style: { color: C.label2, textAlign: 'right' } }, fmtGiB(p.memMiB) + 'G'),
             )
           )),
         ),
@@ -756,7 +779,7 @@ function procGpu(p: ProcView): number | null {
  * - watched 置顶高亮（watchProcs 命中）
  * - 默认进程聚合组折叠展示，标题行可点击展开/收起成员（18-known-issues 问题 2b 落地）
  */
-function ProcsTable(props: { snap: SnapView | null }) {
+function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) => void }) {
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({})
   const s = props.snap
   const procs = (s && Array.isArray(s.procs) ? s.procs : []).slice(0, 15)
@@ -775,7 +798,12 @@ function ProcsTable(props: { snap: SnapView | null }) {
   const otherRows = rest
 
   const row = (p: ProcView, extraStyle?: Record<string, string>) =>
-    React.createElement('tr', { key: 'p' + p.pid, style: extraStyle },
+    React.createElement('tr', {
+      key: 'p' + p.pid,
+      onClick: () => props.onDetail(procDetailData(p)),
+      title: '点击查看进程详情',
+      style: { ...(extraStyle || {}), cursor: 'pointer' },
+    },
       React.createElement('td', { style: tdStyle }, String(p.pid)),
       React.createElement('td', { style: { ...tdStyle, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' } }, p.cmd || ''),
       React.createElement('td', { style: tdStyle }, procGpu(p) !== null ? String(Math.round(procGpu(p) as number)) : '-'),
@@ -946,11 +974,127 @@ const HIST_BUCKET_MS = 20000
  * - props.visible === false（better-sidebar tab 隐藏，D-B2）→ 30s 低频保活，badge 仍更新；
  * - props.store（better-sidebar store）→ 读取 pluginToggles 阈值并携带（M3 阈值同步面）。
  */
+// ----------------------------------------------------------------------------
+// 详情展示页（长命令/路径 → 点击查看完整信息，信息密度合理）
+// ----------------------------------------------------------------------------
+interface DetailStat { label: string; value: string; color?: string }
+interface DetailMeta { label: string; value: string }
+interface DetailData {
+  title: string
+  sub?: string
+  cmd?: string | null
+  stats: DetailStat[]
+  meta?: DetailMeta[]
+}
+
+/** 详情用的进程形状：兼容 ProcView（cmd: string）与标签组进程（cmd: string|null）两种来源。 */
+type ProcLike = { pid: number; cmd?: string | null; cpuPct?: number | null; memMiB?: number | null; gpuUtilPct?: number | null; gpu?: number | null }
+
+/** 进程详情数据（供 ProcsTable / TagGroups 点击查看）。 */
+function procDetailData(p: ProcLike, tagLabel?: string): DetailData {
+  const gpu = (p.gpuUtilPct !== undefined && p.gpuUtilPct !== null && !Number.isNaN(p.gpuUtilPct))
+    ? p.gpuUtilPct
+    : (p.gpu !== undefined && p.gpu !== null && !Number.isNaN(p.gpu) ? p.gpu : null)
+  const stats: DetailStat[] = [
+    { label: '进程 PID', value: String(p.pid) },
+    { label: 'GPU 占用', value: gpu !== null ? Math.round(gpu) + '%' : '-', color: utilColor(gpu) },
+    { label: 'CPU 占用', value: p.cpuPct !== null && p.cpuPct !== undefined ? Math.round(p.cpuPct) + '%' : '-', color: utilColor(p.cpuPct) },
+    { label: '内存', value: fmtGiB(p.memMiB) + 'G' },
+  ]
+  return { title: '进程详情', sub: p.cmd || '未命名进程', cmd: p.cmd || null, stats, meta: tagLabel ? [{ label: '标签组', value: tagLabel }] : [] }
+}
+
+/** 实验/复盘详情数据（供 expBlock / EndedBlock 点击查看）。 */
+function runDetailData(e: { runId: string; state: string; cmd?: string | null; startTs?: number; summary?: EndedView['summary'] }, kind: 'running' | 'ended'): DetailData {
+  const s = e.summary || null
+  const mins = e.startTs ? Math.max(0, Math.round((Date.now() - e.startTs) / 60000)) : null
+  const dur = s && typeof s.durationSec === 'number'
+    ? (s.durationSec < 60 ? s.durationSec + 's' : Math.round(s.durationSec / 60) + 'min')
+    : (mins !== null ? mins + 'min' : '-')
+  const stats: DetailStat[] = [
+    { label: '状态', value: e.state || '-' },
+    { label: '运行时长', value: dur },
+    { label: 'GPU 峰值', value: s && typeof s.gpuUtilMax === 'number' ? s.gpuUtilMax + '%' : '-', color: s && typeof s.gpuUtilMax === 'number' ? utilColor(s.gpuUtilMax) : undefined },
+    { label: 'GPU 均值', value: s && typeof s.gpuUtilAvg === 'number' ? s.gpuUtilAvg + '%' : '-' },
+    { label: '显存峰值', value: s && typeof s.memPeak === 'number' ? fmtGiB(s.memPeak) + 'G' : '-' },
+    { label: '组 CPU 峰值', value: s && typeof s.groupCpuMax === 'number' ? Math.round(s.groupCpuMax) + '%' : '-', color: s && typeof s.groupCpuMax === 'number' ? utilColor(s.groupCpuMax) : undefined },
+  ]
+  return { title: kind === 'ended' ? '实验复盘' : '实验详情', sub: e.runId, cmd: e.cmd || null, stats }
+}
+
+/** 全屏详情浮层：标题 + 指标栅格 + 元信息 + 完整命令（信息密度合理，零第三方依赖）。 */
+function DetailOverlay(props: { detail: DetailData | null; onClose: () => void }): React.ReactElement | null {
+  const d = props.detail
+  if (!d) return null
+  const cmdText = d.cmd && d.cmd.trim() ? d.cmd.trim() : null
+  const closeBtn = { background: 'transparent', border: '1px solid ' + C.border, borderRadius: 6, color: C.label, fontSize: 12, padding: '2px 10px', cursor: 'pointer' }
+  return React.createElement('div', { style: { position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '24px 16px', overflow: 'auto', background: 'rgba(0,0,0,0.45)' } },
+    React.createElement('div', { onClick: props.onClose, style: { position: 'fixed', inset: 0 } }),
+    React.createElement('div', { style: { position: 'relative', width: '100%', maxWidth: 640, background: C.layer1, color: C.label, border: '1px solid ' + C.border, borderRadius: 12, boxShadow: '0 20px 60px rgba(0,0,0,0.4)', padding: '16px 18px' } },
+      // 标题行
+      React.createElement('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 12 } },
+        React.createElement('span', { style: { fontWeight: 700, fontSize: 15 } }, d.title),
+        d.sub ? React.createElement('span', { style: { fontSize: 12, color: C.label2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, d.sub) : null,
+        React.createElement('button', { onClick: props.onClose, style: closeBtn }, '关闭'),
+      ),
+      // 指标栅格
+      d.stats.length
+        ? React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '12px 12px' } },
+            d.stats.map((st) => React.createElement('div', { key: st.label, style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+              React.createElement('span', { style: { fontSize: 11, color: C.label2 } }, st.label),
+              React.createElement('span', { style: { fontSize: 16, fontWeight: 700, color: st.color || C.label, fontVariantNumeric: 'tabular-nums' } }, st.value),
+            )),
+          )
+        : null,
+      // 元信息
+      d.meta && d.meta.length
+        ? React.createElement('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 } },
+            d.meta.map((m) => React.createElement('span', { key: m.label, style: { fontSize: 11, color: C.label2, padding: '2px 8px', borderRadius: 8, background: C.border } }, m.label + ': ' + m.value)))
+        : null,
+      // 完整命令
+      cmdText
+        ? React.createElement('div', { style: { marginTop: 14, borderTop: '1px solid ' + C.border, paddingTop: 12 } },
+            React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 } },
+              React.createElement('span', { style: { fontSize: 11, fontWeight: 700, color: C.label } }, '命令 / 脚本'),
+              React.createElement('button', {
+                onClick: () => { try { void navigator.clipboard.writeText(cmdText) } catch (e) { /* clip 不可用静默 */ } },
+                style: { ...closeBtn, marginLeft: 'auto', fontSize: 11 },
+              }, '复制'),
+            ),
+            React.createElement('pre', { style: { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 12, lineHeight: 1.5, background: C.border, padding: '8px 10px', borderRadius: 6, color: C.label, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', maxHeight: 320, overflow: 'auto' } }, cmdText),
+          )
+        : null,
+    ),
+  )
+}
+
+// ----------------------------------------------------------------------------
+// 设置面板（控制阈值/启停/清告警 + 标签管理 —— 从主面板迁到 DSH 设置页二次处理）
+// ----------------------------------------------------------------------------
+/** settings.section 组件：自行轮询快照（阈值事实来源 在 host），渲染控制 + 标签管理。 */
+function SettingsPanel(): React.ReactElement {
+  const [snap, setSnap] = React.useState<SnapView | null>(last && !(last as { error?: boolean }).error ? last : null)
+  React.useEffect(() => {
+    let alive = true
+    const tick = () => { void refresh().then((s) => { if (alive) setSnap(s && !(s as { error?: boolean }).error ? (s as SnapView) : null) }) }
+    void refresh().then((s) => { if (alive) setSnap(s && !(s as { error?: boolean }).error ? (s as SnapView) : null) })
+    const dispose = ctxRef ? ctxRef.setInterval(tick, POLL_MS_CUR) : null
+    return () => { alive = false; if (dispose) dispose() }
+  }, [])
+  return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+    React.createElement('div', { key: 'intro', style: { fontSize: 12, color: C.label2 } },
+      'Lab Monitor 的设置与标签规则：阈值立即生效并持久化（settings.yaml），标签按命令正则分组展示。'),
+    React.createElement(ControlPanel, { snap }),
+    React.createElement(TagManager, { tags: (snap && Array.isArray(snap.tags) ? snap.tags : []) as TagGroupView[] }),
+  )
+}
+
 function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
   const hidden = props && props.visible === false // 显式 false = tab 隐藏 → 30s 保活；undefined/true = 5s
   const store = props && props.store
   const [snap, setSnap] = React.useState<SnapView | null>(last && !(last as { error?: boolean }).error ? last : null)
   const [hist, setHist] = React.useState<HistPoint[] | null>(null) // 历史曲线点（history API 降采样 ≤500 点）
+  const [detail, setDetail] = React.useState<DetailData | null>(null) // 详情展示页（点击查看）
 
   React.useEffect(() => {
     let alive = true
@@ -1042,26 +1186,23 @@ function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
       memCard(s),
     ),
     // ── 实验状态（2026-08-20 多轨：主实验 + 并行实验列表）────────────────────
-    expBlock(s),
+    expBlock(s, setDetail),
     // ── 实验历史（2026-08-22 P1：已结束实验复盘，折叠展示 GPU 峰值摘要）────────
     s && Array.isArray(s.ended) && s.ended.length
-      ? React.createElement(EndedBlock, { ended: s.ended, key: 'ended' })
+      ? React.createElement(EndedBlock, { ended: s.ended, key: 'ended', onDetail: setDetail })
       : null,
-    // ── 控制区（2026-08-22 P1：阈值/暂停/清除告警——conversation.view 首个设置入口）─
-    React.createElement(ControlPanel, { snap: s, key: 'ctrl' }),
-    // ── 标签（2026-08-20：标签管理 UI + 命中分组展示；进程表之前）──────────────
-    // 2026-08-20（用户反馈「没看到标签的显示」）：管理区始终可见（含未命中规则），
-    // 命中进程的分组卡片在其下；标签有「标签」胶囊徽章，与内置默认聚合组区分。
-    React.createElement(TagManager, { tags: (s && Array.isArray(s.tags) ? s.tags : []) as TagGroupView[], key: 'tagmgr' }),
+    // ── 标签（2026-08-20：命中分组展示；管理区已迁到 DSH 设置页）──────────────
     s && Array.isArray(s.tags) && s.tags.length
-      ? React.createElement(TagGroups, { tags: s.tags, key: 'tags' })
+      ? React.createElement(TagGroups, { tags: s.tags, key: 'tags', onDetail: setDetail })
       : null,
     // ── 进程表 ──────────────────────────────────────────────────────────────
-    React.createElement(ProcsTable, { snap: s, key: 'procs' }),
+    React.createElement(ProcsTable, { snap: s, key: 'procs', onDetail: setDetail }),
     // ── 告警列表（同 rule 合并计数 + 截断 + 可展开）──────────────────────────
     s && Array.isArray(s.alerts) && s.alerts.length
       ? React.createElement(AlertList, { alerts: s.alerts, key: 'alerts' })
       : null,
+    // ── 详情展示页（点击命令/进程查看，全屏浮层）─────────────────────────────
+    React.createElement(DetailOverlay, { detail, onClose: () => setDetail(null), key: 'detail' }),
   )
 }
 
@@ -1199,6 +1340,17 @@ export function apply(ctx: CtxLike) {
           MonitorPanel,
         ),
       )
+      // ②b settings.section：控制（阈值/启停/清告警）+ 标签管理 迁到 DSH 设置页二次处理
+      try {
+        slotsSvc.inject('settings.section', () =>
+          slotsSvc.register(
+            { name: 'settings.section', id: 'lab-monitor', order: 20, label: () => '监控设置' },
+            SettingsPanel,
+          ),
+        )
+      } catch (e) {
+        console.error('[lab-monitor] settings.section 注册失败:', e)
+      }
     } catch (e) {
       console.error('[lab-monitor] conversation.view 注册失败:', e)
     }

@@ -55,6 +55,16 @@ const SAMPLE_SNAPSHOT = {
                 pid: 1234, startTs: 1787030000000, summary: null },
   callCount: 42,
   ui: { betterSidebarVisible: true },
+  // 2026-08-22（P1）：实验历史/阈值/启停协议字段（mock 镜像 host 新快照形态）
+  ended: [
+    { runId: 'run-20260818-000', state: 'done', cmd: 'python train_batch.py', cmdFeature: 'python',
+      startTs: 1787029990000, endTs: 1787030000000,
+      summary: { gpuUtilMax: 95, gpuUtilAvg: 80, memPeakMiB: 12800, groupCpuMax: 400, durationSec: 10 } },
+    { runId: 'run-20260817-003', state: 'crashed', cmd: 'python train_demo.py', cmdFeature: 'python',
+      startTs: 1787029900000, endTs: 1787029950000, summary: null },
+  ],
+  thresholds: { utilWarn: 85, memWarn: 95, tempWarn: 90, pollMs: 5000 },
+  enabled: true,
 }
 
 let hostCallCount = 0
@@ -189,6 +199,13 @@ setTimeout(async () => {
   assert(joined.includes('降 batch size'), '告警建议动作', joined)
   assert(joined.includes('run-20260818-001') && joined.includes('running'), '实验状态行', joined)
   assert(joined.includes('[wsl·dmon]'), 'platform/sources 标注', joined)
+
+  // 2026-08-22（P1）：实验历史折叠块 + 控制面板（阈值/启停/清除告警）渲染
+  assert(joined.includes('实验历史（2）'), 'P1 实验历史折叠头（ended 2 条）', joined)
+  assert(joined.includes('轮询 5s'), 'P1 控制面板：轮询周期（thresholds.pollMs=5000→5s）', joined)
+  assert(joined.includes('监控运行中') && joined.includes('暂停'), 'P1 控制面板：启停状态 + 暂停按钮（enabled=true）', joined)
+  assert(joined.includes('清除告警（1）'), 'P1 控制面板：清除告警（带 critical 计数）', joined)
+  assert(joined.includes('保存'), 'P1 控制面板：阈值保存按钮', joined)
 
   // -------------------------------------------------------------------------
   console.log('[5] 轮询节流与 T2-3 失败退避')

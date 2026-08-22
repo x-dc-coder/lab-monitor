@@ -91,6 +91,18 @@ export interface ExperimentSnapshot {
   endReason: string | null
 }
 
+/** 已结束实验记录（对外协议：experiment 历史复盘；state-machine history 摘要投影，倒序=最新在前） */
+export interface EndedRunSnapshot {
+  runId: string
+  state: 'done' | 'crashed' | 'aborted'
+  cmd: string | null
+  cmdFeature: string | null
+  startTs: number
+  endTs: number | null
+  /** 复盘中可展示的峰值摘要（GPU 峰值/均值、显存峰值、组 CPU 峰值、时长；null=无采样数据） */
+  summary: RunRecord['summary'] | null
+}
+
 /** 告警（1.2：+evidence 进程证据） */
 export interface Alert {
   level: 'critical' | 'warn' | 'info' | string
@@ -146,6 +158,12 @@ export interface MonitorSnapshot {
   watchedPids?: number[]
   /** 2026-08-20（A2 多轨）：全部 running 实验（experiment 保留为主实验=最近 start；本字段承载并行） */
   experiments?: ExperimentSnapshot[]
+  /** 2026-08-22（P1 实验历史）：已结束实验（done/crashed/aborted）历史，最新在前——复盘数据面 */
+  ended?: EndedRunSnapshot[]
+  /** 2026-08-22（P1 设置面）：当前生效阈值（client 轮询周期由 thresholds.pollMs 驱动，消除死配置） */
+  thresholds?: { utilWarn: number; memWarn: number; tempWarn: number; pollMs: number }
+  /** 2026-08-22（P1 设置面）：监控引擎启停状态（start/pause/resume 的真实反映——UI 控制区显示） */
+  enabled?: boolean
   /** 2026-08-20（标签分组）：用户标签规则命中聚合（按规则分组展示） */
   tags?: TagGroup[]
   alerts: Alert[]

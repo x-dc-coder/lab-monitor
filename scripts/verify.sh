@@ -62,9 +62,11 @@ fi
 
 if [ "$RUN_E2E" -eq 1 ]; then
   echo "== [7] P1/P2 端到端实证（e2e-host.js，真实进程 T1-T5） =="
-  if timeout 200 node scripts/e2e-host.js >/dev/null 2>&1; then ok "e2e ALL PASS"; else bad "e2e 失败"; fi
+  # 2026-08-22（P1 批次）：timeout 200→300——真实采样 tick 与 waitForRule 窗口抖动，实测单跑
+  # 在 200~240s 边界波动（2026-08-22 实测两次 200s/240s 超时后第三次 完整通过 EXIT=0）
+  if timeout 300 node scripts/e2e-host.js >/dev/null 2>&1; then ok "e2e ALL PASS"; else bad "e2e 失败"; fi
 else
-  echo "== [7] 端到端实证跳过（--e2e 开启，真实进程 ~2.5min）=="
+  echo "== [7] 端到端实证跳过（--e2e 开启，真实进程 ~3min）=="
 fi
 
 echo ""

@@ -17,6 +17,9 @@ import React from 'react'
 // ----------------------------------------------------------------------------
 
 const POLL_MS = 5000 // 默认 5s 节流（conversation.view 无 visible 语义 → 常驻 5s）
+let POLL_MS_CUR = POLL_MS // 2026-08-22（P1 设置面）：当前生效轮询周期——由快照 thresholds.pollMs 驱动
+const POLL_MS_MIN = 1000
+const POLL_MS_MAX = 60000
 const KEEPALIVE_MS = 30000 // D-B2：better-sidebar visible=false → 30s 低频保活（badge 更新）
 const BACKOFFS = [5000, 10000, 30000] // T2-3：失败指数退避 5s→10s→30s 封顶
 const THRESH_KEYS = ['utilWarn', 'memWarn', 'tempWarn', 'pollMs']
@@ -62,6 +65,12 @@ interface SnapView {
   watchedPids?: number[]
   /** 2026-08-20（A2 多轨）：全部 running 实验（experiment 保留为主实验） */
   experiments?: ExperimentView[]
+  /** 2026-08-22（P1 实验历史）：已结束实验（done/crashed/aborted）——复盘展示 */
+  ended?: EndedView[]
+  /** 2026-08-22（P1 设置面）：当前生效阈值（轮询周期由 pollMs 驱动） */
+  thresholds?: { utilWarn: number; memWarn: number; tempWarn: number; pollMs: number }
+  /** 2026-08-22（P1 设置面）：监控引擎启停状态 */
+  enabled?: boolean
   /** 2026-08-20（标签分组）：用户标签规则命中聚合 */
   tags?: TagGroupView[]
   alerts: AlertView[]
@@ -71,6 +80,25 @@ interface SnapView {
   ui: { betterSidebarVisible: boolean }
   error?: boolean
   degraded?: { gpu?: string; reason?: string }
+}
+/** 2026-08-22（P1 实验历史）：已结束实验摘要（与 host EndedRunSnapshot 对齐） */
+interface EndedView {
+  runId: string
+  state: 'done' | 'crashed' | 'aborted'
+  cmd: string | null
+  cmdFeature: string | null
+  startTs: number
+  endTs: number | null
+  summary?: {
+    gpuUtilMax: number | null
+    gpuUtilAvg: number | null
+    memPeak: number | null
+    durationSec: number
+    dataPartial: boolean
+    groupCpuMax?: number | null
+    groupMemPeakMiB?: number | null
+    otherMemPeakMiB?: number | null
+  } | null
 }
 interface ExperimentView {
   runId: string
@@ -155,6 +183,10 @@ async function refresh(): Promise<SnapView | { error: true; ts: number }> {
     lastFetchAt = Date.now()
     lastOk = true
     backoffIdx = 0
+    // 2026-08-22（P1 设置面）：轮询周期由 host 生效阈值 pollMs 驱动（范围校验），
+    // 消除「client 硬编码 5000 / pollMs 死配置」——面板设置、lab_ctl set-threshold 均可实时生效
+    const p = (snap as SnapView).thresholds && (snap as SnapView).thresholds!.pollMs
+    if (typeof p === 'number' && isFinite(p) && p >= POLL_MS_MIN && p <= POLL_MS_MAX) POLL_MS_CUR = p
   } else {
     lastOk = false
     if (backoffIdx < BACKOFFS.length - 1) backoffIdx += 1
@@ -162,10 +194,10 @@ async function refresh(): Promise<SnapView | { error: true; ts: number }> {
   return snap
 }
 
-/** 下一次轮询等待间隔：成功用 pollMs，失败用退避档位；hidden=true 用 30s 保活（D-B2）。 */
+/** 下一次轮询等待间隔：成功用 pollMs（阈值驱动），失败用退避档位；hidden=true 用 30s 保活（D-B2）。 */
 function nextWaitMs(hidden: boolean): number {
   if (hidden) return KEEPALIVE_MS
-  return lastOk ? POLL_MS : BACKOFFS[backoffIdx]
+  return lastOk ? POLL_MS_CUR : BACKOFFS[backoffIdx]
 }
 
 /** 拉取历史曲线（P2；失败静默保留旧值）。 */
@@ -283,6 +315,151 @@ function expBlock(s: SnapView | null): React.ReactElement | null {
     )
   }
   return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } }, ...rows)
+}
+
+/**
+ * 2026-08-22（P1 实验历史）：已结束实验复盘列表（done/crashed/aborted）——折叠展示，
+ * 每行 runId + 状态徽标 + 时长 + GPU 峰值摘要（util 峰值/均值、显存峰值、组 CPU 峰值）。
+ * 数据来自 host ended[]（state-machine history 投影，最新在前，上限 20）。
+ */
+function EndedBlock(props: { ended: EndedView[] }): React.ReactElement | null {
+  const [open, setOpen] = React.useState(false)
+  const ended = props.ended || []
+  if (!ended.length) return null
+  const rows = ended.map((e) => {
+    const s = e.summary
+    const mins = e.endTs ? Math.max(0, Math.round((e.endTs - e.startTs) / 60000)) : null
+    const dur = s && typeof s.durationSec === 'number' ? (s.durationSec < 60 ? s.durationSec + 's' : Math.round(s.durationSec / 60) + 'min') : (mins !== null ? mins + 'min' : '-')
+    const color = e.state === 'done' ? C.success : e.state === 'crashed' ? C.error : C.label2
+    return React.createElement('div', { key: e.runId, style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 11 } },
+      React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: color, flexShrink: 0 } }),
+      React.createElement('span', { style: { fontWeight: 600, fontSize: 11 } }, e.runId),
+      React.createElement('span', { style: { fontSize: 10, padding: '0 4px', borderRadius: 3, border: '1px solid ' + color, color: color } },
+        e.state === 'done' ? '完成' : e.state === 'crashed' ? '崩溃' : '中止'),
+      React.createElement('span', { style: { color: C.label2 } }, dur),
+      s && typeof s.gpuUtilMax === 'number'
+        ? React.createElement('span', { style: { color: utilColor(s.gpuUtilMax) } }, 'GPU峰值 ' + s.gpuUtilMax + '%')
+        : null,
+      s && typeof s.gpuUtilAvg === 'number'
+        ? React.createElement('span', { style: { color: C.label2 } }, '均 ' + s.gpuUtilAvg + '%')
+        : null,
+      s && typeof s.memPeak === 'number'
+        ? React.createElement('span', { style: { color: C.label2 } }, '显存峰值 ' + fmtGiB(s.memPeak) + 'G')
+        : null,
+      s && typeof s.groupCpuMax === 'number'
+        ? React.createElement('span', { style: { color: utilColor(s.groupCpuMax) } }, '组CPU峰值 ' + Math.round(s.groupCpuMax) + '%')
+        : null,
+      e.cmd
+        ? React.createElement('span', { style: { color: C.label2, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, e.cmd)
+        : null,
+    )
+  })
+  return React.createElement('div', { key: 'ended', style: { marginTop: 10 } },
+    React.createElement('div', {
+      onClick: () => setOpen((v) => !v),
+      style: { fontWeight: 600, fontSize: 12, marginBottom: 4, cursor: 'pointer' },
+    },
+      (open ? '▼ ' : '▸ ') + '实验历史（' + ended.length + '）'),
+    open ? React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 3 } }, ...rows) : null,
+  )
+}
+
+/**
+ * 2026-08-22（P1 设置面）：面板控制区——阈值（utilWarn/memWarn/tempWarn）+ 暂停/恢复 +
+ * 清除告警。conversation.view 模式下此前无任何设置/控制入口（阈值只有 lab_ctl 工具）。
+ * set-threshold 走 HTTP setThresholds（即时生效 + settings 持久化）；轮询周期由快照 thresholds.pollMs 驱动。
+ */
+function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
+  const s = props.snap
+  const thr = s && s.thresholds
+  const [utilWarn, setUtilWarn] = React.useState<string>(thr ? String(thr.utilWarn) : '')
+  const [memWarn, setMemWarn] = React.useState<string>(thr ? String(thr.memWarn) : '')
+  const [tempWarn, setTempWarn] = React.useState<string>(thr ? String(thr.tempWarn) : '')
+  const [busy, setBusy] = React.useState(false)
+  const [msg, setMsg] = React.useState<string | null>(null)
+  const paused = s && s.enabled === false
+
+  // 2026-08-22：外部（lab_ctl / settings.yaml）改阈值 → 快照 thresholds 变化 → 本地表单跟随
+  React.useEffect(() => {
+    if (thr) {
+      setUtilWarn(String(thr.utilWarn))
+      setMemWarn(String(thr.memWarn))
+      setTempWarn(String(thr.tempWarn))
+    }
+  }, [thr && thr.utilWarn, thr && thr.memWarn, thr && thr.tempWarn])
+
+  const inputStyle: React.CSSProperties = {
+    width: 52, background: C.layer1, border: '1px solid ' + C.border, color: C.label,
+    borderRadius: 4, padding: '2px 4px', fontSize: 11, textAlign: 'right',
+  }
+  const btnStyle: React.CSSProperties = {
+    background: 'transparent', border: '1px solid ' + C.border, borderRadius: 4,
+    fontSize: 11, padding: '2px 8px', cursor: 'pointer', color: C.label,
+  }
+  const okBtn: React.CSSProperties = { ...btnStyle, background: C.brand, color: '#fff', border: 'none' }
+
+  const setThr = () => {
+    const num = (v: string): number | null => {
+      const n = Number(v)
+      return v.trim() !== '' && isFinite(n) ? n : null
+    }
+    const body: Record<string, number> = {}
+    const u = num(utilWarn); const m = num(memWarn); const t = num(tempWarn)
+    if (u !== null) body.utilWarn = Math.max(0, Math.min(100, u))
+    if (m !== null) body.memWarn = Math.max(0, Math.min(100, m))
+    if (t !== null) body.tempWarn = Math.max(0, Math.min(120, t))
+    if (!Object.keys(body).length) { setMsg('阈值格式无效'); return }
+    setBusy(true); setMsg(null)
+    apiCall<{ ok?: boolean; applied?: Record<string, number> }>('setThresholds', body)
+      .then((r) => {
+        if (r && (r as { ok?: boolean }).ok) setMsg('已生效（持久化）')
+        else setMsg((r as { error?: string } | undefined)?.error || '设置失败')
+      })
+      .catch(() => setMsg('调用失败'))
+      .finally(() => setBusy(false))
+  }
+
+  const setPaused = (pausedTo: boolean) => {
+    setBusy(true); setMsg(null)
+    apiCall<{ ok?: boolean; state?: string }>('control', { action: pausedTo ? 'pause' : 'resume' })
+      .then((r) => { if (!r || !(r as { ok?: boolean }).ok) setMsg('操作失败') })
+      .catch(() => setMsg('调用失败'))
+      .finally(() => setBusy(false))
+  }
+
+  const clearAlerts = () => {
+    setBusy(true); setMsg(null)
+    apiCall<{ ok?: boolean; cleared?: number }>('control', { action: 'clear-alerts' })
+      .then((r) => {
+        const c = r && (r as { cleared?: number }).cleared
+        setMsg('已清除' + (typeof c === 'number' ? ' ' + c + ' 条' : ''))
+      })
+      .catch(() => setMsg('调用失败'))
+      .finally(() => setBusy(false))
+  }
+
+  return React.createElement('div', { key: 'ctrl', style: { border: '1px solid ' + C.border, borderRadius: 8, padding: '8px 10px', background: C.layer1, marginTop: 10 } },
+    React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+      React.createElement('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: C.brand, color: '#fff' } }, '控制'),
+      React.createElement('span', { style: { fontSize: 11, color: paused ? C.warn : C.success } },
+        paused ? '监控已暂停' : '监控运行中'),
+      React.createElement('span', { style: { fontSize: 11, color: C.label2, marginLeft: 4 } },
+        thr ? '轮询 ' + Math.round(thr.pollMs / 1000) + 's' : ''),
+    ),
+    React.createElement('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginTop: 6, fontSize: 11 } },
+      React.createElement('span', { style: { color: C.label2 } }, 'GPU利用%'),
+      React.createElement('input', { value: utilWarn, onChange: (e: React.ChangeEvent<HTMLInputElement>) => setUtilWarn(e.target.value), style: inputStyle, title: 'GPU 利用率告警阈值' }),
+      React.createElement('span', { style: { color: C.label2 } }, '显存%'),
+      React.createElement('input', { value: memWarn, onChange: (e: React.ChangeEvent<HTMLInputElement>) => setMemWarn(e.target.value), style: inputStyle, title: '显存占用告警阈值' }),
+      React.createElement('span', { style: { color: C.label2 } }, '温度°C'),
+      React.createElement('input', { value: tempWarn, onChange: (e: React.ChangeEvent<HTMLInputElement>) => setTempWarn(e.target.value), style: inputStyle, title: '温度告警阈值' }),
+      React.createElement('button', { onClick: setThr, disabled: busy, style: okBtn }, '保存'),
+      React.createElement('button', { onClick: () => setPaused(!paused), disabled: busy, style: btnStyle }, paused ? '恢复' : '暂停'),
+      React.createElement('button', { onClick: clearAlerts, disabled: busy, style: btnStyle },
+        '清除告警' + (s && s.alertsCriticalCount ? '（' + s.alertsCriticalCount + '）' : '')),
+    ),
+    msg ? React.createElement('div', { style: { fontSize: 11, color: C.brand, marginTop: 4 } }, msg) : null,
+  )
 }
 
 /** 2026-08-20（标签分组）：用户标签规则命中的分组展示——组头（label+kind+聚合）+ 命中进程行 */
@@ -814,6 +991,12 @@ function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
     ),
     // ── 实验状态（2026-08-20 多轨：主实验 + 并行实验列表）────────────────────
     expBlock(s),
+    // ── 实验历史（2026-08-22 P1：已结束实验复盘，折叠展示 GPU 峰值摘要）────────
+    s && Array.isArray(s.ended) && s.ended.length
+      ? React.createElement(EndedBlock, { ended: s.ended, key: 'ended' })
+      : null,
+    // ── 控制区（2026-08-22 P1：阈值/暂停/清除告警——conversation.view 首个设置入口）─
+    React.createElement(ControlPanel, { snap: s, key: 'ctrl' }),
     // ── 标签（2026-08-20：标签管理 UI + 命中分组展示；进程表之前）──────────────
     // 2026-08-20（用户反馈「没看到标签的显示」）：管理区始终可见（含未命中规则），
     // 命中进程的分组卡片在其下；标签有「标签」胶囊徽章，与内置默认聚合组区分。

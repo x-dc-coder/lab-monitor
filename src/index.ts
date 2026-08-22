@@ -606,6 +606,12 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       alertsCriticalCount: balancer.count(),
       experiment: exp,
       experiments: exps,
+      // 2026-08-22（P1 实验历史）：已结束实验历史投影（done/crashed/aborted，最新在前）——复盘数据面
+      ended: expView.ended,
+      // 2026-08-22（P1 设置面）：透出当前生效阈值——client 轮询周期由 thresholds.pollMs 驱动
+      // （此前 client 硬编码 5000，pollMs 死配置）
+      thresholds: thresholds.get(),
+      enabled,
       callCount,
       ui: { betterSidebarVisible: uiVisible() },
     }

@@ -250,6 +250,11 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   assert(snap.procs && snap.procs.length >= 1, 'procs 来自 tasklist', snap.procs.length)
   assert(snap.system && Array.isArray(snap.system.topN), '1.2 system 存在（无实验时 topN 数组）', snap.system)
   assert(snap.system && snap.system.topN.some((p) => p.pid === 8888), 'system.topN 含 node(8888)（非实验进程明细）', snap.system && snap.system.topN)
+  // 2026-08-22（P1）：实验历史/阈值/启停协议字段透出
+  assert(Array.isArray(snap.ended) && snap.ended.length === 0, 'P1 协议：ended[] 存在且初始为空', snap.ended && snap.ended.length)
+  assert(snap.thresholds && ['utilWarn', 'memWarn', 'tempWarn', 'pollMs'].every((k) => typeof snap.thresholds[k] === 'number'),
+    'P1 协议：thresholds{utilWarn,memWarn,tempWarn,pollMs} 数字透出', snap.thresholds)
+  assert(snap.enabled === true, 'P1 协议：enabled=true（默认运行）', snap.enabled)
   const wPpid = snap.procs.find((p) => p.pid === 1234)
   assert(wPpid && wPpid.ppid === 1, 'procs[].ppid 合并（CIM 进程树）', wPpid)
 
@@ -285,6 +290,12 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   await tick(3) // 6s 虚拟 → 触发下一 ps 周期（5s）确认进程消失
   snap = await G('snapshot')({})
   assert(snap.experiment === null, '配对 result + 进程消失 → 实验结束（experiment=null）', snap.experiment)
+  // 2026-08-22（P1）：done 归档进 ended[]
+  assert(snap.ended && snap.ended.some((e) => e.state === 'done' && e.cmd.indexOf('train_demo') !== -1
+    && typeof e.startTs === 'number' && typeof e.endTs === 'number'),
+    'P1 ended：done 实验已归档（state=done + cmd + startTs/endTs）', snap.ended && snap.ended[0])
+  assert(snap.ended && snap.ended.every((e) => 'runId' in e && 'cmdFeature' in e && 'summary' in e),
+    'P1 ended：每条含 runId/cmdFeature/summary 字段（协议完整性）', snap.ended && snap.ended[0])
 
   console.log('\n[B2] crashed：kill 实验进程走 crashed，kill 自身 result 不误判 done')
   await pre({ name: 'bash', arguments: { command: 'python train_demo.py --epochs 10' } }, async () => ({ kind: 'allow' }))
@@ -298,6 +309,9 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   assert(snap.experiment === null, 'pid 消失 ≥2 ps 周期 → crashed（experiment=null）', snap.experiment)
   assert(snap.alertsCriticalCount >= 1, 'crashed 触发 critical 告警（alertsCriticalCount>=1）', snap.alertsCriticalCount)
   assert(Array.isArray(snap.alerts) && snap.alerts.some((a) => a.rule === 'experiment-crash'), '告警列表含 experiment-crash', snap.alerts && snap.alerts[0])
+  // 2026-08-22（P1）：crashed 归档进 ended[]（与 [B] done 并存，state 区分）
+  assert(snap.ended && snap.ended.filter((e) => e.state === 'crashed' && e.cmd.indexOf('train_demo') !== -1).length >= 1,
+    'P1 ended：crashed 实验已归档（state=crashed）', snap.ended && snap.ended.map((e) => e.state))
 
   console.log('\n[B3] 多轨并行（A2：并行跟踪上限 4 + 各自独立判定）')
   // 实验 A start → pid 关联 101
@@ -330,11 +344,18 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   await tick(3)
   snap = await G('snapshot')({})
   assert(snap.experiment === null && (!Array.isArray(snap.experiments) || snap.experiments.length === 0), 'A done → 无 running 实验', snap.experiment)
+  // 2026-08-22（P1）：多轨归档——runA done + runB crashed 均进 ended（runId 精确匹配）
+  assert(snap.ended && snap.ended.some((e) => e.runId === runA && e.state === 'done'),
+    'P1 ended：runA done 已归档（runId 精确）', snap.ended && snap.ended.map((e) => e.runId + ':' + e.state))
+  assert(snap.ended && snap.ended.some((e) => e.runId === runB && e.state === 'crashed'),
+    'P1 ended：runB crashed 已归档（runId 精确）', snap.ended && snap.ended.map((e) => e.runId + ':' + e.state))
   // 上限 4：连续 start 5 个 → 最旧 aborted，保持 ≤4 并行
   const runIds5 = []
+  const capPids = [] // 2026-08-22（P1 修复测试盲区）：累积全部实验进程——否则被覆盖的旧 pid 消失 → crashed 抢先，aborted 分支永不触发
   for (let i = 1; i <= 5; i++) {
     await pre({ name: 'bash', arguments: { command: 'python train_cap' + i + '.py --epochs 1' } }, async () => ({ kind: 'allow' }))
-    FAKE.psLines = [String(1000 + i) + ' 1 10.0 9000 python train_cap' + i + '.py --epochs 1', '8888 1 0.5 300000 node server.js']
+    capPids.push(String(1000 + i) + ' 1 10.0 9000 python train_cap' + i + '.py --epochs 1')
+    FAKE.psLines = capPids.concat(['8888 1 0.5 300000 node server.js'])
     await tick(3)
     snap = await G('snapshot')({})
     if (snap.experiment) runIds5.push(snap.experiment.runId)
@@ -342,6 +363,9 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   assert(runIds5.length === 5, '5 次 start 均返回 running 记录（第 5 次触发上限归档）', runIds5.length)
   snap = await G('snapshot')({})
   assert(Array.isArray(snap.experiments) && snap.experiments.length <= 4, '并行上限 4：experiments ≤ 4', snap.experiments && snap.experiments.length)
+  // 2026-08-22（P1）：上限触发的 aborted 也归档进 ended[]
+  assert(snap.ended && snap.ended.some((e) => e.state === 'aborted'),
+    'P1 ended：并行上限触发 → 最旧实验 aborted 归档', snap.ended && snap.ended.map((e) => e.runId + ':' + e.state))
   // 清理：全部结束（供后续场景干净起点）
   FAKE.psLines = []
   for (const rid of runIds5) {
@@ -533,6 +557,8 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   snap = await G('snapshot')({ thresholds: { memWarn: 80 } })
   rt = await G('setThresholds')({})
   assert(rt.applied.memWarn === 80, '直连后携带（新时间戳）→ 覆盖为 80', rt.applied)
+  // 2026-08-22（P1 设置面）：生效阈值透出到快照
+  assert(snap.thresholds && snap.thresholds.memWarn === 80, 'P1 阈值透出：snapshot.thresholds.memWarn=80（rpcSnapshot 内嵌 apply）', snap.thresholds)
 
   // 2026-08-20（P2 2'）：阈值持久化——setThresholds 写回 settings 命名空间 lab-monitor
   const lmNs = C.settingsMock.namespaces['lab-monitor']
@@ -567,8 +593,12 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   const tCtl = H.toolDefs.find((t) => t.name === 'lab_ctl')
   const vSet = await tCtl.execute({ action: 'set-threshold', thresholds: { pollMs: 3000 } })
   assert(vSet.ok && vSet.applied.pollMs === 3000, 'lab_ctl set-threshold → pollMs=3000', vSet)
+  const snapE = await G('snapshot')({})
+  assert(snapE.thresholds && snapE.thresholds.pollMs === 3000, 'P1 阈值透出：pollMs=3000 进 snapshot.thresholds', snapE.thresholds && snapE.thresholds.pollMs)
   const vPause = await tCtl.execute({ action: 'pause' })
   assert(vPause.ok && vPause.state === 'paused', 'lab_ctl pause → paused', vPause)
+  const snapP = await G('snapshot')({})
+  assert(snapP.enabled === false, 'P1 启停透出：pause → snapshot.enabled=false', snapP.enabled)
   const tAdvice = H.toolDefs.find((t) => t.name === 'lab_advice')
   const vAdvice = await tAdvice.execute({})
   assert(vAdvice && Array.isArray(vAdvice.advice), 'lab_advice → { advice: [] }', vAdvice)
@@ -606,6 +636,7 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   const bad = checkLossless(snapNa, 'snap')
   assert(bad === null, 'N/A 采样场景快照全 lossless（无 NaN/Infinity/undefined）', bad)
   assert(snapNa.gpu && snapNa.gpu[0] && snapNa.gpu[0].utilPct === 0, 'nvidia-smi N/A → utilPct=0（安全降级）', snapNa.gpu && snapNa.gpu[0])
+  assert(snapNa.enabled === true, 'P1 启停透出：resume → snapshot.enabled=true', snapNa.enabled)
   assert(snapNa.cpu && snapNa.cpu.percent === null, 'CIM N/A → cpu.percent=null（安全降级）', snapNa.cpu)
   const vFullNa = await tStatus.execute({})
   assert(checkLossless(vFullNa, 'vFullNa') === null, 'lab_status 完整输出 N/A 场景全 lossless', checkLossless(vFullNa, 'vFullNa'))

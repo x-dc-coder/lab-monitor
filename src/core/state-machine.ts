@@ -4,7 +4,7 @@
  */
 import { CRASH_PS_GAP, DONE_GRACE_TICKS, MAX_PARALLEL_RUNS, RING_MAX_MS, cmdFingerprint, makeRunId, normalizeCmdForMatch } from './constants.js'
 import type { Ring } from './ring.js'
-import type { Alert, ExperimentSnapshot, RunRecord } from './types.js'
+import type { Alert, EndedRunSnapshot, ExperimentSnapshot, RunRecord } from './types.js'
 
 interface PsProc {
   pid: number
@@ -30,7 +30,7 @@ export interface StateMachine {
   tick(aliveProcs: PsProc[]): void
   tickGrace(run: RunRecord): void
   setAlerting(on: boolean, runId?: string | null): void
-  snapshot(): { main: ExperimentSnapshot | null; all: ExperimentSnapshot[] }
+  snapshot(): { main: ExperimentSnapshot | null; all: ExperimentSnapshot[]; ended: EndedRunSnapshot[] }
   cur(): RunRecord | null
   all(): RunRecord[]
   history: RunRecord[]
@@ -309,14 +309,32 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     }
   }
 
-  function snapshot(): { main: ExperimentSnapshot | null; all: ExperimentSnapshot[] } {
+  function toEndedSnapshot(run: RunRecord): EndedRunSnapshot {
+    return {
+      runId: run.runId,
+      state: run.state === 'done' ? 'done' : run.state === 'aborted' ? 'aborted' : 'crashed',
+      cmd: run.cmd,
+      cmdFeature: run.cmdFeature,
+      startTs: run.startTs,
+      endTs: run.endTs,
+      // 2026-08-22（P1 实验历史）：archive 时已 buildSummary——摘要含 GPU 峰值/均值/
+      // 显存峰值/组 CPU 峰值/时长；此处直接透出（复盘数据面，UI/Agent 可见）
+      summary: run.summary || null,
+    }
+  }
+
+  function snapshot(): { main: ExperimentSnapshot | null; all: ExperimentSnapshot[]; ended: EndedRunSnapshot[] } {
     const runs = all()
-    if (!runs.length) return { main: null, all: [] }
+    // 2026-08-22（P1 实验历史）：已结束实验（done/crashed/aborted）历史投影——倒序（最新在前），
+    // state-machine 内部上限 20 条；对外不再丢历史（此前只有 main/all，复盘数据面缺失）
+    const ended = state.history.map(toEndedSnapshot)
+    if (!runs.length) return { main: null, all: [], ended }
     // main = 最近 start 的 running（与 cur() 一致）
     const mainRun = cur() as RunRecord
     return {
       main: toSnapshot(mainRun),
       all: runs.map(toSnapshot),
+      ended,
     }
   }
 

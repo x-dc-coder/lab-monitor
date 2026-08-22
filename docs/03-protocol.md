@@ -4,7 +4,7 @@
 
 ## 1. 版本与变更规则
 
-- 契约版本：`lab-protocol/1.2`（v1.4：+platform/sources，指标命名规范化；**1.2：进程级跟踪（2026-08-20）**——`procs[].ppid/gpuUtilPct`、`experiment.procGroup/groupStats`、`snapshot.system`、`alerts[].evidence`、`history[].groupCpu/groupMem`；**纯增量追加字段，老 client 照常工作**；**1.3（2026-08-20，A2 多轨+标签）：新增 `experiments[]`（全部并行实验，`experiment` 保留为主实验）、`tags[]`（标签分组聚合）——继续纯增量追加**）；
+- 契约版本：`lab-protocol/1.2`（v1.4：+platform/sources，指标命名规范化；**1.2：进程级跟踪（2026-08-20）**——`procs[].ppid/gpuUtilPct`、`experiment.procGroup/groupStats`、`snapshot.system`、`alerts[].evidence`、`history[].groupCpu/groupMem`；**纯增量追加字段，老 client 照常工作**；**1.3（2026-08-20，A2 多轨+标签）：新增 `experiments[]`（全部并行实验，`experiment` 保留为主实验）、`tags[]`（标签分组聚合）——继续纯增量追加**；**1.4（2026-08-22，P1 复盘+设置面）：新增 `ended[]`（已结束实验历史投影，上限 20）、`thresholds`（当前生效阈值，client 轮询周期由 `pollMs` 驱动）、`enabled`（监控引擎启停状态）——继续纯增量追加**）；
 - JSON schema 追加字段向后兼容；**删除/改型字段 = 破坏性变更**，须先更新本文件与计划，再通知 D-A/D-B1；
 - 所有载荷为**纯 JSON**（host.call 只驮 JSON；函数/undefined/类实例会被 codec 拒收，t5 结论②）。
 
@@ -47,6 +47,12 @@
                   "pid": 1234, "procGroup": [1234, 5678], "groupStats": { "cpuPct": null, "memMiB": 2938, "memberCount": 2, "alive": true, "gpuUtilPct": null, "gpuMemMiB": null, "members": [] },
                   "startTs": 1787030000000, "summary": null },
   "experiments": [ { "runId": "run-20260818-002", "state": "running", "cmd": "python train_b.py", "pid": 5679, "startTs": 1787030006000 } ],
+  "ended": [ { "runId": "run-20260818-000", "state": "done", "cmd": "python train_batch.py", "cmdFeature": "python",
+               "startTs": 1787029990000, "endTs": 1787030000000,
+               "summary": { "gpuUtilMax": 95, "gpuUtilAvg": 80, "memPeakMiB": 12800, "groupCpuMax": 400,
+                            "groupMemPeakMiB": 13000, "otherMemPeakMiB": 400, "durationSec": 10, "dataPartial": false } } ],
+  "thresholds": { "utilWarn": 85, "memWarn": 95, "tempWarn": 90, "pollMs": 5000 },
+  "enabled": true,
   "tags": [ { "rule": { "id": "tag-20260820-001", "label": "推理服务", "patterns": ["llama-server"], "kind": "process", "color": "#16a34a" },
               "pids": [5555], "procs": [ { "pid": 5555, "cmd": "llama-server", "cpuPct": null, "memMiB": 50000, "gpuUtilPct": 45 } ],
               "gpuUtilPct": 45, "cpuPct": null, "memMiB": 50000 } ],
@@ -69,6 +75,9 @@
 | `alertsCriticalCount` | **host 预算的 CRITICAL 计数**（badge 直读，T2-2） |
 | `experiment` | 主实验（= 最近 start 的 running run，状态机输出；idle 时为 null） |
 | `experiments` | **（1.3，A2 多轨）全部 running 实验数组**——`experiment` 保留为主实验（向后兼容），本字段承载并行实验（多轨上限 4） |
+| `ended` | **（1.4，P1 复盘）已结束实验历史投影**——`{ runId, state: 'done'\|'crashed'\|'aborted', cmd, cmdFeature, startTs, endTs, summary }`；最新在前、上限 20；`summary` 为归档时生成的指标摘要（GPU 利用率峰值/均值、显存峰值、组 CPU/内存峰值、时长等），采样不足时为 null；client 实验历史折叠块直读本字段 |
+| `thresholds` | **（1.4，P1 设置面）当前生效阈值**——`{ utilWarn, memWarn, tempWarn, pollMs }`；与 `setThresholds`/`lab_ctl set-threshold`/settings.yaml 三通道一致（持久化在 settings 命名空间 lab-monitor）；**client 轮询周期由 `pollMs` 动态驱动**（范围 1000–60000ms） |
+| `enabled` | **（1.4，P1 设置面）监控引擎启停状态**——`true`=运行 / `false`=暂停（`control` 的 `pause`/`resume` 切换；暂停时跳过采样但快照照常返回）；client 控制面板据此显示「监控运行中/已暂停」 |
 | `tags` | **（1.3，标签分组）用户标签规则命中聚合数组**——`{ rule: {id,label,patterns,kind,color}, pids[], procs[], gpuUtilPct, cpuPct, memMiB, runIds? }`；`kind=experiment` 时 `runIds` 附归属实验；匹配 cmdline 正则（脚本形态天然覆盖） |
 | `callCount` | **host 侧 RPC 调用计数器**（P0 验收 2 断言手段，T4-2） |
 | `ui.betterSidebarVisible` | **host 半经 `settings.describe` 探测 aionui-panel 互斥标志**（`aionui-panel.rightPanel === 'aionui-panel'` → false；t6 §3.2 判据）+ 监听 `settings/updated` 实时刷新；出口适配层据此决定 ②/③ 切换（t6 §4 规避方案 1/2） |

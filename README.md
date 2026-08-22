@@ -50,8 +50,9 @@
 /home/dc/projects/lab-monitor/
 ├── README.md                        # 本文件：总览、架构图、快速开始
 ├── agent-preset/                    # v2「实验指挥」Agent 预设（★v2 启用，MVP 不实现——T3-3）
-│   └── lab-commander/               #   🔶 2026-08-20 用户决策：**不做预设**，改为「使用文档」形式
-│                                   #     （lab_status/lab_advice/lab_ctl 用法手册；prompt 注入增强待讨论）
+│   └── lab-commander/               #   ✅ 2026-08-22：**不做预设**（用户决策），改为「使用文档」形式
+│                                   #     （`docs/usage.md`：lab_status/lab_advice/lab_ctl 用法手册；
+│                                   #      面板 UI / 阈值 / 标签 / 多轨语义；prompt 注入增强待讨论）
 │       ├── persona.md / RULES.md / tools.md
 ├── scripts/
 │   ├── verify.sh                    # CI 式自测：node --check + 目录完整 + 契约静态核对 + 四测套
@@ -97,6 +98,7 @@
 | `docs/03-protocol.md` | RPC 契约 + 工具契约 + 事件信封（**冻结版，D-A/D-B1 共同契约**） | §3.1 rpc/tools / M3 |
 | `docs/04-milestones.md` | P0/P1/P2 验收清单（勾选制） | §4 / §5.5 |
 | `docs/05-ui-adapters.md` | 出口注册策略 / 优先级 / 互斥规则 / 能力降级矩阵 | §3.2 / §6 风险 1/13/15 |
+| `docs/usage.md` | **使用文档（A1，2026-08-22）**：lab_status/lab_advice/lab_ctl 用法手册 + 面板 UI + 阈值/标签/多轨语义 + 持久化说明 | A1 |
 | `docs/research/` | 调研与评审归档（07 篇） | t1~t8 各轮输出 |
 | `docs/research/18-known-issues.md` | **已知问题跟踪**（2026-08-20：趋势可见性/表格折叠/告警展示/刷新同步） | 后续迭代 |
 
@@ -275,6 +277,35 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 
 > 注意：本段全部为 **host 半改动（render/balancer/buildSnapshot/工具注册），需 DSH 重启生效**（进程内加载旧 lib/index.js）。
 
+### V2.5 P1 实验历史复盘 + 设置面 + 使用文档（2026-08-22，继续 plugin-specialist 排查批次）
+
+> 前情：V2.4 修完三件 P0 后用户指示「继续 P1」。本段落地三件事：① 实验历史保留 + **复盘入口**（此前实验结束即被状态机丢弃，无任何存档）；② **设置面补全**（此前阈值/watch/标签只能靠 Agent 工具改，面板无任何设置/控制入口）；③ A1 使用文档交付。
+
+1. **实验历史保留 + 复盘**（`ended[]` 协议，纯增量追加）：
+   - 状态机归档扩展：done/crashed/aborted 结束时除 event 外同时生成**指标摘要**（GPU 利用率峰值/均值、
+     显存峰值、组 CPU/内存峰值、时长等，`archive()` 时 buildSummary）存入 history（上限 20，最新在前）；
+   - 快照新增 `ended[]`（`{ runId, state, cmd, cmdFeature, startTs, endTs, summary }`）；
+   - UI：面板新增「▸ 实验历史（N）」折叠块——每行 runId + 状态徽标（完成/崩溃/中止）+ 时长 +
+     GPU 峰值/均值 + 显存峰值 + 组 CPU 峰值 + cmd；点击展开。
+2. **设置面补全（ControlPanel）**：
+   - 面板新增控制卡片：阈值输入（GPU利用%/显存%/温度°C）+ **保存**（走 HTTP `setThresholds`，即时生效
+     + settings 持久化，重启保留）、**暂停/恢复**（`control`，暂停时跳过采样但快照照常返回）、**清除告警**
+     （`control` clear-alerts，带 critical 计数徽标）；外部（lab_ctl/settings.yaml）改阈值后面板表单自动跟随；
+   - **轮询周期动态驱动**：快照新增 `thresholds`/`enabled` 透出——client 轮询间隔改由
+     `thresholds.pollMs`（1000–60000 钳制）驱动，`lab_ctl set-threshold pollMs=3000` 或面板改值即实时生效，
+     无需改配置重启（此前 pollMs 是无处可配的死字段，排查发现）；
+   - 顺带清理：`promptInjection`/`sampleMs` 确认在插件形态下不可配（无 config 槽位），维持现状记录在案。
+3. **使用文档（A1）**：`docs/usage.md`——lab_status/lab_advice/lab_ctl 三工具完整用法手册（含 schema 实测）、
+   面板 UI 指引、阈值与告警语义表、多轨跟踪语义、watchlist/标签、settings.yaml 持久化说明、HTTP 数据面与
+   鉴权警示、变更记录。
+4. **测试配套**：verify-host 新增 P1 断言段（ended[] 初始空/协议完整性/done/crashed/runId 精确匹配/
+   aborted 归档/thresholds 透出 memWarn=80/pollMs=3000/enabled pause↔resume，13 断言）+ **修复 cap 场景测试盲区**
+   （此前 FAKE.psLines 每循环覆盖导致 crash 抢先，上限 aborted 分支从未被覆盖——累积 pid 后真正触发）；
+   mock-test 新增 5 条 P1 渲染断言（实验历史折叠头/轮询周期/启停状态/清除告警计数/保存按钮）；
+   `docs/03-protocol.md` 升级 1.4（ended/thresholds/enabled 三字段契约）。
+
+> 注意：本段 **host 半改动（协议字段/状态机归档）需 DSH 重启生效**；client 半（实验历史块/控制面板/pollMs 驱动）浏览器刷新即生效。
+
 ## 未完成项清单（2026-08-20 对照 PLAN v1.4.5 + 04-milestones）
 
 > 对照依据：PLAN §0 三层组合 / §1 目录树 / §6 风险表 / §4 验收清单；04-milestones 勾选状态。
@@ -284,7 +315,7 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 
 | # | 未完成项 | 文档依据 | 现状 |
 |---|---|---|---|
-| A1 | ~~指挥层 Agent 预设 lab-commander~~ → **使用文档**（lab_status/lab_advice/lab_ctl 用法手册） | PLAN §0 三层组合第 2 层、§1 目录树 | 🔶 **2026-08-20 用户决策：不做 Agent 预设**（插件功能未完善，预设无收益）；改为使用文档形式；prompt 注入增强待讨论（KV 缓存影响） |
+| A1 | ~~指挥层 Agent 预设 lab-commander~~ → **使用文档**（lab_status/lab_advice/lab_ctl 用法手册） | PLAN §0 三层组合第 2 层、§1 目录树 | ✅ **2026-08-22 落地（V2.5）**：`docs/usage.md`——工具用法手册 + 面板 UI + 阈值/标签/多轨语义 + 持久化说明；用户决策不做 Agent 预设（插件功能未完善时预设无收益）；prompt 注入增强待讨论（KV 缓存影响） |
 | A2 | **多实验并行跟踪**（R-2「多轨并存留 v2」） | 风险 11 | ✅ **2026-08-20 实施完成（V2.3）**：多轨（上限 4 + per-run 判定 + runId 归属）+ 标签分组（规则式打标 + lab_ctl tag + tags 聚合 + UI 分组展示）；verify-host [B3]/[E2] 全绿 |
 | A3 | webServer 自托管面板（出口④） | 风险 14 + §3.2.4（「v2 前置」） | 仅实现 HTTP 数据面 `/lab-monitor/api/*`；自托管 HTML 面板未实现 |
 | A4 | SSE `/lab/events` 远端扩展 | README v2 演进表「webServer SSE /lab/events（手机端/对接 monitor-panel）」 | 源码无 SSE/EventSource 实现 |

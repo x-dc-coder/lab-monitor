@@ -1410,6 +1410,14 @@ function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
     style: {
       display: 'flex', flexDirection: 'column', gap: 12, padding: 14,
       fontSize: 13, color: C.label, minWidth: 320, boxSizing: 'border-box',
+      // 2026-08-23 滚动 bug 修复（参考 better-sidebar 各 tab 组件自身滚动契约：
+      // 外层 .nArs4W_paneTab{flex:1;min-height:0} + .nArs4W_paneContent{overflow:hidden}，
+      // 面板根需 flex:1 + min-height:0 + overflowY:auto 承接内容滚动——否则展开实验历史/
+      // 聚合组超出的部分被外层 overflow:hidden 截断且无法滚动。
+      // flex:1 使其在 better-sidebar 的 paneTab(flex column) 里占满可用高度并收缩；
+      // min-height:0 允许 flex 子项收缩到比内容小，从而让 overflowY:auto 生效；
+      // 内容不溢出时 overflow-y:auto 不显示滚动条，不影响 conversation.view 其他 UI 行为。
+      flex: 1, minHeight: 0, overflowY: 'auto',
     },
   },
     // ── 状态行 ─────────────────────────────────────────────────────────────

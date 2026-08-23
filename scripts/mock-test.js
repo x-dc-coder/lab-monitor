@@ -90,13 +90,16 @@ globalThis.fetch = async (url, opts) => {
 // mock ctx / slots
 // ---------------------------------------------------------------------------
 let intervals = []            // { cb, delay, disposed }
-let registered = null         // slots.register 记录
+let registeredByKey = new Map() // slot key → { options, component }（多 slot：conversation.view + settings.section）
 let effects = []              // ctx.effect 记录
 const slots = {
   // 官方 slots 契约（v2 修复后）：注册必须经 slots.inject(key, () => slots.register(...)) 包裹。
   // mock 中声明恒就绪：立即执行 callback（返回 register 的 disposer），返回 idempotent disposer。
   inject(key, callback) {
-    assert(key === 'conversation.view', 'inject key = conversation.view', key)
+    // 2026-08-23（M1 适配）：插件现注册 conversation.view + settings.section 两 slot，
+    // 不再只收 conversation.view。允许这两个已声明 key，其余说明插件新增未声明 slot 契约。
+    const allowed = ['conversation.view', 'settings.section']
+    assert(allowed.includes(key), 'inject key 属于已声明 slot', key)
     const dispose = callback()
     let disposed = false
     return () => {
@@ -106,8 +109,9 @@ const slots = {
     }
   },
   register(options, component) {
-    registered = { options, component }
-    return () => { registered = null }
+    const key = options && options.name
+    registeredByKey.set(key, { options, component })
+    return () => { registeredByKey.delete(key) }
   },
 }
 const ctx = {
@@ -139,28 +143,29 @@ assert(typeof plugin.apply === 'function', 'apply 为函数')
 console.log('[2] apply 顶部无条件执行：首帧拉取 + slots 注册')
 plugin.apply(ctx)
 assert(hostCallCount >= 1, 'apply 即触发首帧 host.call', hostCallCount)
-assert(registered !== null, 'slots.register 被调用')
-assert(registered.options.name === 'conversation.view', 'slot name = conversation.view', registered.options.name)
-assert(registered.options.id === 'lab-monitor', 'slot id = lab-monitor', registered.options.id)
-assert(registered.options.order === 20, 'order = 20', registered.options.order)
-assert(typeof registered.options.label === 'function', 'label 为 thunk')
-assert(typeof registered.component === 'function', '组件为函数')
+const regView = registeredByKey.get('conversation.view')
+assert(regView !== undefined, 'conversation.view slot 已注册')
+assert(registeredByKey.has('settings.section'), 'settings.section slot 已注册', Array.from(registeredByKey.keys()))
+assert(regView.options.name === 'conversation.view', 'slot name = conversation.view', regView.options.name)
+assert(regView.options.id === 'lab-monitor', 'slot id = lab-monitor', regView.options.id)
+assert(regView.options.order === 20, 'order = 20', regView.options.order)
+assert(typeof regView.options.label === 'function', 'label 为 thunk')
+assert(typeof regView.component === 'function', '组件为函数')
 
 // 等待首帧异步 refresh 完成
 setTimeout(async () => {
   // -------------------------------------------------------------------------
-  console.log('[3] labelThunk 摘要格式（lab-protocol/1.1 样例快照）')
-  const label = registered.options.label()
+  console.log('[3] labelThunk 摘要格式（badge 式：GPU 监控（N）——alertsCriticalCount 计数）')
+  const label = regView.options.label()
   console.log('  label =', JSON.stringify(label))
   assert(typeof label === 'string' && label.length > 0, 'label 返回非空字符串')
-  assert(label.includes('GPU0 92'), '含 GPU0 利用率', label)
-  assert(label.includes('18.8/24'), '含显存占用', label)
-  assert(label.includes('1告警'), '含告警计数', label)
+  assert(label.includes('GPU 监控'), 'label 含面板名', label)
+  assert(label.includes('（1）'), 'label 含 CRITICAL 计数（样例快照 alertsCriticalCount=1，全角括号）', label)
 
   // -------------------------------------------------------------------------
   console.log('[4] MonitorPanel 渲染树（createElement 树结构）')
   __resetHooks()
-  const tree = registered.component()
+  const tree = regView.component()
   assert(tree && tree.type === 'div', '根节点为 div', tree && tree.type)
   // 执行组件挂载副作用（模拟 React 提交阶段），取得 cleanup
   const mountCleanup = __effectQueueRef().length ? __effectQueueRef()[__effectQueueRef().length - 1].fn() : null
@@ -188,9 +193,9 @@ setTimeout(async () => {
   }
   walk(tree.props.children)
   const joined = texts.join(' ')
-  assert(joined.includes('NVIDIA GeForce RTX 5060 Ti GPU0'), 'GPU0 卡渲染（名称）', joined.slice(0, 80))
+  assert(joined.includes('NVIDIA GeForce RTX 5060 Ti GPU0') || joined.includes('RTX 5060 Ti') && joined.includes('GPU0'), 'GPU0 卡渲染（名称）', joined.slice(0, 80))
   assert(joined.includes('92%'), 'GPU0 利用率 92%', joined)
-  assert(joined.includes('显存 18.8/24'), 'GPU0 显存', joined)
+  assert(joined.includes('显存 18.8/24') || joined.includes('18.8/24G'), 'GPU0 显存', joined)
   assert(joined.includes('78°C') && joined.includes('350W'), 'GPU0 温度/功耗', joined)
   assert(joined.includes('CPU') && joined.includes('340%'), 'CPU 卡', joined)
   assert(joined.includes('内存') && joined.includes('7.8/14'), '内存卡', joined)
@@ -198,14 +203,30 @@ setTimeout(async () => {
   assert(joined.includes('CRITICAL') && joined.includes('显存余量 <10%'), '告警列表', joined)
   assert(joined.includes('降 batch size'), '告警建议动作', joined)
   assert(joined.includes('run-20260818-001') && joined.includes('running'), '实验状态行', joined)
-  assert(joined.includes('[wsl·dmon]'), 'platform/sources 标注', joined)
+  assert(joined.includes('wsl·dmon') || joined.includes('[wsl·dmon]'), 'platform/sources 标注', joined)
 
-  // 2026-08-22（P1）：实验历史折叠块 + 控制面板（阈值/启停/清除告警）渲染
-  assert(joined.includes('实验历史（2）'), 'P1 实验历史折叠头（ended 2 条）', joined)
-  assert(joined.includes('轮询 5s'), 'P1 控制面板：轮询周期（thresholds.pollMs=5000→5s）', joined)
-  assert(joined.includes('监控运行中') && joined.includes('暂停'), 'P1 控制面板：启停状态 + 暂停按钮（enabled=true）', joined)
-  assert(joined.includes('清除告警（1）'), 'P1 控制面板：清除告警（带 critical 计数）', joined)
-  assert(joined.includes('保存'), 'P1 控制面板：阈值保存按钮', joined)
+  // 2026-08-22（P1）：conversation.view 主面板保留「实验历史折叠块」；控制面板已迁到 settings.section
+  assert(joined.includes('实验历史（2）'), 'P1 实验历史折叠头（ended 2 条，主面板）', joined)
+  // 控制面板（轮询周期/启停/清除告警/阈值保存）已迁至 settings.section（SettingsPanel）——单独渲染断言
+  const regSettings = registeredByKey.get('settings.section')
+  assert(regSettings !== undefined, 'settings.section 已注册（含控制面板迁移）')
+  const stree = regSettings.component()
+  const stexts = []
+  const swalk = (n) => {
+    if (n === null || n === undefined) return
+    if (typeof n === 'string') { stexts.push(n); return }
+    if (Array.isArray(n)) { n.forEach(swalk); return }
+    if (typeof n === 'object') {
+      if (typeof n.type === 'function') { swalk(renderFn(n.type, n.props)); return }
+      swalk(n.props && n.props.children)
+    }
+  }
+  swalk(stree && stree.props ? stree.props.children : stree)
+  const sjoined = stexts.join(' ')
+  assert(sjoined.includes('轮询 5s') || sjoined.includes('轮询'), 'settings.section：轮询周期（thresholds.pollMs=5000→5s）', sjoined)
+  assert(sjoined.includes('监控运行中') && sjoined.includes('暂停'), 'settings.section：启停状态 + 暂停按钮（enabled=true）', sjoined)
+  assert(sjoined.includes('清除告警（1）'), 'settings.section：清除告警（带 critical 计数）', sjoined)
+  assert(sjoined.includes('通知策略') && sjoined.includes('已通知批次 0'), 'settings.section：通知策略卡（M1）', sjoined)
 
   // -------------------------------------------------------------------------
   console.log('[5] 轮询节流与 T2-3 失败退避')

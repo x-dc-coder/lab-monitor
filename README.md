@@ -342,6 +342,7 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 | # | 未完成项 | 文档依据 | 现状 |
 |---|---|---|---|
 | A1 | ~~指挥层 Agent 预设 lab-commander~~ → **使用文档**（lab_status/lab_advice/lab_ctl 用法手册） | PLAN §0 三层组合第 2 层、§1 目录树 | ✅ **2026-08-22 落地（V2.5）**：`docs/usage.md`——工具用法手册 + 面板 UI + 阈值/标签/多轨语义 + 持久化说明；用户决策不做 Agent 预设（插件功能未完善时预设无收益）；prompt 注入增强待讨论（KV 缓存影响） |
+| A1.5 | **告警通知闭环（issue #5 方案 M1）** | docs/research/22-issue5-alert-notify-design.md（设计）+ 23 评审 + 25 架构 | ✅ **2026-08-23 实施完成（V2.7→V2.8）**：告警严格分级（Alert 8 扩展字段 severity/urgency/trend/sustainedMs/resource/origin/notifyLevel/escalate + rule 权重表 + warn 升级）+ 通知策略引擎（effectiveLevel→档位→resolveAction 全格→投递 agents.roots()；节流/指纹去重/预算守卫/clear 重置）+ 配置面（settings 六键 + lab_ctl set-notify + 设置页 NotifyCard）+ 告警多维徽标 + TRAIN_PATTERNS 精度修复（torchrun 句式化、python -c/-m 排除特征；20 条误报 history 清理）。**V2.8 收尾**：M1 缺口补齐（notifyLevel 回写告警视图 + trend=falling 窗口判定 + verify-m1.js 19 断言）、测试转绿（mock-test 20→0、verify-host B3b 4→0）；架构文档 `25-issue5-alert-architecture.md`（codex 交叉审查修正）。**M2/M3 拆分到 issue #6/#7**（不阻塞） |
 | A2 | **多实验并行跟踪**（R-2「多轨并存留 v2」） | 风险 11 | ✅ **2026-08-20 实施完成（V2.3）**：多轨（上限 4 + per-run 判定 + runId 归属）+ 标签分组（规则式打标 + lab_ctl tag + tags 聚合 + UI 分组展示）；verify-host [B3]/[E2] 全绿 |
 | A3 | webServer 自托管面板（出口④） | 风险 14 + §3.2.4（「v2 前置」） | 仅实现 HTTP 数据面 `/lab-monitor/api/*`；自托管 HTML 面板未实现 |
 | A4 | SSE `/lab/events` 远端扩展 | README v2 演进表「webServer SSE /lab/events（手机端/对接 monitor-panel）」 | 源码无 SSE/EventSource 实现 |

@@ -31,13 +31,41 @@ export const THRESHOLD_DEFAULTS = {
 export type Thresholds = typeof THRESHOLD_DEFAULTS
 export const THRESH_KEYS = ['utilWarn', 'memWarn', 'tempWarn', 'pollMs', 'procTopN', 'wGpu', 'wCpu', 'wMem'] as const
 
-/** 训练命令关键词表（T4-1：python train*.py / python -c / python3 -c / torchrun / deepspeed / python -m） */
+/**
+ * 训练命令识别表（T4-1 + 2026-08-23 精度修复）
+ * 误报实证（T2 §2.4，~/.dsh/settings.yaml history）：grep 模式串含 "torchrun" 被命中、
+ * gh issue heredoc 含 torchrun 字样命中、python3 -c "import zipfile" 工具脚本全被记为实验。
+ * 修复原则（docs/research/21-t2 §2.4 + 22-issue5 §3.3）：
+ *   - torchrun/deepspeed 不再裸词匹配：要求后跟 脚本文件 或 训练器句式（-m torch.distributed 等）
+ *   - python -c/-m 增加排除特征：常见工具/检查形态（import zipfile/docx 检查、打印环境等）不命中
+ *   - 未命中 = null（不猜），防误报优先
+ */
 export const TRAIN_PATTERNS: { name: string; re: RegExp }[] = [
   { name: 'python train*.py', re: /(?:^|[^a-z0-9._-])(?:python3?|uv)\s+(?:\S+[\/\\])?train[^\s'" ]*\.py/i },
-  { name: 'python -c', re: /(?:^|[^a-z0-9._-])python3?\s+-c\b/i },
-  { name: 'python -m', re: /(?:^|[^a-z0-9._-])python3?\s+-m\b/i },
-  { name: 'torchrun', re: /torchrun\b/i },
-  { name: 'deepspeed', re: /deepspeed\b/i },
+  // torchrun/deepspeed 句式化：后跟脚本文件（torchrun --nproc_per_node=8 train.py / torchrun train.py）
+  // 或 torch.distributed 启动句式（-m torch.distributed.run）；排除 grep/heredoc/注释中的裸词
+  {
+    name: 'torchrun',
+    re: /(?:^|[^a-z0-9._-])torchrun\b(?:\s+--?[a-z0-9_=-]+)*\s+(?:\S+[\/\\])?[a-zA-Z0-9_.-]+\.(?:py|sh)\b|(?:^|[^a-z0-9._-])torchrun\b[\s\S]*?-m\s+torch\.distributed\b/i,
+  },
+  {
+    name: 'deepspeed',
+    re: /(?:^|[^a-z0-9._-])deepspeed\b(?:\s+--?[a-z0-9_=-]+)*\s+(?:\S+[\/\\])?[a-zA-Z0-9_.-]+\.(?:py|sh)\b/i,
+  },
+  // python -m：排除常见工具形态（uv/pip/venv/ensurepip/zipfile/torch 环境检查等价物）
+  // —— 优先匹配明确的模块训练入口（torch.distributed / accelerate / deepspeed 式）
+  {
+    name: 'python -m',
+    re: /(?:^|[^a-z0-9._-])(?:python3?|uv)\s+-m\s+(?:torch\.distributed|accelerate|deepspeed)\b/i,
+  },
+  // python -c：不再全匹配；仅当内联代码含明确训练特征（train/backward/epochs/torch.distributed/nn.Module）
+  // 时命中；排除 import zipfile/docx 检查、print 环境、单行脚本等工具调用（T2 §2.4 实证）。
+  // 修正（2026-08-23）：① 关键词组不用尾部 \b——backward( 后跟 ; 无词边界会失配，改为光文字匹配；
+  // ② \b 放键内——train 用 \btrain(?![a-z_]) 命中 train_epoch/train.py 又不误吃 training。
+  {
+    name: 'python -c',
+    re: /(?:^|[^a-z0-9._-])python3?\s+-c\s+["'][\s\S]{0,400}?(?:torch\.distributed|nn\.Module|backward|epochs?|\btrain(?![a-z_])|\btraining\b)/i,
+  },
 ]
 
 export function matchTrainFeature(cmdStr: string | null | undefined): string | null {

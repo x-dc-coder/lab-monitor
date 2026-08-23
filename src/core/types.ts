@@ -103,7 +103,7 @@ export interface EndedRunSnapshot {
   summary: RunRecord['summary'] | null
 }
 
-/** 告警（1.2：+evidence 进程证据） */
+/** 告警（1.2：+evidence 进程证据；M1 issue#5：+severity/urgency/trend/sustainedMs 等多维扩展字段） */
 export interface Alert {
   level: 'critical' | 'warn' | 'info' | string
   rule: string
@@ -114,6 +114,23 @@ export interface Alert {
   evidence?: { procs: ProcStat[] }
   ts: number
   runId: string | null
+  // ── M1（issue#5 严格分级，docs/research/22 §1.2；全部可选防破坏，旧数据零感知）──
+  /** 严重度 1-5（rule 权重表静态映射：crash=5、oom=4、thermal=4、io=3、imbalance=2、other=2）——M1 必填 */
+  severity?: 1 | 2 | 3 | 4 | 5
+  /** 紧迫性 1-3（rule 基准 + trend 推导：crash=3、oom/thermal=2、其余=1；rising→+1）——M1 必填 */
+  urgency?: 1 | 2 | 3
+  /** 趋势：rising/steady/falling（由窗口内连续命中累计推导） */
+  trend?: 'rising' | 'steady' | 'falling'
+  /** 超阈值持续时长 ms（由 hitByRule 命中计数 × SAMPLE_MS 累计；替代固定 10s 防抖的累计值）——M1 必填 */
+  sustainedMs?: number
+  /** 资源类别：gpu-util/vram/temp/cpu/mem/io/process */
+  resource?: 'gpu-util' | 'vram' | 'temp' | 'cpu' | 'mem' | 'io' | 'process'
+  /** 归属：self=实验自身 / other=疑似他人 / system=无实验系统级 */
+  origin?: 'self' | 'other' | 'system'
+  /** 策略引擎输出档位（写回，UI/审计可见）：off/notice/wake */
+  notifyLevel?: 'off' | 'notice' | 'wake'
+  /** 是否已发生 warn→critical 通知升级（escalateAfterSec 触发；不改 level 本身） */
+  escalate?: boolean
 }
 
 /** 进程标签规则（2026-08-20 用户需求：手动对进程打标签分组展示；settings 持久化） */
@@ -166,6 +183,17 @@ export interface MonitorSnapshot {
   thresholds?: { utilWarn: number; memWarn: number; tempWarn: number; pollMs: number; procTopN?: number; wGpu?: number; wCpu?: number; wMem?: number }
   /** 2026-08-22（P1 设置面）：监控引擎启停状态（start/pause/resume 的真实反映——UI 控制区显示） */
   enabled?: boolean
+  /** M1（issue#5）：当前生效通知策略（client 设置页展示 + lab_status 可见） */
+  notify?: {
+    alertNotify: 'off' | 'notice' | 'wake'
+    alertTargets: string[]
+    notifyThrottleMs: number
+    escalateAfterSec: number
+    notifyTimeoutMs: number
+    broadcast: boolean
+    agentsAvailable: boolean
+    notifiedFingerprints: number
+  }
   /** 2026-08-20（标签分组）：用户标签规则命中聚合（按规则分组展示） */
   tags?: TagGroup[]
   alerts: Alert[]

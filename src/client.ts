@@ -52,6 +52,15 @@ interface AlertView {
   actions: string[]
   ts: number
   runId: string | null
+  // M1（issue#5 严格分级）：多维扩展字段（host 已透传，可选）
+  severity?: 1 | 2 | 3 | 4 | 5
+  urgency?: 1 | 2 | 3
+  trend?: 'rising' | 'steady' | 'falling'
+  sustainedMs?: number
+  resource?: string
+  origin?: 'self' | 'other' | 'system'
+  notifyLevel?: 'off' | 'notice' | 'wake'
+  escalate?: boolean
 }
 interface SnapView {
   ts: number
@@ -73,6 +82,17 @@ interface SnapView {
   thresholds?: { utilWarn: number; memWarn: number; tempWarn: number; pollMs: number; procTopN?: number; wGpu?: number; wCpu?: number; wMem?: number }
   /** 2026-08-22（P1 设置面）：监控引擎启停状态 */
   enabled?: boolean
+  /** M1（issue#5）：当前生效通知策略（设置页展示） */
+  notify?: {
+    alertNotify: 'off' | 'notice' | 'wake'
+    alertTargets: string[]
+    notifyThrottleMs: number
+    escalateAfterSec: number
+    notifyTimeoutMs: number
+    broadcast: boolean
+    agentsAvailable: boolean
+    notifiedFingerprints: number
+  }
   /** 2026-08-20（标签分组）：用户标签规则命中聚合 */
   tags?: TagGroupView[]
   alerts: AlertView[]
@@ -711,6 +731,11 @@ const sectionHead: React.CSSProperties = { display: 'flex', alignItems: 'center'
 const sectionChip: React.CSSProperties = {
   fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 8, background: C.label, color: C.layer1,
 }
+/** M1（issue#5）：告警多维分级徽标（severity/urgency/trend/escalate/notifyLevel） */
+const badgeStyle: React.CSSProperties = {
+  fontSize: 10, fontWeight: 600, padding: '0 4px', borderRadius: 4,
+  background: C.border, color: C.label, marginLeft: 4, verticalAlign: '1px',
+}
 /** 指标卡标题行：左标题 + 右主数值（基线对齐） */
 const cardHead: React.CSSProperties = { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }
 /** 指标卡主数值：统一放大字号建立层级（大数字=hero 值） */
@@ -967,7 +992,7 @@ function AlertList(props: { alerts: AlertView[] }) {
   const [showAll, setShowAll] = React.useState(false)
   const alerts = props.alerts
   if (!alerts.length) return null
-  const merged: { level: string; rule: string; msg: string; confidence: number; actions: string[]; ts: number; count: number }[] = []
+  const merged: { level: string; rule: string; msg: string; confidence: number; actions: string[]; ts: number; count: number; severity?: number; urgency?: number; trend?: string; escalate?: boolean; notifyLevel?: string }[] = []
   const byRule: Record<string, number> = {}
   for (const a of alerts) {
     const idx = byRule[a.rule]
@@ -976,16 +1001,28 @@ function AlertList(props: { alerts: AlertView[] }) {
       continue
     }
     byRule[a.rule] = merged.length
-    merged.push({ level: a.level, rule: a.rule, msg: a.msg, confidence: a.confidence, actions: a.actions, ts: a.ts, count: 1 })
+    merged.push({
+      level: a.level, rule: a.rule, msg: a.msg, confidence: a.confidence, actions: a.actions, ts: a.ts, count: 1,
+      // M1（issue#5）：合并行保留最新一条的扩展字段
+      severity: a.severity, urgency: a.urgency, trend: a.trend, escalate: a.escalate, notifyLevel: a.notifyLevel,
+    })
   }
   const visible = showAll ? merged : merged.slice(0, 2)
   const clip = (m: string) => (m.length > 120 ? m.slice(0, 120) + '…' : m)
   const items = visible.map((a) => {
     const color = a.level === 'critical' ? C.error : a.level === 'warn' ? C.warn : C.label2
     const full = clip(a.msg || a.rule || '')
+    // M1 多维徽标：severity★ / urgency↑ / trend / escalate / notifyLevel
+    const badges: React.ReactElement[] = []
+    if (typeof a.severity === 'number') badges.push(React.createElement('span', { key: 'sev', style: badgeStyle }, 'S' + a.severity))
+    if (typeof a.urgency === 'number') badges.push(React.createElement('span', { key: 'urg', style: { ...badgeStyle, color: a.urgency === 3 ? C.error : C.warn } }, 'U' + a.urgency))
+    if (a.trend) badges.push(React.createElement('span', { key: 'trend', style: badgeStyle }, a.trend === 'rising' ? '↗' : a.trend === 'falling' ? '↘' : '→'))
+    if (a.escalate) badges.push(React.createElement('span', { key: 'esc', style: { ...badgeStyle, color: C.warn, fontWeight: 700 } }, '升级'))
+    if (a.notifyLevel) badges.push(React.createElement('span', { key: 'nl', style: { ...badgeStyle, color: a.notifyLevel === 'wake' ? C.error : C.label2 } }, a.notifyLevel === 'wake' ? '唤醒' : a.notifyLevel === 'notice' ? '通知' : '静默'))
     return React.createElement('div', { key: a.rule + '-' + a.ts, style: { padding: '4px 0', fontSize: 12 } },
       React.createElement('span', { style: { color, fontWeight: 600, marginRight: 6 } }, (a.level || 'info').toUpperCase()),
-      React.createElement('span', { style: { color: C.label, wordBreak: 'break-all' }, title: (a.msg || a.rule || '').length > 120 ? a.msg : undefined }, full),
+      ...badges,
+      React.createElement('span', { style: { color: C.label, wordBreak: 'break-all', marginLeft: 6 }, title: (a.msg || a.rule || '').length > 120 ? a.msg : undefined }, full),
       a.count > 1 ? React.createElement('span', { style: { color: C.label2, marginLeft: 6 } }, '×' + a.count) : null,
       a.confidence !== null && a.confidence !== undefined
         ? React.createElement('span', { style: { color: C.label2, marginLeft: 6 } }, '置信 ' + Math.round(a.confidence * 100) + '%')
@@ -1212,6 +1249,74 @@ function WatchManager(props: { watchProcs: string[] }): React.ReactElement {
   )
 }
 
+/**
+ * M1（issue#5）：通知策略卡——告警推送档位（off/notice/wake）+ warn 升级时长。
+ * 保存走 control set-notify（即时生效 + settings 持久化）；快照 notify 字段驱动表单跟随。
+ */
+function NotifyCard(props: { notify: SnapView['notify'] }): React.ReactElement {
+  const n = props.notify
+  const [level, setLevel] = React.useState<'off' | 'notice' | 'wake'>(n && n.alertNotify ? n.alertNotify : 'notice')
+  const [esc, setEsc] = React.useState<string>(n && typeof n.escalateAfterSec === 'number' ? String(n.escalateAfterSec) : '600')
+  const [busy, setBusy] = React.useState(false)
+  const [msg, setMsg] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    if (n) {
+      setLevel(n.alertNotify || 'notice')
+      if (typeof n.escalateAfterSec === 'number') setEsc(String(n.escalateAfterSec))
+    }
+  }, [n && n.alertNotify, n && n.escalateAfterSec])
+
+  const save = () => {
+    const escNum = Number(esc)
+    const body: Record<string, unknown> = { action: 'set-notify', alertNotify: level }
+    if (esc.trim() !== '' && isFinite(escNum) && escNum >= 0) body.escalateAfterSec = Math.round(escNum)
+    setBusy(true); setMsg(null)
+    apiCall<{ ok?: boolean }>('control', body)
+      .then((r) => { if (r && (r as { ok?: boolean }).ok) setMsg('已生效（持久化）'); else setMsg('设置失败') })
+      .catch(() => setMsg('调用失败'))
+      .finally(() => setBusy(false))
+  }
+
+  const opts: { v: 'off' | 'notice' | 'wake'; label: string; desc: string }[] = [
+    { v: 'off', label: '静默', desc: '不推送，仅面板/工具可见' },
+    { v: 'notice', label: '通知', desc: '推送不唤醒（推荐）' },
+    { v: 'wake', label: '唤醒', desc: 'critical 唤醒 Agent 处理' },
+  ]
+  return React.createElement('div', { key: 'notify', style: sectionCard },
+    React.createElement('div', { style: sectionHead },
+      React.createElement('span', { style: sectionChip }, '通知策略'),
+      React.createElement('span', { style: { fontSize: 11, color: C.label2 } },
+        n && n.agentsAvailable === false ? '（agents 服务不可用，通知静默）' :
+        '已通知批次 ' + (n ? n.notifiedFingerprints : 0)),
+    ),
+    React.createElement('div', { style: { display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' } },
+      opts.map((o) => {
+        const active = level === o.v
+        return React.createElement('button', {
+          key: o.v,
+          onClick: () => setLevel(o.v),
+          style: {
+            border: active ? '1px solid ' + C.brand : '1px solid ' + C.border,
+            background: active ? C.border : 'transparent', color: C.label, borderRadius: 6,
+            fontSize: 11, padding: '4px 10px', cursor: 'pointer',
+          },
+        }, o.label + '（' + o.desc + '）')
+      }),
+    ),
+    React.createElement('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' } },
+      React.createElement('span', { style: { fontSize: 11, color: C.label2 } }, 'warn 持续（秒）升 critical:'),
+      React.createElement('input', {
+        value: esc, onChange: (e: React.ChangeEvent<HTMLInputElement>) => setEsc(e.target.value),
+        style: { width: 80, background: C.layer1, border: '1px solid ' + C.border, color: C.label, borderRadius: 4, padding: '3px 6px', fontSize: 11, textAlign: 'right' },
+      }),
+      React.createElement('span', { style: { fontSize: 10, color: C.label2 } }, '0=关闭升级'),
+      React.createElement('button', { onClick: save, disabled: busy, style: { background: C.label, color: C.layer1, border: 'none', borderRadius: 4, fontSize: 11, padding: '3px 10px', cursor: 'pointer', marginLeft: 'auto' } }, '保存'),
+    ),
+    msg ? React.createElement('div', { style: { fontSize: 11, color: C.brand, marginTop: 4 } }, msg) : null,
+  )
+}
+
 function SettingsPanel(): React.ReactElement {
   const [snap, setSnap] = React.useState<SnapView | null>(last && !(last as { error?: boolean }).error ? last : null)
   React.useEffect(() => {
@@ -1229,6 +1334,7 @@ function SettingsPanel(): React.ReactElement {
         '监控 / 排序 / 标签规则 — 保存即生效并持久化（settings.yaml）'),
     ),
     React.createElement(WatchManager, { watchProcs, key: 'watch' }),
+    React.createElement(NotifyCard, { notify: snap ? snap.notify : undefined, key: 'notify' }),
     React.createElement(ControlPanel, { snap }),
     React.createElement(TagManager, { tags: (snap && Array.isArray(snap.tags) ? snap.tags : []) as TagGroupView[] }),
   )

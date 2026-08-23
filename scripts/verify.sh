@@ -7,8 +7,9 @@
 #   1. typecheck（tsc --noEmit）+ 构建（tsc + tsdown → lib/）
 #   2. 目录完整性（对照 V2 结构 src/ + scripts/ + docs）
 #   3. 契约静态核对（03-protocol 字段 / 04-milestones 存在等关键字）
-#   4. host 逻辑回归：scripts/verify-host.js（import lib/types，47 断言）
+#   4. host 逻辑回归：scripts/verify-host.js（import lib/types，~140 断言，2026-08-23 适配 TRAIN_PATTERNS）
 #   5. client 逻辑回归：node scripts/mock-test.js（import lib/types/client，HTTP 数据面）
+#   5b. M1 告警通知单元验证：node scripts/verify-m1.js（resolveAction 全格 + metricOf 指标提取，19 断言）
 #   6. 真实采样（可选，-g 关闭）：scripts/verify-sampler.js（GPU/interop 实测）
 #   7. P1/P2 端到端实证（可选，--e2e 开启，真实 python 进程 ~2.5min）：scripts/e2e-host.js
 # 退出：任一失败 → 非 0
@@ -52,6 +53,9 @@ if timeout 60 node scripts/verify-host.js >/dev/null 2>&1; then ok "verify-host 
 
 echo "== [5] client 逻辑回归（mock-test.js，HTTP 数据面） =="
 if timeout 60 node scripts/mock-test.js >/dev/null 2>&1; then ok "mock-test ALL PASS"; else bad "mock-test 失败"; fi
+
+echo "== [5b] M1 告警通知单元验证（verify-m1.js，resolveAction 全格 + metricOf） =="
+if timeout 30 node scripts/verify-m1.js >/dev/null 2>&1; then ok "verify-m1 ALL PASS"; else bad "verify-m1 失败"; fi
 
 if [ "$RUN_SAMPLER" -eq 1 ]; then
   echo "== [6] 真实采样实证（verify-sampler.js，GPU/interop 实测） =="

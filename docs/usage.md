@@ -31,15 +31,16 @@ Agent 侧可通过三个工具按需查询与操控。
 - 无参数：返回平衡引擎当前建议 `{ advice: [...] }`（分级 + 置信度 + 可执行动作）。
 - 无告警时 `advice` 为空数组；建议按规则分组（oom / io-bottleneck / thermal / imbalance / other-occupancy / experiment-crash）。
 
-### 1.3 `lab_ctl`（action 枚举 7 项）
+### 1.3 `lab_ctl`（action 枚举 8 项）
 
 | action | 参数 | 说明 |
 |---|---|---|
 | `set-threshold` | `thresholds: { utilWarn?, memWarn?, tempWarn?, pollMs? }` | 即时生效并持久化到 settings（重启保留）；`pollMs` 1000–60000 驱动 UI 轮询周期 |
 | `pause` / `resume` / `start` | — | 暂停/恢复监控引擎（暂停时跳过采样但快照照常返回，UI 显示"监控已暂停"） |
-| `clear-alerts` | `runId?`, `rule?` | 清除告警：不带参数全清（badge 归零）；带 `rule` 只清该规则（如 `rule=experiment-crash`）；带 `runId` 只清该实验告警 |
+| `clear-alerts` | `runId?`, `rule?` | 清除告警：不带参数全清（badge 归零）；带 `rule` 只清该规则（如 `rule=experiment-crash`）；带 `runId` 只清该实验告警；**同步重置通知指纹**（同告警可重新通知，不绕过引擎 5min 防重） |
 | `watch` | `keywords: string[]` | 设置 watchlist（不传 = 清空）；命中进程在面板置顶显示；随 settings 持久化 |
 | `tag` | `tag: { op: 'add'\|'remove'\|'list', label, patterns?/pid?, kind?, color?, id? }` | 标签分组：`add` 支持正表达式规则（`patterns`）或 pid 快速打标（自动提取 cmdline 生成规则，重启后仍命中）；`remove` 按 id；`list` 列出全部 |
+| `set-notify` | `alertNotify?('off'\|'notice'\|'wake'), escalateAfterSec?, notifyThrottleMs?` | 设置告警通知策略（M1/issue#5）：档位（off=不推送仅工具可见 / notice=推送不唤醒，默认 / wake=critical 唤醒 Agent）；warn 持续秒数升 critical；聚合窗口 ms。即时生效 + 持久化 |
 
 示例：
 
@@ -49,6 +50,7 @@ lab_ctl pause
 lab_ctl clear-alerts rule=experiment-crash
 lab_ctl watch keywords=["llama-server","vllm"]
 lab_ctl tag tag={op:"add", label:"py实验", patterns:["python.*train"], kind:"experiment"}
+lab_ctl set-notify alertNotify=wake escalateAfterSec=900
 ```
 
 ## 2. 面板 UI（DSH 侧边栏 conversation.view）
@@ -75,6 +77,13 @@ lab_ctl tag tag={op:"add", label:"py实验", patterns:["python.*train"], kind:"e
 - 告警防重：同类规则 5 分钟窗口内不重复计数。
 - 告警生命周期：TTL 24h 自动过期（badge/count 同步回落）；`lab_ctl clear-alerts` 可手动全清/定向清。
 - `alertsCriticalCount` = host 预算的 CRITICAL 计数（徽标直读）。
+- **严格分级（M1/issue#5 新增）**：告警不再只有 level 一维——每条告警附带 `severity(1-5)/urgency(1-3)/trend/sustainedMs/resource/origin` 扩展字段（`lab_status`/`lab_advice` 可见，面板告警行显示 S/U/趋势/升级徽标）；`warn` 持续超 `escalateAfterSec`（默认 600s，可配）→ 通知按 critical 处理（不改 level 本身，消费端零破坏）。
+- **通知引擎（M1 新增）**：告警发生时按「有效级别 × 归属」计算通知档位，向 DSH Agent 主代理（`agents.roots()`）投递一条 user 消息（`form:'notice'`）：
+  - `alertNotify=notice`（默认）：推送但不唤醒（Agent 空闲时排队，提问时可见）；
+  - `alertNotify=wake`：critical 告警唤醒 Agent 处理；
+  - `alertNotify=off`：仅 UI/工具可见。
+  - 护栏：聚合窗口（默认 60s 同目标 ≤1 条）+ 指纹去重（同告警不重复）+ 投递预算（同告警×同目标 ≤2）；兜底：**无 agents 服务时自动降级**（仅 console 记录，工具不受影响，KV 缓存零影响——通知是历史尾部 user 消息）。
+  - 配置：`lab_ctl set-notify` / 设置页「通知策略」卡 / settings.yaml `lab-monitor` 段六键（`alertNotify/alertTargets/notifyThrottleMs/escalateAfterSec/notifyTimeoutMs/broadcast`）。
 
 ## 4. 实验跟踪语义（多轨）
 
@@ -92,7 +101,7 @@ lab_ctl tag tag={op:"add", label:"py实验", patterns:["python.*train"], kind:"e
 ## 6. 持久化与配置文件
 
 - 插件配置**一律在包外**（遵守全局 RULES §1.1）：
-  - **settings.yaml**（`$DSH_HOME/settings.yaml`，命名空间 `lab-monitor`）：`thresholds`、`watchProcs`、`tags`、`history`（实验历史，V2.6）四键持久化；
+  - **settings.yaml**（`$DSH_HOME/settings.yaml`，命名空间 `lab-monitor`）：`thresholds`、`watchProcs`、`tags`、`history`（实验历史，V2.6）+ **通知策略六键**（`alertNotify/alertTargets/notifyThrottleMs/escalateAfterSec/notifyTimeoutMs/broadcast`，M1/issue#5）持久化；
     运行时经 `lab_ctl` / 面板修改会自动写回，**无需手改**；如需手工预设，按同名键书写即可（启动时读取、运行时双向同步）。
   - 行级配置（如依次叠加的 patch）：profile 的 `cordis.patch.yml` 或 `$DSH_HOME/cordis.patch.yml` 中
     `lab-monitor` 行的 `config` 字段（见 docs/config-catalog.zh.md 对应条目）。

@@ -65,6 +65,15 @@ interface Rule {
   check(w: SamplePoint, thr: Thresholds): RuleCheckResult
   msg: string
   actions: string[]
+  // ── M1（issue#5 严格分级，docs/research/22 §1.3 rule 语义权重表）──
+  /** 严重度 1-5（静态来源） */
+  severity: 1 | 2 | 3 | 4 | 5
+  /** 紧迫性基准 1-3（trend=rising 时 +1 由 evaluate 推导） */
+  urgencyBase: 1 | 2 | 3
+  /** 资源类别 */
+  resource: 'gpu-util' | 'vram' | 'temp' | 'cpu' | 'mem' | 'io' | 'process'
+  /** 归属默认值 */
+  origin: 'self' | 'other' | 'system'
 }
 
 function fmtGiB(mib: number): string {
@@ -80,6 +89,38 @@ function groupActive(gs: SamplePoint['group']): boolean {
   if (gs.memMiB !== null && gs.memMiB >= 2048) return true
   if (gs.gpuUtilPct !== null && gs.gpuUtilPct !== undefined && gs.gpuUtilPct >= 30) return true
   return false
+}
+
+/** M1（issue#5 §1.4 trend=falling）：提取 rule 的触发指标（窗口首尾对比用）——
+ *  返回 null 表示该 rule 无单体指标（如 imbalance 多卡差、io 无单体）→ 不做回落判断（视为 steady）。
+ *  metric 值越大 = 越严重；末值 < 首值×0.9 → falling（缓解中）。 */
+export function metricOf(rule: string): (w: SamplePoint) => number | null {
+  const gpuOf = (w: SamplePoint) => (w.gpu && w.gpu.length ? w.gpu[0] : null)
+  switch (rule) {
+    case 'oom':
+    case 'other-occupancy': {
+      // 显存利用率 %（首卡）
+      return (w) => {
+        const g = gpuOf(w)
+        if (!g || !g.memTotalMiB) return null
+        return (g.memUsedMiB / g.memTotalMiB) * 100
+      }
+    }
+    case 'thermal':
+      return (w) => { const g = gpuOf(w); return g && typeof g.tempC === 'number' ? g.tempC : null }
+    case 'imbalance': {
+      // 多卡 util 差（max-min）——单体即负载不均度
+      return (w) => {
+        if (!w.gpu || w.gpu.length < 2) return null
+        const us = w.gpu.map((g) => g.utilPct)
+        return Math.max(...us) - Math.min(...us)
+      }
+    }
+    case 'io-bottleneck':
+      return (w) => { const g = gpuOf(w); return g ? g.utilPct : null }
+    default:
+      return () => null
+  }
 }
 
 /** 进程证据（告警触发时附 Top 相关进程；实验组内优先，系统其他补充）
@@ -141,6 +182,10 @@ const RULES: Rule[] = [
     },
     msg: '显存占用超阈值且利用率高，存在 OOM 风险',
     actions: ['降低 batch size', '关闭其他占用显存的进程'],
+    severity: 4,
+    urgencyBase: 2,
+    resource: 'vram',
+    origin: 'self', // oom 动态降级分支（组不活跃）时 evaluate 会改写为 'other'
   },
   {
     // C2：io-bottleneck——实验组 CPU 满载 + GPU 空闲为主判；G.cpuPct 不可得（Windows）降级整机 + 标注；无实验不触发
@@ -173,6 +218,10 @@ const RULES: Rule[] = [
     },
     msg: 'GPU 利用率低但 CPU 满载，疑似数据加载瓶颈',
     actions: ['增加 num_workers', '检查数据管线磁盘 IO'],
+    severity: 3,
+    urgencyBase: 2,
+    resource: 'io',
+    origin: 'self',
   },
   {
     // C3：thermal——整卡物理量 + G 活跃度上下文（msg 动态）
@@ -192,6 +241,10 @@ const RULES: Rule[] = [
     },
     msg: 'GPU 温度接近墙值，存在降频风险',
     actions: ['降低功耗目标', '检查散热/风扇'],
+    severity: 4,
+    urgencyBase: 2,
+    resource: 'temp',
+    origin: 'self',
   },
   {
     // imbalance：多卡间无进程边界，保持整卡（1.2 不变）
@@ -206,6 +259,10 @@ const RULES: Rule[] = [
     },
     msg: '多 GPU 负载不均',
     actions: ['调整 batch/流水线分配', '检查 DDP 数据切分'],
+    severity: 2,
+    urgencyBase: 1,
+    resource: 'gpu-util',
+    origin: 'self',
   },
   {
     // C4：other-occupancy（info）——无实验但整卡显存占用高 → 独立提示（把「他人占卡」从误报源变可解释信息）
@@ -246,6 +303,10 @@ const RULES: Rule[] = [
     },
     msg: '当前无实验但 GPU 显存被系统其他进程占用',
     actions: ['检查系统其他进程占卡'],
+    severity: 2,
+    urgencyBase: 1,
+    resource: 'vram',
+    origin: 'other',
   },
 ]
 
@@ -253,6 +314,8 @@ const MIN_HITS = Math.max(1, Math.round(10000 / SAMPLE_MS)) // 10s 阈值持续 
 const MIN_INTERVAL_MS = 5 * 60 * 1000
 /** 告警 TTL（2026-08-22：告警生命周期——超过 24h 的旧告警自动过期，不再永久堆积污染 badge/advice） */
 const ALERT_TTL_MS = 24 * 60 * 60 * 1000
+/** M1（issue#5）：trend 由持续时长映射——≥30s 视为 steady（持续），<30s 视为 rising（刚过防抖线） */
+const TREND_STEADY_MS = 30 * 1000
 
 /** 清除过滤器（2026-08-22：lab_ctl clear-alerts 支持按 runId / rule 定向清除） */
 export interface AlertClearFilter {
@@ -263,10 +326,29 @@ export interface AlertClearFilter {
 interface BalancerDeps {
   thresholds(): Thresholds
   emitLab(type: string, data: Record<string, unknown>): void
+  /** M1（issue#5 升级规则）：warn 持续超该时长 → notify 视为 critical；≤0 = 关闭 */
+  escalateAfterMs(): number
 }
 
 export interface AdviceResult {
-  advice: { level: string; rule: string; msg: string; confidence: number; actions: string[]; evidence?: { procs: ProcStat[] } }[]
+  advice: {
+    level: string
+    rule: string
+    msg: string
+    confidence: number
+    actions: string[]
+    evidence?: { procs: ProcStat[] }
+    runId?: string | null
+    // M1（issue#5）：分级扩展字段（可选，兼容旧数据）
+    severity?: 1 | 2 | 3 | 4 | 5
+    urgency?: 1 | 2 | 3
+    trend?: 'rising' | 'steady' | 'falling'
+    sustainedMs?: number
+    resource?: string
+    origin?: 'self' | 'other' | 'system'
+    notifyLevel?: 'off' | 'notice' | 'wake'
+    escalate?: boolean
+  }[]
   generatedAt: number
 }
 
@@ -277,6 +359,8 @@ export interface Balancer {
   count(): number
   pushExternal(alert: Omit<Alert, 'ts'>): Alert
   clear(filter?: AlertClearFilter): { cleared: number; remaining: number; criticalCount: number }
+  /** M1（issue#5 §1.2）：策略引擎回写告警的 notifyLevel（runId+rule 命中的最新一条；null 匹配无 runId 告警） */
+  setNotifyLevel(runId: string | null, rule: string, level: 'off' | 'notice' | 'wake'): number
 }
 
 export function createBalancer(deps: BalancerDeps): Balancer {
@@ -343,6 +427,21 @@ export function createBalancer(deps: BalancerDeps): Balancer {
     return { cleared, remaining: alerts.length, criticalCount }
   }
 
+  // M1（issue#5 §1.2）：策略引擎回写告警的 notifyLevel——按 runId（null 匹配无 runId 的告警）+ rule
+  // 命中 alerts 最新一条（倒序首租）；返回写入条数（0 = 未命中，允许调用方决定是否回退写批内第一告警）。
+  function setNotifyLevel(runId: string | null, rule: string, level: 'off' | 'notice' | 'wake'): number {
+    let written = 0
+    for (let i = 0; i < alerts.length; i++) {
+      const a = alerts[i]
+      if (a.rule !== rule) continue
+      if (a.runId !== runId) continue // runId 精确匹配；null 匹配无 runId 的告警（other-occupancy/系统级）
+      a.notifyLevel = level
+      written += 1
+      break // 只写最新一条（同 rule+runId 的多条防重后通常唯一）
+    }
+    return written
+  }
+
   function evaluate(windowSnaps: SamplePoint[], runId: string | null): Alert[] {
     if (!windowSnaps || !windowSnaps.length) return []
     const w = windowSnaps[windowSnaps.length - 1]
@@ -361,12 +460,34 @@ export function createBalancer(deps: BalancerDeps): Balancer {
         continue
       }
       hitByRule[R.rule] = (hitByRule[R.rule] || 0) + 1
-      if (hitByRule[R.rule] < MIN_HITS) continue // 阈值需持续 10s
+      // ── M1（issue#5 严格分级）：从命中累计推导持续时长与趋势 ──
+      // sustainedMs：超阈值已持续时长（2s × 命中数；含本次）。hitByRule 在发出后清零，
+      // 因此告警的 sustainedMs 表达「本次持续段」的长度——刚过 10s 防抖 = 短，持续很久 = 长。
+      const hitCount = hitByRule[R.rule]
+      const sustainedMs = hitCount * SAMPLE_MS
+      // trend 三态（M1 收尾 2026-08-23 落地，设计 §1.4 分级规则 3）：
+      //   rising  = 刚过防抖线（<30s 持续）且窗口内指标未明显回落 —— 更紧迫（urgency+1）
+      //   steady  = 已持续 ≥30s 或窗口内指标持平 —— 维持基准
+      //   falling = 窗口首尾该 rule 触发指标明显回落（末值 < 首值×0.9）——「缓解中，不打扰」→ effectiveLevel 降为 info
+      const wFirst = windowSnaps && windowSnaps.length ? windowSnaps[0] : w
+      const wLast = w
+      const metric = metricOf(R.rule) // 该 rule 的触发指标提取函数（窗口首/尾）
+      const mFirst = metric(wFirst)
+      const mLast = metric(wLast)
+      const falling = (typeof mFirst === 'number' && typeof mLast === 'number' && mFirst > 0 && mLast < mFirst * 0.9)
+      const trend: 'rising' | 'steady' | 'falling' = falling ? 'falling' : sustainedMs < TREND_STEADY_MS ? 'rising' : 'steady'
+      if (hitCount < MIN_HITS) continue // 阈值需持续 10s
       const now = Date.now()
       if (lastByRule[R.rule] && now - lastByRule[R.rule] < MIN_INTERVAL_MS) continue // 5 分钟防重
       lastByRule[R.rule] = now
       hitByRule[R.rule] = 0
       const level = res.level || R.level
+      // ── M1 escalate：warn 持续超 escalateAfterMs → 通知视为 critical（不改 level 本身）──
+      // escalateAfterMs ≤ 0 = 关闭升级
+      const escalate = level === 'warn' && deps.escalateAfterMs() > 0 && sustainedMs >= deps.escalateAfterMs()
+      // oom 动态降级（组不活跃 → warn「疑似他人」）：res.level=warn 即表示动态降级 → origin='other'
+      const origin: 'self' | 'other' | 'system' =
+        R.origin === 'other' ? 'other' : (level === 'warn' && R.rule === 'oom' && res.level === 'warn') ? 'other' : R.origin
       const alert: Alert = {
         level,
         rule: R.rule,
@@ -376,6 +497,15 @@ export function createBalancer(deps: BalancerDeps): Balancer {
         evidence: res.evidence,
         ts: now,
         runId: runId || null,
+        // ── M1 扩展字段（severity/urgency/sustainedMs 必填；trend 两态简化）──
+        severity: R.severity,
+        urgency: Math.min(3, R.urgencyBase + (trend === 'rising' ? 1 : 0)) as 1 | 2 | 3,
+        trend,
+        sustainedMs,
+        resource: R.resource,
+        origin,
+        notifyLevel: undefined, // 策略引擎（index.ts notifyAlerts）回填
+        escalate: escalate || undefined,
       }
       alerts.unshift(alert)
       if (alert.level === 'critical') criticalCount += 1
@@ -387,6 +517,14 @@ export function createBalancer(deps: BalancerDeps): Balancer {
         confidence: alert.confidence,
         actions: alert.actions,
         evidence: alert.evidence,
+        // M1（issue#5）：扩展字段随事件载荷透传（策略引擎与外部监听可用）
+        severity: alert.severity,
+        urgency: alert.urgency,
+        trend: alert.trend,
+        sustainedMs: alert.sustainedMs,
+        resource: alert.resource,
+        origin: alert.origin,
+        escalate: alert.escalate,
       })
       out.push(alert)
     }
@@ -400,6 +538,9 @@ export function createBalancer(deps: BalancerDeps): Balancer {
 
   // 非规则告警入口（如实验 crashed）：写入告警流并计 critical
   function pushExternal(alert: Omit<Alert, 'ts'>): Alert {
+    // M1（issue#5）：传入的扩展字段透传；缺失时用 external/crash 默认元数据
+    // （crash：severity 5 / urgency 3 / resource process / origin self / trend steady）
+    const isCrash = alert.rule === 'experiment-crash' || (alert.msg || '').indexOf('意外退出') !== -1
     const a: Alert = {
       level: alert.level || 'warn',
       rule: alert.rule || 'external',
@@ -409,6 +550,14 @@ export function createBalancer(deps: BalancerDeps): Balancer {
       evidence: alert.evidence,
       ts: Date.now(),
       runId: alert.runId || null,
+      severity: alert.severity ?? (isCrash ? 5 : 3),
+      urgency: alert.urgency ?? (isCrash ? 3 : 2),
+      trend: alert.trend ?? 'steady',
+      sustainedMs: alert.sustainedMs ?? 0,
+      resource: alert.resource ?? 'process',
+      origin: alert.origin ?? 'self',
+      notifyLevel: alert.notifyLevel,
+      escalate: alert.escalate,
     }
     alerts.unshift(a)
     if (a.level === 'critical') criticalCount += 1
@@ -426,6 +575,16 @@ export function createBalancer(deps: BalancerDeps): Balancer {
         confidence: a.confidence,
         actions: a.actions,
         evidence: a.evidence,
+        runId: a.runId,
+        // M1（issue#5）：扩展字段透传（lab_advice 工具可见分级信息）
+        severity: a.severity,
+        urgency: a.urgency,
+        trend: a.trend,
+        sustainedMs: a.sustainedMs,
+        resource: a.resource,
+        origin: a.origin,
+        notifyLevel: a.notifyLevel,
+        escalate: a.escalate,
       })),
       generatedAt: Date.now(),
     }
@@ -441,5 +600,6 @@ export function createBalancer(deps: BalancerDeps): Balancer {
     },
     pushExternal,
     clear,
+    setNotifyLevel,
   }
 }

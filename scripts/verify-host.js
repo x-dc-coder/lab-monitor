@@ -484,23 +484,24 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   snap = await G('snapshot')({})
   assert(snap.experiment === null, 'C2 场景实验清理完毕', snap.experiment)
 
-  console.log('\n[B3b] 相似命令指纹分离（2026-08-20 多轨修复：pyc: 截断 28→48 防指纹相同）')
-  // python -c 内联形态：sleep(30) vs sleep(35)——v1 的 28 字符截断使两指纹相同 → 都关联第一进程
-  await pre({ name: 'bash', arguments: { command: 'python3 -c "import time; time.sleep(30)" && echo "RUN-A"' } }, async () => ({ kind: 'allow' }))
-  await pre({ name: 'bash', arguments: { command: 'python3 -c "import time; time.sleep(35)" && echo "RUN-B"' } }, async () => ({ kind: 'allow' }))
+  console.log('\n[B3b] 相似命令指纹分离（2026-08-20 多轨修复：pyc: 截断 28→48 防指纹相同；2026-08-23 适配 TRAIN_PATTERNS 精度修复）')
+  // python -c 内联形态：x=30 vs x=35（含训练特征 backward( 使命中 TRAIN_PATTERNS python -c 正则）——
+  // 两命令在 48 字符截断内仅有 30 vs 35 差异 → v1 的 28 字符截断会使指纹相同 → 都关联第一进程
+  await pre({ name: 'bash', arguments: { command: 'python3 -c "import torch;loss.backward();train_epoch=30" && echo "RUN-A"' } }, async () => ({ kind: 'allow' }))
+  await pre({ name: 'bash', arguments: { command: 'python3 -c "import torch;loss.backward();train_epoch=35" && echo "RUN-B"' } }, async () => ({ kind: 'allow' }))
   FAKE.psLines = [
-    '53299 1 0.0 3000 bash -c python3 -c "import time; time.sleep(30)" && echo "RUN-A"',
-    '53300 53299 0.0 8000 python3 -c import time; time.sleep(30)',
-    '53301 1 0.0 3000 bash -c python3 -c "import time; time.sleep(35)" && echo "RUN-B"',
-    '53302 53301 0.0 8000 python3 -c import time; time.sleep(35)',
+    '53299 1 0.0 3000 bash -c python3 -c "import torch;loss.backward();train_epoch=30" && echo "RUN-A"',
+    '53300 53299 0.0 8000 python3 -c import torch;loss.backward();train_epoch=30',
+    '53301 1 0.0 3000 bash -c python3 -c "import torch;loss.backward();train_epoch=35" && echo "RUN-B"',
+    '53302 53301 0.0 8000 python3 -c import torch;loss.backward();train_epoch=35',
     '8888 1 0.5 300000 node server.js',
   ]
   await tick(3)
   snap = await G('snapshot')({})
   assert(Array.isArray(snap.experiments) && snap.experiments.length === 2, '相似命令双实验并行', snap.experiments && snap.experiments.length)
-  const eA = snap.experiments.find((e) => e.cmd && e.cmd.indexOf('sleep(30)') !== -1)
-  const eB = snap.experiments.find((e) => e.cmd && e.cmd.indexOf('sleep(35)') !== -1)
-  assert(eA && eB && eA.pid !== eB.pid, '相似命令 pid 分离（sleep(30)≠sleep(35)）', (eA && eA.pid) + ' vs ' + (eB && eB.pid))
+  const eA = snap.experiments.find((e) => e.cmd && e.cmd.indexOf('train_epoch=30') !== -1)
+  const eB = snap.experiments.find((e) => e.cmd && e.cmd.indexOf('train_epoch=35') !== -1)
+  assert(eA && eB && eA.pid !== eB.pid, '相似命令 pid 分离（train_epoch=30≠train_epoch=35）', (eA && eA.pid) + ' vs ' + (eB && eB.pid))
   assert(eA && Array.isArray(eA.procGroup) && eA.procGroup.indexOf(53299) !== -1 && eA.procGroup.indexOf(53301) === -1,
     'run-A procGroup 只含自身进程（不含 B 的 53301）', eA && eA.procGroup)
   assert(eB && Array.isArray(eB.procGroup) && eB.procGroup.indexOf(53301) !== -1 && eB.procGroup.indexOf(53299) === -1,

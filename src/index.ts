@@ -58,6 +58,26 @@ export interface LabMonitorConfig {
    * 来源：settings.yaml（lab-monitor 段）静态基线 + lab_ctl tag 运行时动态合并。
    */
   tags: TagRule[]
+  // ── M1（issue#5 告警通知，docs/research/22 §6）：──
+  /**
+   * 告警通知通道 fallback（off|notice|wake）：仅无实验上下文/unknown 类型时作为兜底档位；
+   * 实际档位由策略引擎按「有效级别 × 实验状态 × 归属」计算（M1 实现 unknown/无实验上下文部分）。
+   * 默认 notice（不主动唤醒，KV 缓存友好）。
+   */
+  alertNotify: 'off' | 'notice' | 'wake'
+  /**
+   * 显式通知目标 agent 列表（空 = 自动选择：M1 阶段 = roots() 主代理）。
+   * M3 起支持按 runId → 发起 agent 路由（exec.agent）。
+   */
+  alertTargets: string[]
+  /** 聚合窗口 ms：同目标在窗口内最多 1 条通知（最紧急的胜出）；默认 60s */
+  notifyThrottleMs: number
+  /** warn 持续该时长（秒）→ 通知升 critical（不改 level 本身）；null/0 = 关闭升级。默认 600s=10min */
+  escalateAfterSec: number
+  /** B1 证据1：wake 档投递后未领取（无 agent/inbox/claimed）的兜底等待 ms；默认 600000ms=10min；可注入（环境变量 LAB_MONITOR_NOTIFY_TIMEOUT_MS） */
+  notifyTimeoutMs: number
+  /** 是否广播 critical 实验级告警到全部 agent（默认关；M1 阶段仅对 roots() 生效） */
+  broadcast: boolean
 }
 
 /** dsh-settings 命名空间句柄（SettingsScope 子集：get/watch/update） */
@@ -235,6 +255,23 @@ function promptLine(snap: MonitorSnapshot): string {
   return '[Lab Monitor] ' + parts.join(' · ')
 }
 
+// ── M1（issue#5，docs/research/22 §2.5）：动作解析纯函数 ─────────────────────
+// 策略层只表达 notifyLevel（off/notice/wake）× 目标；具体投递动作按目标实时状态解析。
+// 全格语义（M1 单元测试覆盖）：
+//   off                → 'off'          （不推送，仅 UI/工具可见）
+//   notice × running   → 'inject'       （next-step 不唤醒）
+//   notice × idle      → 'send-nq'      （send('next-turn', false) 排队不唤醒）
+//   wake   × running   → 'steer'        （next-step 唤醒 —— 注意 steer 对 idle 会启动新回合，禁止 idle 用）
+//   wake   × idle      → 'followup'     （唤醒新回合）
+//   absent             → 'escalate-root'（不直接发；由路由决策树升根 —— M1 阶段目标缺失 = 跳过并记录）
+export type NotifyAction = 'off' | 'inject' | 'steer' | 'followup' | 'send-nq' | 'escalate-root'
+export function resolveAction(level: 'off' | 'notice' | 'wake', targetState: 'running' | 'idle' | 'absent'): NotifyAction {
+  if (level === 'off' || targetState === 'absent') return level === 'off' ? 'off' : 'escalate-root'
+  if (level === 'notice') return targetState === 'running' ? 'inject' : 'send-nq' // idle → 排队不唤醒
+  // wake
+  return targetState === 'running' ? 'steer' : 'followup'
+}
+
 // ── 插件对象 ─────────────────────────────────────────────────────────────────
 
 export const name = 'lab-monitor'
@@ -249,6 +286,19 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     pollMs: config.pollMs ?? THRESHOLD_DEFAULTS.pollMs,
     watchProcs: Array.isArray(config.watchProcs) ? config.watchProcs.slice() : [],
     tags: Array.isArray(config.tags) ? config.tags.slice() : [],
+    // M1（issue#5 告警通知）：默认保守——notice 不主动唤醒
+    alertNotify: (config.alertNotify as LabMonitorConfig['alertNotify']) ?? 'notice',
+    alertTargets: Array.isArray(config.alertTargets) ? config.alertTargets.slice() : [],
+    notifyThrottleMs: typeof config.notifyThrottleMs === 'number' && config.notifyThrottleMs > 0 ? config.notifyThrottleMs : 60000,
+    escalateAfterSec: typeof config.escalateAfterSec === 'number' && config.escalateAfterSec > 0 ? config.escalateAfterSec : 600,
+    // 可注入（e2e 用）：LAB_MONITOR_NOTIFY_TIMEOUT_MS 缩短兜底等待，避免真实 10min
+    notifyTimeoutMs:
+      (typeof process !== 'undefined' && process.env && Number(process.env.LAB_MONITOR_NOTIFY_TIMEOUT_MS) > 0
+        ? Number(process.env.LAB_MONITOR_NOTIFY_TIMEOUT_MS)
+        : typeof config.notifyTimeoutMs === 'number' && config.notifyTimeoutMs > 0
+          ? config.notifyTimeoutMs
+          : 600000),
+    broadcast: config.broadcast === true,
   }
 
   // ── 运行时 watchlist（2026-08-20：用户配置静态基线 ∪ lab_ctl watch 动态注册）──
@@ -311,6 +361,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   const balancer = createBalancer({
     thresholds: () => thresholds.get(),
     emitLab,
+    // M1（issue#5 升级规则）：warn 持续超 escalateAfterSec → 通知升 critical（≤0 关闭）
+    escalateAfterMs: () => (cfg.escalateAfterSec > 0 ? cfg.escalateAfterSec * 1000 : 0),
   })
   const machine = createStateMachine({
     ring,
@@ -325,6 +377,163 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         actions: alert.actions,
       })
     },
+  })
+
+  // ── M1（issue#5，docs/research/22 §2）：告警通知策略引擎 ─────────────────────
+  // 输入：lab/alert 事件（balancer.evaluate 规则告警 + pushExternal 外部告警，全部经 emitLab 总线）
+  // 输出：按「有效级别 × 归属 × 实验状态」计算 notifyLevel → resolveAction(目标状态) → 投递
+  // M1 范围注记（完整矩阵见设计 §2.2）：
+  //   - 类型上下文（smoke/regression/...）属 M2；M1 一律走 unknown/无实验上下文分支
+  //   - 目标选择：M1 = roots()/alertTargets（主代理）；runId→发起 agent 路由属 M3
+  // 护栏：指纹去重（升级/新 rule 例外）+ 聚合窗口 throttle（同目标窗口内 1 条）+ 投递预算 ≤2
+  const notifyFingerprints = new Set<string>() // 已通知指纹（I6：clear-alerts 时重置）
+  const notifyBudget = new Map<string, number>() // 目标 key → 已投递条数（断言 ≤2）
+  let lastNotifyAt = 0
+  // agents 服务探测（宿主无 agents → 通知静默降级，仅 console 记录；tools 仍可用）
+  const agentsSvc = ctx.get('agents' as never) as unknown as
+    | { roots(): { id: string; status: string }[]; get(id: string): unknown }
+    | undefined
+
+  /** 构造 user 消息（form:'notice'：一次性事件语义） */
+  function buildNotifyMessage(alerts: readonly { level: string; rule: string; msg: string; actions?: string[] }[]): unknown {
+    const text = alerts
+      .map((a) => `[${a.level}:${a.rule}] ${a.msg}` + (a.actions && a.actions.length ? '\n建议: ' + a.actions.join(' / ') : ''))
+      .join('\n\n')
+    return {
+      content: [{ type: 'text', text: `⚠️ [Lab Monitor 异常告警]\n${text}` }],
+      source: { kind: 'plugin', plugin: 'lab-monitor', form: 'notice', summary: `Lab Monitor: ${alerts.length} 条告警` },
+    }
+  }
+
+  /** 有效级别计算（设计 §1.4：不动 Alert.level，只影响通知档位） */
+  function effectiveLevel(a: { level: string; escalate?: boolean; trend?: string; origin?: string }): 'critical' | 'warn' | 'info' | 'off' {
+    if (a.level === 'critical') return 'critical'
+    if (a.level === 'warn') {
+      if (a.escalate === true) return 'critical' // 升级：warn 持续超阈值 → 通知按 critical
+      if (a.trend === 'falling') return 'info' // 缓解中不打扰
+      return 'warn'
+    }
+    if (a.level === 'info') {
+      if (a.origin === 'other') return 'off' // 他人占用与我无关，仅记录
+      return 'info'
+    }
+    return 'info'
+  }
+
+  /**
+   * 策略矩阵（设计 §2.2；M2 起启用——类型识别 + 子代理路由后按场景行计算）
+   * M1 简化：目标仅 roots（主代理），档位由 notifyAlerts 内批量计算（critical→notice/wake、warn→notice）。
+   * 保留此函数供 M2 实现场景行矩阵（gpu-train/smoke 等类型覆盖与子代理路径）。
+   */
+  // function policyFor(a: { level: string; origin?: string; exploreActive?: boolean; runId?: string | null }): { self: 'off' | 'notice' | 'wake'; root: 'off' | 'notice' | 'wake' } {
+  //   const eff = effectiveLevel(a)
+  //   const expActive = a.exploreActive !== false
+  //   if (eff === 'off' || eff === 'info') return { self: 'off', root: 'off' }
+  //   if (eff === 'critical') {
+  //     const self: 'off' | 'notice' | 'wake' = a.runId ? 'wake' : 'notice'
+  //     if (a.origin === 'other') return { self: 'off', root: 'notice' }
+  //     return { self: expActive ? self : 'notice', root: 'notice' }
+  //   }
+  //   if (a.origin === 'other') return { self: 'off', root: 'off' }
+  //   return { self: expActive ? 'notice' : 'notice', root: 'notice' }
+  // }
+
+  /** 投递（含目标状态解析 + 节流/指纹/预算） */
+  function notifyAlerts() {
+    try {
+      const adv = balancer.advice()
+      const batch = (adv.advice || []).slice(0, 5)
+      if (!batch.length || cfg.alertNotify === 'off') return
+      // 聚合窗口：同目标窗口内最多 1 条（最紧急的胜出——批内按 level 降序已由 advice 排序）
+      const now = Date.now()
+      if (now - lastNotifyAt < cfg.notifyThrottleMs) return
+      lastNotifyAt = now
+      // 指纹（设计 §2.3）：level:rule:msg；升级（escalate=true）或新 rule → 新指纹允许再通知
+      const fp = batch.map((a) => `${a.level}:${a.rule}:${a.msg}`).join('|')
+      const hasEscalated = batch.some((a) => a.escalate === true)
+      if (notifyFingerprints.has(fp) && !hasEscalated) return
+      // 计算根目标档位（M1 简化语义：无类型上下文/子代理路由 → roots 即主代理）：
+      //   effective critical → wake（若 alertNotify=wake）否则 notice（critical 必须让主代理知道）
+      //   effective warn     → notice（设计 §2.2：warn × unknown → fallback notice）
+      //   info/off           → off（仅 UI/工具可见）
+      //   他人占用（origin=other）→ 不打扰（设计 §2.2 行 8/10）
+      const batchEff = batch.map((a) => ({ a, eff: effectiveLevel(a) }))
+      const hasCritical = batchEff.some((x) => x.eff === 'critical' && x.a.origin !== 'other')
+      const hasWarn = batchEff.some((x) => x.eff === 'warn' && x.a.origin !== 'other')
+      const rootLevel: 'off' | 'notice' | 'wake' = hasCritical
+        ? cfg.alertNotify === 'wake' ? 'wake' : 'notice'
+        : hasWarn
+          ? 'notice'
+          : 'off'
+      // ── M1 缺口①修复：notifyLevel 写回告警视图（设计 §1.2"引擎输出写回告警视图"）──
+      // 每条告警单独定 notifyLevel（critical→wake(若配置)/notice；warn→notice；info/off→off；
+      // origin=other→off），再按 runId+rule 回写 balancer.alerts。advice 批次可能被 clear/过期，
+      // 回写失败（0 条）时静默（不影响投递主流程）。
+      for (const { a, eff } of batchEff) {
+        const alv: 'off' | 'notice' | 'wake' =
+          eff === 'critical'
+            ? cfg.alertNotify === 'wake' ? 'wake' : 'notice'
+            : eff === 'warn'
+              ? 'notice'
+              : 'off'
+        try {
+          balancer.setNotifyLevel(a.runId ?? null, a.rule, a.origin === 'other' ? 'off' : alv)
+        } catch (e) {
+          /* 回写失败不阻塞投递 */
+        }
+      }
+      const targets: { id: string; status: string }[] = []
+      if (cfg.alertTargets && cfg.alertTargets.length && agentsSvc) {
+        for (const id of cfg.alertTargets) {
+          const a = agentsSvc.get(id) as { status?: string } | undefined
+          if (a) targets.push({ id, status: a.status || 'idle' })
+        }
+      } else if (agentsSvc && typeof agentsSvc.roots === 'function') {
+        targets.push(...agentsSvc.roots().map((r) => ({ id: r.id, status: r.status })))
+      }
+      if (!targets.length && agentsSvc) {
+        console.log('[lab-monitor] 通知跳过：无可用目标 agent（agents 服务存在但 roots 为空）')
+      }
+      // 投递（budget 断言：同目标 ≤2；M1 只走主通道 1 条）
+      for (const t of targets) {
+        const action = resolveAction(rootLevel === 'off' ? 'notice' /* off 不投递但作为 fallback 保持 notice 语义 */ : rootLevel, (t.status || 'idle') as 'running' | 'idle')
+        if (action === 'off') continue
+        const key = t.id
+        const used = notifyBudget.get(key) || 0
+        if (used >= 2) {
+          console.warn('[lab-monitor] 投递预算超限（同告警×同目标 >2，实现缺陷）:', key)
+          continue
+        }
+        const agentAny = agentsSvc && (agentsSvc as unknown as Record<string, unknown>).get
+          ? (agentsSvc as unknown as { get(id: string): unknown }).get(t.id)
+          : undefined
+        const agent = agentAny as { followup?: (m: unknown) => void; steer?: (m: unknown) => void; inject?: (m: unknown) => void; send?: (m: unknown, target: string, wakeup: boolean) => void } | undefined
+        if (!agent || typeof agent.followup !== 'function') {
+          console.log('[lab-monitor] 通知目标不可用（无 followup 能力），跳过:', t.id)
+          continue
+        }
+        const msg = buildNotifyMessage(batch)
+        try {
+          if (action === 'followup') agent.followup?.(msg)
+          else if (action === 'steer') agent.steer?.(msg)
+          else if (action === 'inject') agent.inject?.(msg)
+          else if (action === 'send-nq') agent.send?.(msg, 'next-turn', false)
+          else continue
+          notifyBudget.set(key, used + 1)
+          notifyFingerprints.add(fp)
+          console.log(`[lab-monitor] 告警通知已投递 → ${t.id}（action=${action}, level=${rootLevel}, ${batch.length} 条）`)
+        } catch (e) {
+          console.error('[lab-monitor] 告警通知投递失败:', (e as Error).message)
+        }
+      }
+    } catch (e) {
+      console.error('[lab-monitor] notifyAlerts 错误:', (e as Error).message)
+    }
+  }
+
+  // 接线：所有 lab/alert 事件（规则告警 + external crash）→ 通知引擎
+  labListeners.push((ev) => {
+    if (ev.type === 'lab/alert') notifyAlerts()
   })
 
   // runner + 采样主流程
@@ -617,6 +826,19 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       // （此前 client 硬编码 5000，pollMs 死配置）
       thresholds: thresholds.get(),
       enabled,
+      // M1（issue#5）：通知策略当前生效值透出（client 设置页展示 + Agent lab_status 可见）
+      notify: {
+        alertNotify: cfg.alertNotify,
+        alertTargets: cfg.alertTargets,
+        notifyThrottleMs: cfg.notifyThrottleMs,
+        escalateAfterSec: cfg.escalateAfterSec,
+        notifyTimeoutMs: cfg.notifyTimeoutMs,
+        broadcast: cfg.broadcast,
+        // 当前是否有通知引擎在生效（agents 服务存在）
+        agentsAvailable: !!agentsSvc,
+        // 已通知指纹数（审计可见：clear-alerts 归零）
+        notifiedFingerprints: notifyFingerprints.size,
+      },
       callCount,
       ui: { betterSidebarVisible: uiVisible() },
     }
@@ -700,10 +922,17 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             endTs: Schema.any(),
             summary: Schema.any(),
           })).default([]),
+          // ── M1（issue#5 告警通知，docs/research/22 §6.1）──
+          alertNotify: Schema.union([Schema.const('off'), Schema.const('notice'), Schema.const('wake')]).default('notice'),
+          alertTargets: Schema.array(Schema.string()).default([]),
+          notifyThrottleMs: Schema.number().default(60000),
+          escalateAfterSec: Schema.number().default(600),
+          notifyTimeoutMs: Schema.number().default(600000),
+          broadcast: Schema.boolean().default(false),
         })
         settingsScope = settingsSvc.register('lab-monitor', persistSchema, { applies: 'live' })
         // 读回持久化基线（重启后 lab_ctl 改的阈值 / watch 动态注册 / 标签不再丢失）
-        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[]; history?: unknown[] } | null
+        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[]; history?: unknown[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; notifyTimeoutMs?: number; broadcast?: boolean } | null
         if (stored && stored.thresholds) thresholds.apply(stored.thresholds as never, true)
         if (stored && Array.isArray(stored.watchProcs)) {
           cfg.watchProcs = stored.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
@@ -711,6 +940,17 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         if (stored && Array.isArray(stored.tags)) {
           cfg.tags = stored.tags.filter(isValidTagRule)
         }
+        // M1（issue#5）：通知配置读回
+        if (stored && typeof stored.alertNotify === 'string' && (stored.alertNotify === 'off' || stored.alertNotify === 'notice' || stored.alertNotify === 'wake')) {
+          cfg.alertNotify = stored.alertNotify
+        }
+        if (stored && Array.isArray(stored.alertTargets)) {
+          cfg.alertTargets = stored.alertTargets.filter((k): k is string => typeof k === 'string' && k.length > 0)
+        }
+        if (stored && typeof stored.notifyThrottleMs === 'number' && stored.notifyThrottleMs > 0) cfg.notifyThrottleMs = stored.notifyThrottleMs
+        if (stored && typeof stored.escalateAfterSec === 'number') cfg.escalateAfterSec = stored.escalateAfterSec
+        if (stored && typeof stored.notifyTimeoutMs === 'number' && stored.notifyTimeoutMs > 0) cfg.notifyTimeoutMs = stored.notifyTimeoutMs
+        if (stored && typeof stored.broadcast === 'boolean') cfg.broadcast = stored.broadcast
         // 2026-08-22（P2 实验历史）：恢复已结束实验记录（settings 持久化 → 状态机 history）
         if (stored && Array.isArray(stored.history) && typeof machine.restoreEnded === 'function') {
           machine.restoreEnded(stored.history as never)
@@ -720,7 +960,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         // 外部修改（用户手改 settings.yaml / 其他配置面）实时生效
         if (typeof settingsScope.watch === 'function') {
           settingsScope.watch((next) => {
-            const v = next as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[] } | null
+            const v = next as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; broadcast?: boolean } | null
             if (v && v.thresholds) thresholds.apply(v.thresholds as never, true)
             if (v && Array.isArray(v.watchProcs)) {
               cfg.watchProcs = v.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
@@ -728,6 +968,16 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             if (v && Array.isArray(v.tags)) {
               cfg.tags = v.tags.filter(isValidTagRule)
             }
+            // M1（issue#5）：通知配置热更新
+            if (v && typeof v.alertNotify === 'string' && (v.alertNotify === 'off' || v.alertNotify === 'notice' || v.alertNotify === 'wake')) {
+              cfg.alertNotify = v.alertNotify
+            }
+            if (v && Array.isArray(v.alertTargets)) {
+              cfg.alertTargets = v.alertTargets.filter((k): k is string => typeof k === 'string' && k.length > 0)
+            }
+            if (v && typeof v.notifyThrottleMs === 'number' && v.notifyThrottleMs > 0) cfg.notifyThrottleMs = v.notifyThrottleMs
+            if (v && typeof v.escalateAfterSec === 'number') cfg.escalateAfterSec = v.escalateAfterSec
+            if (v && typeof v.broadcast === 'boolean') cfg.broadcast = v.broadcast
           })
         }
         console.log('[lab-monitor] 阈值/watchlist/标签持久化已启用（settings 命名空间 lab-monitor）')
@@ -766,6 +1016,13 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           endTs: r.endTs,
           summary: r.summary || null,
         })),
+        // M1（issue#5）：通知配置持久化
+        alertNotify: cfg.alertNotify,
+        alertTargets: cfg.alertTargets,
+        notifyThrottleMs: cfg.notifyThrottleMs,
+        escalateAfterSec: cfg.escalateAfterSec,
+        notifyTimeoutMs: cfg.notifyTimeoutMs,
+        broadcast: cfg.broadcast,
       })
       lastPersistedEndKey = endKey
     } catch (e) {
@@ -829,14 +1086,36 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     persistState() // 2026-08-20：P2 2' —— 阈值写回 settings 持久化（重启不丢失）
     return { ok: true, applied: thresholds.get() }
   }
-  function rpcControl(args?: { action?: string; runId?: string | null; rule?: string | null }) {
+  function rpcControl(args?: { action?: string; runId?: string | null; rule?: string | null; alertNotify?: string; escalateAfterSec?: number; notifyThrottleMs?: number }) {
     const action = args && args.action
     if (action === 'start') enabled = true
     else if (action === 'pause') enabled = false
     else if (action === 'resume') enabled = true
     else if (action === 'clear-alerts') {
       // 2026-08-22（P0 告警生命周期）：清除告警——无过滤=全清；支持 runId/rule 定向清除
-      return { ok: true, state: 'alerts-cleared', ...balancer.clear({ runId: args && args.runId, rule: args && args.rule }) }
+      // M1（issue#5 I6）：同步重置插件通知指纹——同指纹告警在 clear 后再次触发可重新通知；
+      // 保留 balancer 5min 防重护栏（清告警不绕过引擎级防重，只解除「插件已通知过」的钳制）
+      const cleared = balancer.clear({ runId: args && args.runId, rule: args && args.rule })
+      if (notifyFingerprints.size) {
+        notifyFingerprints.clear()
+        console.log('[lab-monitor] clear-alerts：通知指纹已重置（同告警可重新通知）')
+      }
+      return { ok: true, state: 'alerts-cleared', ...cleared }
+    } else if (action === 'set-notify') {
+      // M1（issue#5 I6 配套）：运行时调整通知策略（alertNotify 档位 / escalateAfterSec / throttle）
+      // 写回 cfg + settings 持久化（settings.yaml 热更新与 lab_ctl 双通道一致）
+      const patch = args as { alertNotify?: string; escalateAfterSec?: number; notifyThrottleMs?: number }
+      if (typeof patch.alertNotify === 'string' && (patch.alertNotify === 'off' || patch.alertNotify === 'notice' || patch.alertNotify === 'wake')) {
+        cfg.alertNotify = patch.alertNotify
+      }
+      if (typeof patch.escalateAfterSec === 'number' && patch.escalateAfterSec >= 0) {
+        cfg.escalateAfterSec = patch.escalateAfterSec
+      }
+      if (typeof patch.notifyThrottleMs === 'number' && patch.notifyThrottleMs > 0) {
+        cfg.notifyThrottleMs = patch.notifyThrottleMs
+      }
+      void persistState()
+      return { ok: true, state: 'notify-updated', config: { alertNotify: cfg.alertNotify, escalateAfterSec: cfg.escalateAfterSec, notifyThrottleMs: cfg.notifyThrottleMs } }
     } else return { ok: false, error: '未知 action: ' + action }
     return { ok: true, state: enabled ? 'running' : 'paused' }
   }
@@ -1019,7 +1298,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             name: 'lab_ctl',
             description: '控制 Lab Monitor 监控/告警引擎（start/pause/resume/set-threshold/watch/tag/clear-alerts）。护栏：只控制监控引擎，绝不触碰实验进程。',
             parameters: {
-              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch', 'tag', 'clear-alerts'], description: '操作类型' },
+              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch', 'tag', 'clear-alerts', 'set-notify'], description: '操作类型（set-notify=设置告警通知策略）' },
               keywords: {
                 type: 'array',
                 items: { type: 'string' },
@@ -1058,6 +1337,20 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                 type: 'string',
                 description: 'clear-alerts 时可选：只清除指定规则（rule）的告警，如 experiment-crash、oom、thermal',
               },
+              // M1（issue#5）：set-notify 参数（告警通知策略）
+              alertNotify: {
+                type: 'string',
+                enum: ['off', 'notice', 'wake'],
+                description: 'set-notify 时的通知档位：off=不推送（仅 UI/工具可见）；notice=推送不唤醒（默认）；wake=critical 唤醒处理',
+              },
+              escalateAfterSec: {
+                type: 'number',
+                description: 'set-notify 时可选：warn 持续该秒数 → 通知升级为 critical（0=关闭升级）',
+              },
+              notifyThrottleMs: {
+                type: 'number',
+                description: 'set-notify 时可选：同目标聚合窗口 ms（窗口内最多 1 条通知）',
+              },
             },
             output: {
               schema: { type: 'json' },
@@ -1091,6 +1384,16 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                 // 2026-08-22（P0）：返回完整清除结果（cleared/remaining/criticalCount），
                 // 而非仅 state——Agent 可见清除数量证据（回退走下方统一路径会丢字段）
                 return sanitizeJson(rpcControl({ action: 'clear-alerts', runId: a.runId ?? null, rule: a.rule ?? null })) as never
+              }
+              if (a.action === 'set-notify') {
+                // M1（issue#5）：通知策略设置（alertNotify 档位 / escalateAfterSec / throttle）
+                const na = a as unknown as { alertNotify?: string; escalateAfterSec?: number; notifyThrottleMs?: number }
+                return sanitizeJson(rpcControl({
+                  action: 'set-notify',
+                  alertNotify: typeof na.alertNotify === 'string' ? na.alertNotify : undefined,
+                  escalateAfterSec: typeof na.escalateAfterSec === 'number' ? na.escalateAfterSec : undefined,
+                  notifyThrottleMs: typeof na.notifyThrottleMs === 'number' ? na.notifyThrottleMs : undefined,
+                })) as never
               }
               return { ok: true, state: rpcControl({ action: a.action }).state } as never
             },

@@ -51,6 +51,29 @@ function extract(snap) {
   const g = (snap.gpu && snap.gpu[0]) || {};
   const exp = snap.experiment || null; // ExperimentSnapshot | null
   const alerts = Array.isArray(snap.alerts) ? snap.alerts : [];
+  // #13-1 进程级快照：全量 procs 太大（几百条），按 memMiB 取 Top N，cmd 截断
+  const PROCS_TOP = 10;
+  const CMD_MAX = 80;
+  const procsTop = (snap.procs || [])
+    .filter((p) => p && p.pid > 0)
+    .sort((a, b) => (b.memMiB ?? 0) - (a.memMiB ?? 0))
+    .slice(0, PROCS_TOP)
+    .map((p) => ({
+      pid: p.pid,
+      ppid: p.ppid ?? null,
+      cmd: typeof p.cmd === 'string' && p.cmd.length > CMD_MAX ? p.cmd.slice(0, CMD_MAX) + '…' : (p.cmd ?? ''),
+      cpuPct: p.cpuPct ?? null,
+      memMiB: p.memMiB ?? null,
+    }));
+  // #13-1 标签组聚合（体积小信息密度高：组内 GPU/CPU/内存聚合）
+  const tags = (snap.tags || []).map((t) => ({
+    label: (t.rule && t.rule.label) || t.label || '?',
+    kind: (t.rule && t.rule.kind) || 'process',
+    pids: Array.isArray(t.pids) ? t.pids : [],
+    gpuUtilPct: t.gpuUtilPct ?? null,
+    cpuPct: t.cpuPct ?? null,
+    memMiB: t.memMiB ?? null,
+  }));
   const metrics = [
     ['gpu_util_percent', g.utilPct ?? null],
     ['vram_used_mib', g.memUsedMiB ?? null],
@@ -78,6 +101,9 @@ function extract(snap) {
     alerts_warn: alerts.filter((a) => a.level === 'warn').length,
     monitor_enabled: snap.enabled === true ? 1 : 0,
     experiment: exp ? { runId: exp.runId, cmd: exp.cmd, type: exp.type, startTs: exp.startTs } : null,
+    // #13-1：进程级快照 + 标签组聚合（快照性数据，进 payload 非时序指标）
+    procs_top: procsTop,
+    tags,
   };
   return { metrics, payload };
 }

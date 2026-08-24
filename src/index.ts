@@ -1301,8 +1301,12 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         // 外部修改（用户手改 settings.yaml / 其他配置面）实时生效
         if (typeof settingsScope.watch === 'function') {
           settingsScope.watch((next) => {
-            const v = next as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; broadcast?: boolean } | null
+            const v = next as { thresholds?: Partial<Thresholds>; thresholdOverrides?: ThresholdOverrides; watchProcs?: string[]; tags?: TagRule[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; broadcast?: boolean } | null
             if (v && v.thresholds) thresholds.apply(v.thresholds as never, true)
+            // #13-3 差异化阈值：外部改 settings.yaml → 热更新 overrides（无需重启）
+            if (v && v.thresholdOverrides && typeof v.thresholdOverrides === 'object') {
+              thresholds.setOverrides(v.thresholdOverrides)
+            }
             if (v && Array.isArray(v.watchProcs)) {
               cfg.watchProcs = v.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
             }

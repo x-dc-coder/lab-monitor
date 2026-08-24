@@ -64,6 +64,8 @@ export interface RunRecord {
   endReason: string | null
   resultSeen: boolean
   fingerprint: string
+  /** M2（issue#6）：实验类型（8 类枚举；start 时识别，unknown=未命中不猜） */
+  type?: ExpType
   graceTicks: number
   alerting: boolean
   procGone?: boolean
@@ -75,7 +77,7 @@ export interface RunRecord {
   summary?: { gpuUtilMax: number | null; gpuUtilAvg: number | null; memPeak: number | null; durationSec: number; dataPartial: boolean; groupCpuMax?: number | null; groupMemPeakMiB?: number | null; otherMemPeakMiB?: number | null }
 }
 
-/** 实验状态快照（对外协议 1.2：+procGroup/+groupStats） */
+/** 实验状态快照（对外协议 1.2：+procGroup/+groupStats；M2：+type 实验类型） */
 export interface ExperimentSnapshot {
   runId: string
   state: string
@@ -89,6 +91,8 @@ export interface ExperimentSnapshot {
   startTs: number
   summary: RunRecord['summary'] | null
   endReason: string | null
+  /** M2（issue#6）：实验类型（unknown=未识别） */
+  type?: ExpType
 }
 
 /** 已结束实验记录（对外协议：experiment 历史复盘；state-machine history 摘要投影，倒序=最新在前） */
@@ -101,7 +105,15 @@ export interface EndedRunSnapshot {
   endTs: number | null
   /** 复盘中可展示的峰值摘要（GPU 峰值/均值、显存峰值、组 CPU 峰值、时长；null=无采样数据） */
   summary: RunRecord['summary'] | null
+  /** M2（issue#6）：实验类型 + 命令指纹（指纹供学习层历史时长归类；restoreEnded 补存） */
+  type?: ExpType
+  fingerprint?: string
 }
+
+/** M2（issue#6）：实验类型 8 类枚举（unknown=未识别，保守默认不猜） */
+export type ExpType = 'smoke' | 'regression' | 'full' | 'short' | 'long' | 'gpu-calc' | 'gpu-train' | 'unknown'
+/** M2（issue#6）：通知档位（策略引擎输出，design docs/research/22 §2） */
+export type NotifyLevel = 'off' | 'notice' | 'wake'
 
 /** 告警（1.2：+evidence 进程证据；M1 issue#5：+severity/urgency/trend/sustainedMs 等多维扩展字段） */
 export interface Alert {

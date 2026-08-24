@@ -1,6 +1,7 @@
 /**
  * 核心常量（指标/训练关键词/采样参数）—— 迁移自 host/index.js §1
  */
+import type { ExpType, NotifyLevel } from './types.js'
 
 /** 采集周期（核心层固定 2s；UI 轮询见 pollMs） */
 export const SAMPLE_MS = 2000
@@ -75,6 +76,42 @@ export function matchTrainFeature(cmdStr: string | null | undefined): string | n
   }
   return null
 }
+
+/**
+ * M2（issue#6，docs/research/22 §3.3）：实验类型自动层识别正则（保守，未命中不猜）。
+ * 判定顺序（classifyExpType）：smoke/regression/full 明确形态 → gpu-train（matchTrainFeature 门控）
+ * → gpu-calc（推理/渲染/仿真，非 train）→ long（serve/batch 类长驻）。gpu-train 不在本表，
+ * 由 TRAIN_PATTERNS（2026-08-23 精度修复，11/11 验证）门控，避免与 calc 关键字冲突。
+ */
+export const EXP_TYPE_PATTERNS: { type: ExpType; re: RegExp }[] = [
+  { type: 'smoke', re: /\b(smoke|冒烟|--smoke|test_smoke|smoke_test)\b/i },
+  { type: 'regression', re: /\b(regression|回归|run_regression|regress)\b/i },
+  { type: 'full', re: /\b(full|全量|run_all|--full|e2e_all)\b/i },
+  // gpu-calc：推理/渲染/仿真（脚本名形态 infer*.py / render*.py / sim*.py + 中文关键词）；
+  // 裸词 \binfer\b 匹配不到 infer_model.py（后跟 _ 是词字符，无词边界），需脚本名形态
+  { type: 'gpu-calc', re: /\b(?:infer|inference|render|sim|simulate)[\w-]*\.py\b|(?:推理|渲染)/i },
+  // long：脚本名形态（serve_*.py / batch_*.py / daemon/watch 类）——不用裸词 batch（--batch 32 参数
+  // 在训练命令中常见，会抢先于 train 门控误判，实证 deepspeed train_llm.py --batch 8 → 应为 gpu-train）
+  { type: 'long', re: /\b(?:serve|batch|daemon|watch)[\w-]*\.py\b/i },
+]
+
+/**
+ * M2（issue#6，docs/research/22 §3.4）：类型 × notifyLevel 出厂默认矩阵。
+ * 语义：类型矩阵 = 配置（experimentTypes 可覆盖），本表只是出厂建议值，不硬编码代码分支。
+ * unknown 走全局 fallback（critical→notice 起点，不给类型特权）。
+ */
+export const EXP_TYPE_DEFAULT_NOTIFY: Record<ExpType, { critical: NotifyLevel; warn: NotifyLevel }> = {
+  smoke: { critical: 'notice', warn: 'off' },
+  regression: { critical: 'notice', warn: 'off' },
+  full: { critical: 'wake', warn: 'notice' },
+  short: { critical: 'wake', warn: 'notice' },
+  long: { critical: 'wake', warn: 'notice' },
+  'gpu-calc': { critical: 'wake', warn: 'notice' },
+  'gpu-train': { critical: 'wake', warn: 'wake' },
+  unknown: { critical: 'notice', warn: 'notice' },
+}
+/** M2：学习层长任务归类阈值——同 fingerprint 历史时长 p90 ≥ 3600s → long（docs/research/22 §3.2 S5） */
+export const LONG_LEARN_SEC = 3600
 
 /**
  * 命令指纹：ps 关联 / result 配对用的特征串（T1-1/T1-2）

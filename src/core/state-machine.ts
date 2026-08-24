@@ -3,8 +3,9 @@
  * 迁移自 host/index.js §4，逻辑等价（含 v1.4.3 / v1.4.5 会话内验收实证修正）
  */
 import { CRASH_PS_GAP, DONE_GRACE_TICKS, MAX_HISTORY, MAX_PARALLEL_RUNS, RING_MAX_MS, cmdFingerprint, makeRunId, normalizeCmdForMatch } from './constants.js'
+import { classifyExpType, type ExpTypeRule } from './exp-type.js'
 import type { Ring } from './ring.js'
-import type { Alert, EndedRunSnapshot, ExperimentSnapshot, RunRecord } from './types.js'
+import type { Alert, EndedRunSnapshot, ExperimentSnapshot, ExpType, RunRecord } from './types.js'
 
 interface PsProc {
   pid: number
@@ -20,6 +21,8 @@ interface StateMachineDeps {
   ring?: Ring
   emitLab(type: string, data: Record<string, unknown>): void
   emitAlert(alert: Omit<Alert, 'ts' | 'runId'> & { runId?: string | null }, runId?: string | null): void
+  /** M2（issue#6）：实验类型识别配置（getter——start 时取最新 settings 值，避免创建时快照） */
+  expType?: () => { rules?: ExpTypeRule[]; learning?: boolean; defaultType?: ExpType }
 }
 
 export interface StateMachine {
@@ -177,6 +180,16 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       const oldest = running.reduce((a, b) => (a.startTs <= b.startTs ? a : b))
       archive(oldest, 'aborted') // 上限触发：最旧 running 归档 aborted
     }
+    // M2（issue#6）：实验类型三层识别（config→auto→learn→unknown；学习层样本 = history 同 fingerprint 时长）
+    const typeInfo = deps.expType
+      ? classifyExpType(cmdStr, {
+          ...deps.expType(),
+          history: state.history.map((r) => ({
+            fingerprint: r.fingerprint,
+            durationSec: (r.summary && typeof r.summary.durationSec === 'number') ? r.summary.durationSec : 0,
+          })),
+        })
+      : { type: 'unknown' as ExpType, layer: 'unknown' as const }
     const run: RunRecord = {
       runId: makeRunId(),
       cmd: cmdStr,
@@ -189,6 +202,7 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       endReason: null,
       resultSeen: false,
       fingerprint: cmdFingerprint(cmdStr),
+      type: typeInfo.type,
       graceTicks: 0,
       alerting: false,
       procGone: false,
@@ -198,7 +212,7 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     }
     state.runs.set(run.runId, run)
     if (deps.ring) deps.ring.expand() // R-3：running 期扩容
-    deps.emitLab('lab/experiment-start', { runId: run.runId, cmd: cmdStr, cmdFeature: feature, startTs: run.startTs })
+    deps.emitLab('lab/experiment-start', { runId: run.runId, cmd: cmdStr, cmdFeature: feature, startTs: run.startTs, type: run.type, expTypeLayer: typeInfo.layer })
     return run
   }
 
@@ -311,6 +325,7 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       startTs: run.startTs,
       summary: null,
       endReason: null,
+      type: run.type,
     }
   }
 
@@ -325,6 +340,9 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       // 2026-08-22（P1 实验历史）：archive 时已 buildSummary——摘要含 GPU 峰值/均值/
       // 显存峰值/组 CPU 峰值/时长；此处直接透出（复盘数据面，UI/Agent 可见）
       summary: run.summary || null,
+      // M2（issue#6）：类型 + 指纹透出（指纹供学习层历史归类；restoreEnded 恢复）
+      type: run.type,
+      fingerprint: run.fingerprint,
     }
   }
 
@@ -349,7 +367,9 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
         state: s.state === 'done' ? 'done' : s.state === 'aborted' ? 'aborted' : 'crashed',
         endReason: s.state || null,
         resultSeen: s.state === 'done',
-        fingerprint: '',
+        fingerprint: typeof s.fingerprint === 'string' ? s.fingerprint : '',
+        // M2（issue#6）：历史恢复保留类型（旧数据无 type → 不猜，留 unknown 语义由上层展示）
+        type: s.type,
         graceTicks: 0,
         alerting: false,
         pidMissingStreak: 0,

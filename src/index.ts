@@ -24,16 +24,19 @@ import { createRing } from './core/ring.js'
 import { createStateMachine, parsePs } from './core/state-machine.js'
 import { createBalancer, createThresholds } from './core/balancer.js'
 import { aggregateProcStats } from './core/proc-aggregator.js'
+import { EXP_TYPES_SET, type ExpTypeRule } from './core/exp-type.js'
 import type { GroupStats, ProcStat, SystemStats, TagGroup, TagRule } from './core/types.js'
 import {
   SAMPLE_MS,
   PS_INTERVAL_MS,
   THRESHOLD_DEFAULTS,
+  EXP_TYPE_DEFAULT_NOTIFY,
   makeTagId,
   matchTrainFeature,
   normalizeCmdForMatch,
 } from './core/constants.js'
 import type { Thresholds } from './core/constants.js'
+import type { ExpType } from './core/types.js'
 import type { MonitorSnapshot, SamplePoint } from './core/types.js'
 
 // ── 类型 ─────────────────────────────────────────────────────────────────────
@@ -78,6 +81,16 @@ export interface LabMonitorConfig {
   notifyTimeoutMs: number
   /** 是否广播 critical 实验级告警到全部 agent（默认关；M1 阶段仅对 roots() 生效） */
   broadcast: boolean
+  // ── M2（issue#6 实验类型识别，docs/research/22 §6.1）：──
+  /**
+   * 实验类型配置规则（pattern→type→notify 覆盖；复用 TagRule 形态）：
+   * 优先级最高的识别层（用户意图 > 自动正则 > 学习历史）。notify 覆盖出厂类型矩阵（EXP_TYPE_DEFAULT_NOTIFY）。
+   */
+  experimentTypes: ExpTypeRule[]
+  /** 兜底类型（未命中任何层时的保守默认；默认 unknown 不猜） */
+  expTypeDefault: ExpType
+  /** 是否启用学习层（按 fingerprint 历史时长归类 long；默认 true） */
+  expTypeLearning: boolean
 }
 
 /** dsh-settings 命名空间句柄（SettingsScope 子集：get/watch/update） */
@@ -299,6 +312,10 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           ? config.notifyTimeoutMs
           : 600000),
     broadcast: config.broadcast === true,
+    // M2（issue#6 实验类型识别）：默认无配置规则（纯自动层+学习层）；default unknown 不猜
+    experimentTypes: Array.isArray(config.experimentTypes) ? config.experimentTypes.slice() : [],
+    expTypeDefault: (config.expTypeDefault as ExpType | undefined) || 'unknown',
+    expTypeLearning: config.expTypeLearning !== false,
   }
 
   // ── 运行时 watchlist（2026-08-20：用户配置静态基线 ∪ lab_ctl watch 动态注册）──
@@ -377,6 +394,12 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         actions: alert.actions,
       })
     },
+    // M2（issue#6）：实验类型识别配置（getter——start 时取最新 settings，避免创建时快照）
+    expType: () => ({
+      rules: cfg.experimentTypes,
+      learning: cfg.expTypeLearning,
+      defaultType: cfg.expTypeDefault,
+    }),
   })
 
   // ── M1（issue#5，docs/research/22 §2）：告警通知策略引擎 ─────────────────────
@@ -457,27 +480,39 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       //   effective warn     → notice（设计 §2.2：warn × unknown → fallback notice）
       //   info/off           → off（仅 UI/工具可见）
       //   他人占用（origin=other）→ 不打扰（设计 §2.2 行 8/10）
+      //   M2（issue#6）：告警关联到实验（runId → run.type）→ 按类型矩阵算档位（配置覆盖 > 出厂默认 > 全局 fallback）
       const batchEff = batch.map((a) => ({ a, eff: effectiveLevel(a) }))
-      const hasCritical = batchEff.some((x) => x.eff === 'critical' && x.a.origin !== 'other')
-      const hasWarn = batchEff.some((x) => x.eff === 'warn' && x.a.origin !== 'other')
-      const rootLevel: 'off' | 'notice' | 'wake' = hasCritical
-        ? cfg.alertNotify === 'wake' ? 'wake' : 'notice'
-        : hasWarn
-          ? 'notice'
-          : 'off'
+      const runOf = (runId: string | null | undefined): { type?: ExpType } | null => {
+        if (!runId) return null
+        return machine.all().find((r) => r.runId === runId) || machine.history.find((r) => r.runId === runId) || null
+      }
+      // 类型矩阵档位（unknown/无实验 = 全局 fallback，不给类型特权；info/off 由调用方短路）
+      const typeNotifyLevel = (type: ExpType | undefined, eff: 'critical' | 'warn'): 'off' | 'notice' | 'wake' => {
+        if (!type || type === 'unknown') {
+          return eff === 'critical'
+            ? (cfg.alertNotify === 'wake' ? 'wake' : 'notice')
+            : (cfg.alertNotify === 'off' ? 'off' : 'notice')
+        }
+        const over = (cfg.experimentTypes || []).find((r) => r.type === type)?.notify
+        const base = EXP_TYPE_DEFAULT_NOTIFY[type] || EXP_TYPE_DEFAULT_NOTIFY.unknown
+        return eff === 'critical'
+          ? (over && over.critical) || base.critical
+          : (over && over.warn) || base.warn
+      }
+      const levelOf = (a: { level: string; origin?: string; runId?: string | null }, eff: 'critical' | 'warn' | 'info' | 'off'): 'off' | 'notice' | 'wake' => {
+        if (a.origin === 'other' || eff === 'off' || eff === 'info') return 'off'
+        return typeNotifyLevel(runOf(a.runId)?.type, eff)
+      }
+      const levels: ('off' | 'notice' | 'wake')[] = batchEff.map(({ a, eff }) => levelOf(a, eff))
+      const rootLevel: 'off' | 'notice' | 'wake' = levels.includes('wake') ? 'wake' : levels.includes('notice') ? 'notice' : 'off'
       // ── M1 缺口①修复：notifyLevel 写回告警视图（设计 §1.2"引擎输出写回告警视图"）──
-      // 每条告警单独定 notifyLevel（critical→wake(若配置)/notice；warn→notice；info/off→off；
-      // origin=other→off），再按 runId+rule 回写 balancer.alerts。advice 批次可能被 clear/过期，
+      // 每条告警单独定 notifyLevel（M2 起按类型矩阵；origin=other/info/off→off），
+      // 再按 runId+rule 回写 balancer.alerts。advice 批次可能被 clear/过期，
       // 回写失败（0 条）时静默（不影响投递主流程）。
-      for (const { a, eff } of batchEff) {
-        const alv: 'off' | 'notice' | 'wake' =
-          eff === 'critical'
-            ? cfg.alertNotify === 'wake' ? 'wake' : 'notice'
-            : eff === 'warn'
-              ? 'notice'
-              : 'off'
+      for (let bi = 0; bi < batchEff.length; bi++) {
+        const { a, eff } = batchEff[bi]
         try {
-          balancer.setNotifyLevel(a.runId ?? null, a.rule, a.origin === 'other' ? 'off' : alv)
+          balancer.setNotifyLevel(a.runId ?? null, a.rule, levelOf(a, eff))
         } catch (e) {
           /* 回写失败不阻塞投递 */
         }
@@ -921,6 +956,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             startTs: Schema.number(),
             endTs: Schema.any(),
             summary: Schema.any(),
+            // M2（issue#6）：类型 + 指纹（学习层历史归类数据面）
+            type: Schema.any(),
+            fingerprint: Schema.any(),
           })).default([]),
           // ── M1（issue#5 告警通知，docs/research/22 §6.1）──
           alertNotify: Schema.union([Schema.const('off'), Schema.const('notice'), Schema.const('wake')]).default('notice'),
@@ -929,10 +967,19 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           escalateAfterSec: Schema.number().default(600),
           notifyTimeoutMs: Schema.number().default(600000),
           broadcast: Schema.boolean().default(false),
+          // ── M2（issue#6 实验类型识别，docs/research/22 §6.1）──
+          experimentTypes: Schema.array(Schema.object({
+            type: Schema.string(),
+            patterns: Schema.array(Schema.string()),
+            notify: Schema.any(),
+            expectedMaxSec: Schema.any(),
+          })).default([]),
+          expTypeDefault: Schema.string().default('unknown'),
+          expTypeLearning: Schema.boolean().default(true),
         })
         settingsScope = settingsSvc.register('lab-monitor', persistSchema, { applies: 'live' })
         // 读回持久化基线（重启后 lab_ctl 改的阈值 / watch 动态注册 / 标签不再丢失）
-        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[]; history?: unknown[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; notifyTimeoutMs?: number; broadcast?: boolean } | null
+        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[]; history?: unknown[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; notifyTimeoutMs?: number; broadcast?: boolean; experimentTypes?: unknown[]; expTypeDefault?: string; expTypeLearning?: boolean } | null
         if (stored && stored.thresholds) thresholds.apply(stored.thresholds as never, true)
         if (stored && Array.isArray(stored.watchProcs)) {
           cfg.watchProcs = stored.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
@@ -951,6 +998,15 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         if (stored && typeof stored.escalateAfterSec === 'number') cfg.escalateAfterSec = stored.escalateAfterSec
         if (stored && typeof stored.notifyTimeoutMs === 'number' && stored.notifyTimeoutMs > 0) cfg.notifyTimeoutMs = stored.notifyTimeoutMs
         if (stored && typeof stored.broadcast === 'boolean') cfg.broadcast = stored.broadcast
+        // M2（issue#6）：实验类型配置读回（rules/default/learning）
+        if (stored && Array.isArray(stored.experimentTypes)) {
+          cfg.experimentTypes = (stored.experimentTypes as unknown[]).filter((r): r is ExpTypeRule => {
+            const rr = r as ExpTypeRule
+            return !!rr && typeof rr.type === 'string' && Array.isArray(rr.patterns)
+          })
+        }
+        if (stored && typeof stored.expTypeDefault === 'string' && EXP_TYPES_SET.has(stored.expTypeDefault as ExpType)) cfg.expTypeDefault = stored.expTypeDefault as ExpType
+        if (stored && typeof stored.expTypeLearning === 'boolean') cfg.expTypeLearning = stored.expTypeLearning
         // 2026-08-22（P2 实验历史）：恢复已结束实验记录（settings 持久化 → 状态机 history）
         if (stored && Array.isArray(stored.history) && typeof machine.restoreEnded === 'function') {
           machine.restoreEnded(stored.history as never)
@@ -1015,6 +1071,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           startTs: r.startTs,
           endTs: r.endTs,
           summary: r.summary || null,
+          // M2（issue#6）：类型 + 指纹持久化（重启 restoreEnded 恢复，供学习层历史归类）
+          type: r.type,
+          fingerprint: r.fingerprint,
         })),
         // M1（issue#5）：通知配置持久化
         alertNotify: cfg.alertNotify,
@@ -1023,6 +1082,10 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         escalateAfterSec: cfg.escalateAfterSec,
         notifyTimeoutMs: cfg.notifyTimeoutMs,
         broadcast: cfg.broadcast,
+        // M2（issue#6）：实验类型配置持久化（规则/默认/学习开关）
+        experimentTypes: cfg.experimentTypes,
+        expTypeDefault: cfg.expTypeDefault,
+        expTypeLearning: cfg.expTypeLearning,
       })
       lastPersistedEndKey = endKey
     } catch (e) {

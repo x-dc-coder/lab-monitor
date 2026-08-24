@@ -111,6 +111,8 @@ interface EndedView {
   cmdFeature: string | null
   startTs: number
   endTs: number | null
+  /** M2（issue#6）：实验类型（unknown=未识别；展示徽标） */
+  type?: string
   summary?: {
     gpuUtilMax: number | null
     gpuUtilAvg: number | null
@@ -373,12 +375,13 @@ function EndedBlock(props: { ended: EndedView[]; onDetail: (d: DetailData) => vo
       title: '点击查看完整命令',
       style: { display: 'flex', flexDirection: 'column', gap: 4, padding: '6px 8px', background: C.layer1, border: '1px solid ' + C.border, borderRadius: 8, cursor: 'pointer' },
     },
-      // 标题行：状态点 + runId + 状态徽标 + 时长
+      // 标题行：状态点 + runId + 状态徽标 + 类型徽标（M2）+ 时长
       React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 11 } },
         React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: color, flexShrink: 0 } }),
         React.createElement('span', { style: { fontWeight: 600, fontSize: 11 } }, e.runId),
         React.createElement('span', { style: { fontSize: 10, padding: '0 4px', borderRadius: 3, border: '1px solid ' + color, color: color } },
           e.state === 'done' ? '完成' : e.state === 'crashed' ? '崩溃' : '中止'),
+        expTypeBadge(e.type),
         React.createElement('span', { style: { color: C.label2 } }, dur),
       ),
       // 指标栅格：2 列自适应（auto-fit），每字段「标签/值」上下排
@@ -940,6 +943,20 @@ const PROC_FAMILIES: Record<string, string> = {
 const familyOf = (cmd: string): string => {
   const k = (cmd || '').trim().toLowerCase()
   return PROC_FAMILIES[k] || (cmd || '').trim()
+}
+
+/** M2（issue#6）：实验类型中文标签（与 host exp-type.ts EXP_TYPE_LABELS 对齐；client 独立 bundle 自带） */
+const EXP_TYPE_LABEL: Record<string, string> = {
+  smoke: '冒烟', regression: '回归', full: '全量', short: '短任务',
+  long: '长任务', 'gpu-calc': 'GPU计算', 'gpu-train': 'GPU训练', unknown: '未知',
+}
+/** 实验类型徽标（未知类型不显示，避免噪声） */
+const expTypeBadge = (type: string | undefined | null): React.ReactElement | null => {
+  if (!type || type === 'unknown') return null
+  return React.createElement('span', {
+    key: 'type',
+    style: { fontSize: 10, padding: '0 5px', borderRadius: 3, border: '1px solid ' + C.border, color: C.label2, background: C.layer1 },
+  }, EXP_TYPE_LABEL[type] || type)
 }
 
 /** GPU 利用率取值：优先 gpuUtilPct（backend 填充），回退 v1.1 遗留 gpu 字段 */

@@ -1,7 +1,7 @@
 # Lab Monitor 使用文档（A1）
 
 > 落地：2026-08-22（P1 批次，A1「使用文档」承诺兑现）。消费对象：DSH 会话中的 Agent 与端用户。
-> 事实源：`src/index.ts` 工具注册 + `docs/03-protocol.md`（契约 1.4）。与命令签名不一致时以实测为准。
+> 事实源：`src/index.ts` 工具注册 + `docs/reference/protocol.md`（契约 1.4）。与命令签名不一致时以实测为准。
 
 ## 0. 一句话定位
 
@@ -131,7 +131,7 @@ lab_ctl history-manage op=clear keep=5
 
 - `POST /lab-monitor/api/snapshot|history|setThresholds|control|advice|tag|watch|historyManage`（webServer 注册时；
   `watch`/`historyManage` 为 V2.7/#10 新增路由）。
-- 与 `lab_status`/`lab_ctl` 同一数据源、同一契约（docs/03-protocol.md 1.4）；`control` 与 `setThresholds` 与工具通道一致生效并持久化。
+- 与 `lab_status`/`lab_ctl` 同一数据源、同一契约（docs/reference/protocol.md 1.4）；`control` 与 `setThresholds` 与工具通道一致生效并持久化。
 - ⚠️ 该 HTTP 面**无鉴权**——**V2.6 实测**：Tailscale IP（100.64.0.2:13080）访问 `/lab-monitor/api/*` 超时不可达（`--trusted-host` 未暴露该端口），**当前暴露面 = localhost only**；若未来配置端口转发/SSE 开放，需先加鉴权（防御性 backlog）。
 
 ## 8. 变更记录

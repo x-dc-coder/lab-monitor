@@ -4,7 +4,7 @@
 
 > 执行人：researcher（t14）｜日期：2026-08-18
 > 交付：`plugin/client/index.js`（MVP 单文件 = code.client 函数体，已归档 `docs/archive/v1.4.5-plugin/client/`）+ `scripts/mock-test.js`（零依赖 mock 测试，原 plugin/client/）
-> 契约：lab-protocol/1.1（docs/03-protocol.md §2.1）；计划 v1.4.1 §3.2（t3 计划 output-t3-plan.md）
+> 契约：lab-protocol/1.1（docs/reference/protocol.md §2.1）；计划 v1.4.1 §3.2（t3 计划 output-t3-plan.md）
 
 ## 1. 实现要点
 

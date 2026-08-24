@@ -1,6 +1,6 @@
 # Lab Monitor（科研实验监控助手）
 
-> 依据：实施计划 v1.4.5（`docs/PLAN-v1.4.5.md`，唯一事实来源；本文档及 docs/01~05 与其完全一致，修订需同步计划）
+> 依据：实施计划 v1.4.5（`docs/plan/PLAN-v1.4.5.md`，唯一事实来源；本文档及 docs/01~05 与其完全一致，修订需同步计划）
 
 ## 一句话定位
 
@@ -42,7 +42,7 @@
 └───────────────────────────────────────────────────────────────────────────┘   └──────┘  └──────┘
 ```
 
-（计划 §2 原图；详见 `docs/01-architecture.md`）
+（计划 §2 原图；详见 `docs/architecture/core.md`）
 
 ## 目录结构
 
@@ -51,7 +51,7 @@
 ├── README.md                        # 本文件：总览、架构图、快速开始
 ├── agent-preset/                    # v2「实验指挥」Agent 预设（★v2 启用，MVP 不实现——T3-3）
 │   └── lab-commander/               #   ✅ 2026-08-22：**不做预设**（用户决策），改为「使用文档」形式
-│                                   #     （`docs/usage.md`：lab_status/lab_advice/lab_ctl 用法手册；
+│                                   #     （`docs/usage/usage.md`：lab_status/lab_advice/lab_ctl 用法手册；
 │                                   #      面板 UI / 阈值 / 标签 / 多轨语义；prompt 注入增强待讨论）
 │       ├── persona.md / RULES.md / tools.md
 ├── scripts/
@@ -61,16 +61,20 @@
 │   ├── e2e-host.js                  # P1/P2 端到端实证：真实 python 进程 + 真实 ps/kill 驱动状态机（T1-T5）
 │   └── mock-test.js                 # client 半 mock 回归（verify.sh [5]，import lib/types/client）
 ├── docs/
-│   ├── PLAN-v1.1.md / PLAN-v1.3.md / PLAN-v1.4.5.md  # 实施计划归档（v1.4.5 为当前事实来源）
-│   ├── 01-architecture.md           # 架构基线（核心/出口分层）
-│   ├── 02-data-model.md             # 指标枚举 / ring buffer / 状态机 / 告警分级 / 阈值事实来源
-│   ├── 03-protocol.md               # host.call RPC 契约（JSON schema 版本化）
-│   ├── 04-milestones.md             # P0/P1/P2 验收清单（可勾选）
-│   ├── 05-ui-adapters.md            # UI 出口层契约：注册策略/优先级/互斥规则/降级矩阵
-│   ├── archive/v1.4.5-plugin/       # ★ v1.4.5 旧资产归档（plugin/ 动态版 + dev-run.sh + define.json，2026-08-20）
-│   └── research/                    # 调研归档（00-t8 基线 / 01 外部 / 02 内部资产 / 03 sidebar 契约 /
-│                                    #   04 评审 / 05 0.13.0 契约 / 06 复审 / 07 webServer 预审）
-└── .gitignore
+│   ├── README.md                    # 文档索引（导航中心：architecture/reference/usage/plan/research）
+│   ├── architecture/                # 架构设计（怎么造的）
+│   │   ├── core.md                  # 核心引擎架构（原 01-architecture：采样/状态机/平衡引擎/UI 出口/V2/M1-M3）
+│   │   ├── alert-notify.md          # 告警通知架构（原 research/25：分级/引擎/路由/权限/消息链）
+│   │   └── ui-adapters.md           # UI 出口契约（注册策略/优先级/互斥规则/降级矩阵）
+│   ├── reference/                   # 参考说明（协议/数据/里程碑）
+│   │   ├── data-model.md            # 数据模型（指标枚举/ring buffer/状态机/告警分级/阈值事实来源）
+│   │   ├── protocol.md              # RPC/工具/事件契约（lab-protocol 版本化）
+│   │   └── milestones.md            # P0/P1/P2 验收清单
+│   ├── usage/usage.md               # 使用手册（人读：工具/面板/配置/变更记录）
+│   ├── plan/                        # 历史实施计划（PLAN-v1.1/1.3/1.4.5 归档）
+│   ├── research/                    # 调研与设计（00-24/26/27：决策依据、issue 设计/审查）
+│   ├── archive/v1.4.5-plugin/       # ★ v1.4.5 旧资产归档（plugin/ 动态版 + dev-run.sh + define.json）
+└── AGENTS.md                        # ★ Agent 操作指引（lab-monitor 目录内会话自动加载：工具契约/实验识别/验证）
 ```
 
 ## MVP → v2 演进
@@ -87,20 +91,25 @@
 
 ## 依赖声明事实来源（T3-2）
 
-**MVP 以源码内对象 `inject` 为事实来源，`package.json` 仅 v2 启用**。MVP 阶段插件依赖声明写在 client/host 源码返回对象上（client 半只 `inject: ['timer']`，betterSidebar 一律 `ctx.get()` 判空可选消费——见 `docs/01-architecture.md` 依赖声明纪律）。
+**MVP 以源码内对象 `inject` 为事实来源，`package.json` 仅 v2 启用**。MVP 阶段插件依赖声明写在 client/host 源码返回对象上（client 半只 `inject: ['timer']`，betterSidebar 一律 `ctx.get()` 判空可选消费——见 `docs/architecture/core.md` 依赖声明纪律）。
 
 ## 文档索引
 
-| 文档 | 内容 | 对应计划章节 |
+> 完整导航见 **`docs/README.md`**（分类索引 + 每文档说明 + Agent 查阅指引）。项目内 Agent 自动加载 `AGENTS.md`。
+
+| 分类 | 文档 | 内容 |
 |---|---|---|
-| `docs/01-architecture.md` | 核心引擎层 7 模块 + 出口适配层四出口 + 解耦契约 + 依赖声明纪律 | §2 / §3.1 / §3.2 |
-| `docs/02-data-model.md` | 数据模型 + 状态机转移表 + 单实验跟踪 + ring buffer + 阈值事实来源 | §3.1 / T1-1 / T1-2 / R-2 / R-3 / V2 |
-| `docs/03-protocol.md` | RPC 契约 + 工具契约 + 事件信封（**冻结版，D-A/D-B1 共同契约**） | §3.1 rpc/tools / M3 |
-| `docs/04-milestones.md` | P0/P1/P2 验收清单（勾选制） | §4 / §5.5 |
-| `docs/05-ui-adapters.md` | 出口注册策略 / 优先级 / 互斥规则 / 能力降级矩阵 | §3.2 / §6 风险 1/13/15 |
-| `docs/usage.md` | **使用文档（A1，2026-08-22）**：lab_status/lab_advice/lab_ctl 用法手册 + 面板 UI + 阈值/标签/多轨语义 + 持久化说明 | A1 |
-| `docs/research/` | 调研与评审归档（07 篇） | t1~t8 各轮输出 |
-| `docs/research/18-known-issues.md` | **已知问题跟踪**（2026-08-20：趋势可见性/表格折叠/告警展示/刷新同步） | 后续迭代 |
+| 📐 架构 | `docs/architecture/core.md` | 核心引擎 7 模块 + UI 出口四出口 + V2 + M1/M2/M3 架构（§12） |
+| 📐 架构 | `docs/architecture/alert-notify.md` | 告警通知架构（分级/引擎/类型矩阵/路由/权限/消息链） |
+| 📐 架构 | `docs/architecture/ui-adapters.md` | 出口注册策略 / 优先级 / 互斥规则 / 能力降级矩阵 |
+| 📖 参考 | `docs/reference/data-model.md` | 数据模型 + 状态机转移表 + RunRecord/Alert 字段 |
+| 📖 参考 | `docs/reference/protocol.md` | RPC/工具/事件契约（冻结版） |
+| 📖 参考 | `docs/reference/milestones.md` | P0/P1/P2 验收清单 |
+| 📗 使用 | `docs/usage/usage.md` | **使用手册**：工具用法 + 面板 UI + 配置 + 变更记录（V2.4-V2.9） |
+| 📗 使用 | `AGENTS.md` | **Agent 操作指引**（工具契约/实验识别/验证清单，自动加载） |
+| 🔬 设计调研 | `docs/research/` | 00-24/26/27（决策依据；关键：22-issue5-alert-notify-design.md） |
+| 📦 历史计划 | `docs/plan/` | PLAN-v1.1/1.3/1.4.5 归档 |
+| ⚠️ 已知问题 | `docs/research/18-known-issues.md` | 已知问题跟踪 |
 
 ## 快速开始（MVP 阶段，已归档）
 
@@ -295,14 +304,14 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
      `thresholds.pollMs`（1000–60000 钳制）驱动，`lab_ctl set-threshold pollMs=3000` 或面板改值即实时生效，
      无需改配置重启（此前 pollMs 是无处可配的死字段，排查发现）；
    - 顺带清理：`promptInjection`/`sampleMs` 确认在插件形态下不可配（无 config 槽位），维持现状记录在案。
-3. **使用文档（A1）**：`docs/usage.md`——lab_status/lab_advice/lab_ctl 三工具完整用法手册（含 schema 实测）、
+3. **使用文档（A1）**：`docs/usage/usage.md`——lab_status/lab_advice/lab_ctl 三工具完整用法手册（含 schema 实测）、
    面板 UI 指引、阈值与告警语义表、多轨跟踪语义、watchlist/标签、settings.yaml 持久化说明、HTTP 数据面与
    鉴权警示、变更记录。
 4. **测试配套**：verify-host 新增 P1 断言段（ended[] 初始空/协议完整性/done/crashed/runId 精确匹配/
    aborted 归档/thresholds 透出 memWarn=80/pollMs=3000/enabled pause↔resume，13 断言）+ **修复 cap 场景测试盲区**
    （此前 FAKE.psLines 每循环覆盖导致 crash 抢先，上限 aborted 分支从未被覆盖——累积 pid 后真正触发）；
    mock-test 新增 5 条 P1 渲染断言（实验历史折叠头/轮询周期/启停状态/清除告警计数/保存按钮）；
-   `docs/03-protocol.md` 升级 1.4（ended/thresholds/enabled 三字段契约）。
+   `docs/reference/protocol.md` 升级 1.4（ended/thresholds/enabled 三字段契约）。
 
 > 注意：本段 **host 半改动（协议字段/状态机归档）需 DSH 重启生效**；client 半（实验历史块/控制面板/pollMs 驱动）浏览器刷新即生效。
 
@@ -395,7 +404,7 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 
 | # | 未完成项 | 文档依据 | 现状 |
 |---|---|---|---|
-| A1 | ~~指挥层 Agent 预设 lab-commander~~ → **使用文档**（lab_status/lab_advice/lab_ctl 用法手册） | PLAN §0 三层组合第 2 层、§1 目录树 | ✅ **2026-08-22 落地（V2.5）**：`docs/usage.md`——工具用法手册 + 面板 UI + 阈值/标签/多轨语义 + 持久化说明；用户决策不做 Agent 预设（插件功能未完善时预设无收益）；prompt 注入增强待讨论（KV 缓存影响） |
+| A1 | ~~指挥层 Agent 预设 lab-commander~~ → **使用文档**（lab_status/lab_advice/lab_ctl 用法手册） | PLAN §0 三层组合第 2 层、§1 目录树 | ✅ **2026-08-22 落地（V2.5）**：`docs/usage/usage.md`——工具用法手册 + 面板 UI + 阈值/标签/多轨语义 + 持久化说明；用户决策不做 Agent 预设（插件功能未完善时预设无收益）；prompt 注入增强待讨论（KV 缓存影响） |
 | A1.5 | **告警通知闭环（issue #5 方案 M1→M3）** | docs/research/22-issue5-alert-notify-design.md（设计）+ 23 评审 + 25 架构 | ✅ **M1（2026-08-23，V2.7→V2.8）**：告警严格分级（Alert 8 扩展字段 severity/urgency/trend/sustainedMs/resource/origin/notifyLevel/escalate + rule 权重表 + warn 升级）+ 通知策略引擎（effectiveLevel→档位→resolveAction 全格→投递；节流/指纹去重/预算守卫/clear 重置）+ 配置面（settings 六键 + lab_ctl set-notify + 设置页 NotifyCard）+ TRAIN_PATTERNS 精度修复。**M2（#6）+ M3（#7）（2026-08-24，V2.8→V2.9）**：实验类型三层识别（配置>自动>学习>unknown 不猜）+ 类型×通知矩阵接线（gpu-train warn→wake 等）+ 子代理路由（发起者优先/根祖先知情/absent 升根）+ 权限（subagentPolicy + guard 拒 lab_ctl + lab_status_ro）+ 消息链兜底（异常结算/未领取超时升根）。**issue #5 全链路闭环**（剩余「prompt 注入形式」与 KV 缓存冲突，维持工具按需查询——17-kv-cache 决策） |
 | A2 | **多实验并行跟踪**（R-2「多轨并存留 v2」） | 风险 11 | ✅ **2026-08-20 实施完成（V2.3）**：多轨（上限 4 + per-run 判定 + runId 归属）+ 标签分组（规则式打标 + lab_ctl tag + tags 聚合 + UI 分组展示）；verify-host [B3]/[E2] 全绿 |
 | A3 | webServer 自托管面板（出口④） | 风险 14 + §3.2.4（「v2 前置」） | 仅实现 HTTP 数据面 `/lab-monitor/api/*`；自托管 HTML 面板未实现 |

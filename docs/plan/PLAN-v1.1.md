@@ -329,7 +329,7 @@ t3(本计划) ──► P0: D-A(采样器) ──┬──► D-C(引擎: 状态
                                   └──► D-B(UI: tab+轮询) ──────────────┘        │
                                                     D-E(P2: 告警+badge+settings+曲线) ◄─┘
 ```
-- **并行度**：D-A 与 D-B 可**并行**（前提：rpc.js 的 snapshot JSON schema 先在 docs/03-protocol.md 冻结，作为两任务共同契约）；D-C 依赖 P0 两者；D-D 依赖 D-C；D-E 依赖 D-D。
+- **并行度**：D-A 与 D-B 可**并行**（前提：rpc.js 的 snapshot JSON schema 先在 docs/reference/protocol.md 冻结，作为两任务共同契约）；D-C 依赖 P0 两者；D-D 依赖 D-C；D-E 依赖 D-D。
 - 并行上限 2 个实现任务（避免对同一文件/同一会话冲突；host/client 分属两文件可解耦）。
 - 每里程碑末尾一个**验收任务**（队长或 reviewer 执行，接 §4 验收清单）。
 
@@ -350,7 +350,7 @@ t3(本计划) ──► P0: D-A(采样器) ──┬──► D-C(引擎: 状态
 
 ### 5.5 CI 式自测点
 - **每次 cordis_define 后**：`cordis_inspect_self(pluginId, packageId)` 确认无 diagnostics（队长执行）；
-- **每次里程碑结束**：① `scripts/verify.sh`（node --check 全部 js、目录完整性、契约文件存在）；② 会话内跑 §4 验收清单（docs/04-milestones.md 勾选）；③ 结果回报队长；
+- **每次里程碑结束**：① `scripts/verify.sh`（node --check 全部 js、目录完整性、契约文件存在）；② 会话内跑 §4 验收清单（docs/reference/milestones.md 勾选）；③ 结果回报队长；
 - **回归红线**：改 client 半后重 define + 重跑 P0 验收 1/2/5（轮询与 visible 暂停、重复激活不回归）；**断连自愈回归（T2-3）**：插件重启/页面刷新后轮询自动恢复（退避重试 + 恢复立即刷新）。
 
 ---
@@ -392,8 +392,8 @@ t3(本计划) ──► P0: D-A(采样器) ──┬──► D-C(引擎: 状态
 
 ## 8. 交付物清单（本计划衍生的下一步动作）
 
-1. t4 评审（有条件通过，6 高项已在本修订版 §9 闭合）后：在 `/home/dc/projects/lab-monitor/` 落地目录骨架 + README + docs/01~04（由集成工程师执行）；**docs/02-data-model.md 先行定稿**：状态机转移表（含 pid 关联链路 T1-1、result 配对规则 T1-2）、单实验跟踪约束（R-2）、buffer 扩容标注（R-3）；
-2. 冻结 docs/03-protocol.md 的 snapshot JSON schema（含 `alertsCriticalCount`/`callCount`/`gpu.degraded` 字段与 `thresholds` 请求参数——T2-1/T2-2/T4-2）；**P0 前最小样例验证 cordis_define 装载（T1-3）**；
+1. t4 评审（有条件通过，6 高项已在本修订版 §9 闭合）后：在 `/home/dc/projects/lab-monitor/` 落地目录骨架 + README + docs/01~04（由集成工程师执行）；**docs/reference/data-model.md 先行定稿**：状态机转移表（含 pid 关联链路 T1-1、result 配对规则 T1-2）、单实验跟踪约束（R-2）、buffer 扩容标注（R-3）；
+2. 冻结 docs/reference/protocol.md 的 snapshot JSON schema（含 `alertsCriticalCount`/`callCount`/`gpu.degraded` 字段与 `thresholds` 请求参数——T2-1/T2-2/T4-2）；**P0 前最小样例验证 cordis_define 装载（T1-3）**；
 3. 按 §5.2 依赖图派出 D-A/D-B（普通 subagent，红线清单随任务下发）；
 4. 每里程碑执行 §4 验收 + §5.5 CI 自测，验收单勾选结果回报队长。
 
@@ -410,9 +410,9 @@ t3(本计划) ──► P0: D-A(采样器) ──┬──► D-C(引擎: 状态
 | # | 闭合方式 | 修订位置 |
 |---|---|---|
 | T1-1 pid 来源 | 完整链路已定义：① pre-execute 只记 `{runId, cmd特征, startTs}`（无 pid）→ ② ps 快照（5s）按「cmdline 特征 + startTs 后出现」关联回填 → ③ 优先 tools/execute 回传句柄/pid → ④ 关联失败降级（无候选进程 ≥3 个采样间隔 + 无 result → 超时判 crashed）；crashed 判定与 ps 间隔对齐（连续 ≥2 周期无存活 = 10~15s），验收改「≤15s」 | §3.1 state-machine / hooks、§4 P1 验收 1 |
-| T1-2 tools/result 配对 | result 处理器必须配对校验（工具名=bash 且命令串含 runId 特征，或平台调用 ID 配对），不匹配**忽略**；done 需「配对命中 + 实验进程已消失」**双确认**；kill 实验进程走 crashed 路径，其自身 result 不触发 done；规则定稿进 docs/02-data-model.md | §3.1 state-machine / hooks、§4 P1 验收 1、§8 交付物 1 |
+| T1-2 tools/result 配对 | result 处理器必须配对校验（工具名=bash 且命令串含 runId 特征，或平台调用 ID 配对），不匹配**忽略**；done 需「配对命中 + 实验进程已消失」**双确认**；kill 实验进程走 crashed 路径，其自身 result 不触发 done；规则定稿进 docs/reference/data-model.md | §3.1 state-machine / hooks、§4 P1 验收 1、§8 交付物 1 |
 | T1-3 单函数体 vs 多文件 | **选定 MVP 单文件**：plugin/host/index.js 与 plugin/client/index.js 即 code.host/code.client（内部分区注释、顶层函数共享函数体作用域），dev-run.sh 只做确定性组装 + node --check（禁 import/export）；v2 拆多文件；**P0 前最小样例验证**（含同名工具重复 defineTool 实证，联动 R-1） | §1 目录树 / 演进表、§7 时间盒、§8 交付物 2 |
-| T2-1 pluginToggles 生效链路 | **选定「轮询携带阈值」**：client 从 pluginSettings 读出随 snapshot 请求上传 `thresholds`，host 以请求参数为准（天然 ≤1 轮询周期生效）；setThresholds 保留为 v2/兜底直连；写入 docs/03-protocol.md | §3.1 rpc / balancer、§3.2 轮询代码、§3.3 消息流表、§4 P2 验收 2、§8 交付物 2 |
+| T2-1 pluginToggles 生效链路 | **选定「轮询携带阈值」**：client 从 pluginSettings 读出随 snapshot 请求上传 `thresholds`，host 以请求参数为准（天然 ≤1 轮询周期生效）；setThresholds 保留为 v2/兜底直连；写入 docs/reference/protocol.md | §3.1 rpc / balancer、§3.2 轮询代码、§3.3 消息流表、§4 P2 验收 2、§8 交付物 2 |
 | T2-2 badge vs 零轮询 | **选定「低频保活通道」**：visible=false 时降频 30s（可配）仅拉 snapshot 更新 last、不渲染 DOM；P0 验收 2 改「零渲染轮询 + 低频保活」，断言改 host 侧 `callCount`；P2 验收 1/3 同步（用户不看 tab 时 badge 30s 内更新）；protocol 增加 `alertsCriticalCount` 字段 | §3.1 rpc、§3.2 保活代码、§4 P0 验收 2 / P2 验收 1/3、§8 交付物 2 |
 | R-1 跨会话双采集器 | inspect_self 检查**移除**（会话级隔离下无效）；改为**接受「双实例已知无害」**（采集只读、fiber 隔离）+ P0 前实证同名工具重复 defineTool 行为并写明策略 + P0 验收 5 重复激活断言；v2 组合行单例 + `isolate: true` 为正解 | §6 风险 7、§4 P0 验收 5、§7 时间盒 |
 
@@ -427,7 +427,7 @@ t3(本计划) ──► P0: D-A(采样器) ──┬──► D-C(引擎: 状态
 | T3-2 依赖声明事实来源 | §1 README 注释（MVP 以源码对象 inject 为事实来源，package.json 仅 v2 启用） |
 | T4-1 P1 验收命令匹配 | §3.1 关键词表加入 `python -c`/`python3 -c` + §4 P1 验收 1 固化 `python train_demo.py` 形态 |
 | T4-2 P0 验收 2 断言手段 | §3.1 rpc 加 `callCount` 计数器 + §4 P0 验收 2 改 host 侧计数断言（host.call 进程内 RPC 不走网络） |
-| R-2 并行实验单跟踪 | §3.1 状态机（新 start 归档旧 run 为 aborted）+ §4 P1 验收 7 + §6 风险 11 + docs/02-data-model.md |
+| R-2 并行实验单跟踪 | §3.1 状态机（新 start 归档旧 run 为 aborted）+ §4 P1 验收 7 + §6 风险 11 + docs/reference/data-model.md |
 | R-3 长实验 buffer | §4 P1 验收 2（running 期扩容至 2h 或摘要标注「部分数据」）+ §6 风险 12 |
 
 ### 9.3 低严重度处理（7/7，随实现文档合入）

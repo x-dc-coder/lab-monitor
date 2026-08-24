@@ -28,7 +28,7 @@
 > - **P0 达成**：采样双后端真实跑通（verify-sampler 实证）+ RPC 数据面完整（verify-host 47 断言）+ 最小可见性 = Agent 通道 ① 与 conversation.view ②（client 半已实现，会话内渲染受激活时序限制，见下）；
 > - **受限（环境原因，非缺陷）**：P0 2' UI 轮询观测（依赖出口渲染）、P0 3' 真实无 GPU 机实证（本机有 GPU，降级路径由自测覆盖）、P0 6' settings 互斥真实模拟（命名空间未注册，标志逻辑自测覆盖）；
 > - **留待 v1.4.5/v2**：lab-monitor 自身 conversation.view 会话内显示——client 半同步 `slots.register` 激活时序问题（探针以同参数异步注册成功），修复方向 = `slots.inject('conversation.view')` 等待槽声明（skill 文档化模式）；
-> - **MVP 运行时边界**：动态插件会话级隔离（重启/换会话需重 define），见 docs/01-architecture.md §2.1。
+> - **MVP 运行时边界**：动态插件会话级隔离（重启/换会话需重 define），见 docs/architecture/core.md §2.1。
 > - **后续里程碑入口**：P1 = 状态机/平衡引擎/告警（核心代码已就位，verify-host 覆盖，需会话内端到端回填）；P2 = 阈值控制/持久化（settings 注册留 v2）。
 
 
@@ -124,7 +124,7 @@
   - **结论回填（2026-08-20 实现）**：v2 插件 `settings.register('lab-monitor', Schema.object({ thresholds, watchProcs }))` 落地（schemastery 为 devDep+peerDep）；register 读磁盘文档 → `thresholds.apply(stored, true)` + watchProcs 过滤重挂 → `settingsScope.watch()` 响应外部修改；`persistState()` 在 setThresholds/rpcSnapshot(carry)/lab_ctl watch 后写回文档。**verify-host [D]/[E] ALL PASS**：setThresholds 写回 `user.thresholds.memWarn=80`；重启模拟（新 fiber + documents 保留）→ 阈值恢复 memWarn=80、watchlist 恢复并命中 llama-server(5555) ✓。
 - [x] ✅ **3. 历史曲线（自测：verify-host [G] history 降采样 ≤500 点；ring 双条件封顶 + running 扩容）**：渲染 ≥30 分钟数据（降采样 ≤500 点）；关闭 UI 出口后 host 采集/告警不中断（核心独立于出口可见性）；
   - **结论回填（2026-08-19 队长，真实 ring）**：`scripts/e2e-host.js` T5——真实采样 ~2min 后 `labMonitor.history` 返回 **56 个降采样桶**（≤500 ✓）、桶含 **GPU util 聚合**（gpuUtil=2 实测，真实 dmon/query 采样）✓（见 docs/research/10-p1-e2e-test.md §5）；
-- [x] ✅ **4. 出口健壮性（自测：label/badge thunk try/catch + console.error；better-sidebar 禁用时保持 ② 同数据 [10]）**：label/badge thunk 抛错 → 不白屏且有 console.error 日志；**better-sidebar 被禁用（0.13.0 互斥/整体禁用）时 conversation.view 默认出口正常显示同数据**（降级矩阵生效，docs/05-ui-adapters.md）；
+- [x] ✅ **4. 出口健壮性（自测：label/badge thunk try/catch + console.error；better-sidebar 禁用时保持 ② 同数据 [10]）**：label/badge thunk 抛错 → 不白屏且有 console.error 日志；**better-sidebar 被禁用（0.13.0 互斥/整体禁用）时 conversation.view 默认出口正常显示同数据**（降级矩阵生效，docs/architecture/ui-adapters.md）；
 - [x] ✅ **5. better-sidebar 适配器（自测：mock-test [8]/[9]/[10] —— registerTab/badge 99 封顶/pluginToggles 4 行/visible=false 30s 保活/阈值携带/双检查降级）**：注册 ③ 成功时 badge 显示 CRITICAL 计数（100 告警封顶 `99+`）、pluginToggles 阈值面板改值 ≤1 轮询周期生效、visible=false 时低频保活 30s 内 badge 更新、features 门控兼容旧版本；③ 不可用（get 返回 undefined / aionui-panel 互斥）→ **自动保持 ②**。
 
 ## CI 式自测点（§5.5）
@@ -136,7 +136,7 @@
 
 ## 关联文档
 
-- 验收语义与字段：`docs/02-data-model.md`、`docs/03-protocol.md`
+- 验收语义与字段：`docs/reference/data-model.md`、`docs/reference/protocol.md`
 - 实施计划验收源文：`PLAN-v1.3.md` §4
 
 ---
@@ -145,7 +145,7 @@
 
 - 本文件内容在 V2 保持不变（数据模型/协议/验收语义与形态无关）。
 - V2 差异：client 数据面由 `host.call('labMonitor.*')` 改为 **HTTP `/lab-monitor/api/*`**（协议字段不变）；工具注册走官方 `ctx.tools.register(defineTool(...))`；prompt 注入默认关闭（KV 缓存友好，`lab_status` 工具替代）。
-- 完整迁移设计：`docs/research/12-v2-migration.md`；架构差异：`docs/01-architecture.md` §8-11。
+- 完整迁移设计：`docs/research/12-v2-migration.md`；架构差异：`docs/architecture/core.md` §8-11。
 
 ## V2 完成记录（2026-08-20，A2 多轨 + 标签分组）
 
@@ -159,8 +159,8 @@
 
 1. **实验历史保留 + 复盘（新增验收语义，P1 扩展）**：状态机归档时生成指标摘要（GPU 峰值/均值、显存峰值、组 CPU/内存峰值、时长）入 history（上限 20）；快照新增 `ended[]`（`{runId,state,cmd,cmdFeature,startTs,endTs,summary}`，done/crashed/aborted 全覆盖）；UI「实验历史」折叠块复盘展示。自测：verify-host P1 断言段（ended 初始空/协议完整性/done/crashed/runId 精确匹配/aborted 归档，含修复 cap 场景测试盲区——psLines 覆盖致 crash 抢先，上限 aborted 分支此前未被覆盖）。
 2. **设置面补全（ControlPanel，新验收语义）**：面板阈值编辑+保存（HTTP setThresholds 即时生效 + settings 持久化）、暂停/恢复（`control`，暂停跳过采样但快照照常）、清除告警（clear-alerts 带计数）；快照新增 `thresholds`/`enabled` 透出；**轮询周期由 `thresholds.pollMs` 动态驱动**（1000–60000 钳制，lab_ctl/面板改值即生效）。自测：verify-host 阈值透出（memWarn=80/pollMs=3000/enabled pause↔resume）+ mock-test 5 条渲染断言。
-3. **使用文档（A1 落地）**：`docs/usage.md`（工具用法手册 + UI 指引 + 阈值/标签/多轨语义 + 持久化 + 变更记录）。A1 状态：🔶 → ✅（用户决策不做 Agent 预设，以使用文档交付）。
-4. **协议升级 1.4**：`docs/03-protocol.md` 追加 `ended[]`/`thresholds`/`enabled`（纯增量，老 client 向后兼容）。
+3. **使用文档（A1 落地）**：`docs/usage/usage.md`（工具用法手册 + UI 指引 + 阈值/标签/多轨语义 + 持久化 + 变更记录）。A1 状态：🔶 → ✅（用户决策不做 Agent 预设，以使用文档交付）。
+4. **协议升级 1.4**：`docs/reference/protocol.md` 追加 `ended[]`/`thresholds`/`enabled`（纯增量，老 client 向后兼容）。
 5. **回归**：`scripts/verify.sh --e2e` 全绿（verify-host/mock-test/verify-sampler/e2e 246s）；e2e timeout 200→300（真实采样 tick 抖动）。**端到端实证（2026-08-22 真实 DSH）**：DSH 工具通道跑 `python3 -c 'time.sleep(20)'` → run-20260822-001 `done` 归档，`ended[]` 含完整摘要（gpuUtilMax 20/avg 10/durationSec 41/dataPartial=false），面板「实验历史（1）」可见；终端直接跑命令不产生历史 —— 设计行为（无 pre-execute 事件），非 bug。
 
 ## V2.6 完成记录（2026-08-22，P2 实验历史持久化 + HTTP 暴露面实证）
@@ -182,7 +182,7 @@
 
 | 项 | 追踪 | 状态 |
 |---|---|---|
-| A1 指挥层 Agent 预设 lab-commander | ✅ **2026-08-22 落地（V2.5）**：用户决策不做预设，改为使用文档——`docs/usage.md`（lab_status/lab_advice/lab_ctl 用法手册 + 面板 UI + 语义 + 持久化）；prompt 注入增强待讨论（KV 缓存影响） | ✅ 完成（以文档形式） |
+| A1 指挥层 Agent 预设 lab-commander | ✅ **2026-08-22 落地（V2.5）**：用户决策不做预设，改为使用文档——`docs/usage/usage.md`（lab_status/lab_advice/lab_ctl 用法手册 + 面板 UI + 语义 + 持久化）；prompt 注入增强待讨论（KV 缓存影响） | ✅ 完成（以文档形式） |
 | A2 多实验并行跟踪（R-2 留 v2） | ✅ **2026-08-20 实施完成**：多轨（上限 4 + per-run 判定 + runId 归属）+ 标签分组（TagRule 规则式打标 + lab_ctl tag + tags 聚合 + UI 分组展示）；verify-host [B3]/[E2] 全绿；见「V2 完成记录」 | ✅ 完成 |
 | A3 webServer 自托管面板（出口④） | 可选（v2 前置已满足：API 数据面就绪） | ⬜ |
 | A4 SSE /lab/events 远端扩展 | 可选（手机端/对接 monitor-panel） | ⬜ |

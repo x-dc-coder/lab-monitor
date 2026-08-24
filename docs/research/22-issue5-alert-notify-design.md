@@ -422,7 +422,7 @@ lab-monitor:
 | setAlerting 死代码；restoreEnded 丢 fingerprint | T2 §0.5；state-machine.ts:293-311, 348 |
 | pre-execute 现状（只取 name/arguments，可扩展 exec.agent） | index.ts:1123-1141 |
 | 工具注册（lab_status/lab_advice/lab_ctl 全 global 注册） | index.ts:961-1060 |
-| settings 持久化模式（schema 在插件、值在 settings.yaml） | index.ts:656-746；docs/usage.md:95-98 |
+| settings 持久化模式（schema 在插件、值在 settings.yaml） | index.ts:656-746；docs/usage/usage.md:95-98 |
 | RunRecord / Alert / ExperimentSnapshot 结构 | types.ts:54-117 |
 | machine.start 签名与 experiment-start 载荷 | state-machine.ts:170-199 |
 | 设置页控件参考（ControlPanel/TagManager/WatchManager） | client.ts:392-517, 589-688, 1167-1213, 1524-1533 |

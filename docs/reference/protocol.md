@@ -20,7 +20,7 @@
 }
 ```
 
-- `thresholds` **可选**；携带值视作「**建议更新**」——仅当到达时间晚于 host 生效时间戳才覆盖（M3，见 docs/02-data-model.md §6）；不携带则 host 用当前持有值。
+- `thresholds` **可选**；携带值视作「**建议更新**」——仅当到达时间晚于 host 生效时间戳才覆盖（M3，见 docs/reference/data-model.md §6）；不携带则 host 用当前持有值。
 
 **响应**（字段全部必填，值为 null 时表示不可用；v1.4：新增 `platform`/`sources`，指标命名规范化，mem 单位 MiB；**1.2：新增 `procs[].ppid/gpuUtilPct`、`experiment.procGroup/groupStats`、`snapshot.system`、`alerts[].evidence`**）：
 
@@ -140,14 +140,14 @@
 
 ## 5. 出口层消费约束
 
-- 出口适配器只消费 §2 RPC 与 §4 事件（核心↔出口解耦契约，docs/01-architecture.md §4）；
+- 出口适配器只消费 §2 RPC 与 §4 事件（核心↔出口解耦契约，docs/architecture/core.md §4）；
 - badge/title/label thunk 只读**模块级 `last` 快照**（O(1)），禁止在 thunk 内发 host.call（t5 结论②3）。
 
 ## 6. 关联文档
 
-- 字段语义与仲裁规则：`docs/02-data-model.md`
-- 出口层消费姿势：`docs/05-ui-adapters.md`
-- 架构总览：`docs/01-architecture.md`
+- 字段语义与仲裁规则：`docs/reference/data-model.md`
+- 出口层消费姿势：`docs/architecture/ui-adapters.md`
+- 架构总览：`docs/architecture/core.md`
 
 ---
 
@@ -155,7 +155,7 @@
 
 - 本文件内容在 V2 保持不变（数据模型/协议/验收语义与形态无关）。
 - V2 差异：client 数据面由 `host.call('labMonitor.*')` 改为 **HTTP `/lab-monitor/api/*`**（协议字段不变）；工具注册走官方 `ctx.tools.register(defineTool(...))`；prompt 注入默认关闭（KV 缓存友好，`lab_status` 工具替代）。
-- 完整迁移设计：`docs/research/12-v2-migration.md`；架构差异：`docs/01-architecture.md` §8-11。
+- 完整迁移设计：`docs/research/12-v2-migration.md`；架构差异：`docs/architecture/core.md` §8-11。
 
 ## 1.2 变更记录（进程级跟踪，2026-08-20）
 

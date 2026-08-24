@@ -35,7 +35,7 @@ if (slots) {
 ```
 
 - replaceRisk：none（会话头部 tab 环，t8 §3.4）；
-- 渲染节流：无 visible 语义 → **常驻 5s**（渲染路径见 docs/01-architecture.md §2.9）；
+- 渲染节流：无 visible 语义 → **常驻 5s**（渲染路径见 docs/architecture/core.md §2.9）；
 - 注册时序：apply 时先注册本出口；③ 探测可用 → 注销本出口（disposer）改注册 ③；③ 失败 → 保持本出口；
 - slots 缺席 → 本出口跳过（纯核心运行，Agent 通道①兜底——风险 15 场景）。
 
@@ -76,7 +76,7 @@ if (bs && snapshotUi.betterSidebarVisible) {   // ★双检查（§3.2）
 防御（t6 §4 规避方案 3）：
 
 1. **host 半探测**：`settings.describe` 读命名空间 `aionui-panel`，`rightPanel === 'aionui-panel'` → 标志 false（better-sidebar 自己的 host 半即此姿势，t6 §3.2 ①）；
-2. **标志并入快照**：`snapshot.ui.betterSidebarVisible`（docs/03-protocol.md §2.1）；host 半监听 `settings/updated` 事件**实时刷新**（t6 §4 规避方案 1/2）；
+2. **标志并入快照**：`snapshot.ui.betterSidebarVisible`（docs/reference/protocol.md §2.1）；host 半监听 `settings/updated` 事件**实时刷新**（t6 §4 规避方案 1/2）；
 3. **注册条件 = 服务判空（absent）且 可见性标志（hidden）双通过** → 注册 ③；任一不通过 → 保持 ② 默认出口，零功能损失。
 
 ### 3.3 探测重探机制（M4）
@@ -123,9 +123,9 @@ if (ws) {
 
 ## 6. 关联文档
 
-- 出口层总览与解耦契约：`docs/01-architecture.md` §3/§4
-- 快照字段 `ui.betterSidebarVisible` 与 RPC 契约：`docs/03-protocol.md`
-- 出口相关验收：`docs/04-milestones.md` P0 验收 6、P2 验收 4/5
+- 出口层总览与解耦契约：`docs/architecture/core.md` §3/§4
+- 快照字段 `ui.betterSidebarVisible` 与 RPC 契约：`docs/reference/protocol.md`
+- 出口相关验收：`docs/reference/milestones.md` P0 验收 6、P2 验收 4/5
 - 0.13.0 互斥机制证据：`docs/research/05-better-sidebar-0.13-contract.md`
 - webServer 契约证据：`docs/research/07-webserver-preflight.md`
 
@@ -135,4 +135,4 @@ if (ws) {
 
 - 本文件内容在 V2 保持不变（数据模型/协议/验收语义与形态无关）。
 - V2 差异：client 数据面由 `host.call('labMonitor.*')` 改为 **HTTP `/lab-monitor/api/*`**（协议字段不变）；工具注册走官方 `ctx.tools.register(defineTool(...))`；prompt 注入默认关闭（KV 缓存友好，`lab_status` 工具替代）。
-- 完整迁移设计：`docs/research/12-v2-migration.md`；架构差异：`docs/01-architecture.md` §8-11。
+- 完整迁移设计：`docs/research/12-v2-migration.md`；架构差异：`docs/architecture/core.md` §8-11。

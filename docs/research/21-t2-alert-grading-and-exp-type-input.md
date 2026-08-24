@@ -155,7 +155,7 @@
 ### 4.1 现状承载能力
 
 - **插件配置**（`LabMonitorConfig`，index.ts:42-61）：仅 `promptInjection/sampleMs/pollMs/watchProcs/tags` 5 键；`alertNotify/alertTargets` 尚未实现（20-issue5 §4.2 提案）。
-- **settings 命名空间 lab-monitor 已持久化键**（index.ts:672-703）：`thresholds`（8 值）、`watchProcs`、`tags`、`history`——schema 在插件内（Schema.object），**用户值放包外 `$DSH_HOME/settings.yaml`**（docs/usage.md:95-98：四键持久化、运行时双向同步；行级 config 可走 profile/`$DSH_HOME/cordis.patch.yml` 的 lab-monitor 行 config 字段）。现网 settings.yaml 实证：lab-monitor 段含 thresholds/watchProcs/tags/history（`~/.dsh/settings.yaml:88-`）。
+- **settings 命名空间 lab-monitor 已持久化键**（index.ts:672-703）：`thresholds`（8 值）、`watchProcs`、`tags`、`history`——schema 在插件内（Schema.object），**用户值放包外 `$DSH_HOME/settings.yaml`**（docs/usage/usage.md:95-98：四键持久化、运行时双向同步；行级 config 可走 profile/`$DSH_HOME/cordis.patch.yml` 的 lab-monitor 行 config 字段）。现网 settings.yaml 实证：lab-monitor 段含 thresholds/watchProcs/tags/history（`~/.dsh/settings.yaml:88-`）。
 - **设置页控件**（client.ts，settings.section「监控设置」）：
   - WatchManager：watchProcs 增删（client.ts:1167-1213）——**模式参考：关键词 chips 管理**；
   - ControlPanel：阈值保存 / 暂停恢复 / 清除告警（client.ts:392-517）；
@@ -248,4 +248,4 @@ lab-monitor:
 | e2e 实验样例（sleep 20/300） | docs/research/10-p1-e2e-test.md:27,71 |
 | 20-issue5 方案 F（alertNotify/alertTargets 提案） | docs/research/20-issue5-alert-feedback-design.md §4 |
 | issue #5 原始需求（KV 缓存背景） | GitHub x-dc-coder/lab-monitor#5（OPEN） |
-| 实验类型分类在仓库中无任何现存概念 | README.md / docs/usage.md / git log（grep smoke/regression/冒烟 无实现） |
+| 实验类型分类在仓库中无任何现存概念 | README.md / docs/usage/usage.md / git log（grep smoke/regression/冒烟 无实现） |

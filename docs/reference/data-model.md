@@ -44,7 +44,7 @@ const METRICS = {
 |---|---|
 | 容量 | **双条件封顶**：≤1000 点 且 ≤30 分钟（2s 采样 ≈ 900 点，~2MB 上限） |
 | 查询 | `history(sinceMs, bucketMs)`：按桶降采样（monitor-panel 策略）→ 图表数据（≤500 点渲染） |
-| **长实验扩容（R-3）** | 实验 running 期间按需扩容（容量翻倍至 2h）**或**摘要只覆盖最近 30min 并标注「部分数据」——二选一，实现时在 docs/04-milestones.md 记录取舍 |
+| **长实验扩容（R-3）** | 实验 running 期间按需扩容（容量翻倍至 2h）**或**摘要只覆盖最近 30min 并标注「部分数据」——二选一，实现时在 docs/reference/milestones.md 记录取舍 |
 
 ## 3. 状态机转移表（state-machine.js）
 
@@ -145,9 +145,9 @@ idle ──(start 命中)──► running ──(配对 result + 进程消失)�
 
 ## 7. 关联文档
 
-- 模块职责：`docs/01-architecture.md`
-- RPC/工具/事件契约：`docs/03-protocol.md`
-- 验收清单（状态机/阈值相关验收）：`docs/04-milestones.md` P1 验收 1/2/7、P2 验收 1/2
+- 模块职责：`docs/architecture/core.md`
+- RPC/工具/事件契约：`docs/reference/protocol.md`
+- 验收清单（状态机/阈值相关验收）：`docs/reference/milestones.md` P1 验收 1/2/7、P2 验收 1/2
 
 ---
 
@@ -155,4 +155,4 @@ idle ──(start 命中)──► running ──(配对 result + 进程消失)�
 
 - 本文件内容在 V2 保持不变（数据模型/协议/验收语义与形态无关）。
 - V2 差异：client 数据面由 `host.call('labMonitor.*')` 改为 **HTTP `/lab-monitor/api/*`**（协议字段不变）；工具注册走官方 `ctx.tools.register(defineTool(...))`；prompt 注入默认关闭（KV 缓存友好，`lab_status` 工具替代）。
-- 完整迁移设计：`docs/research/12-v2-migration.md`；架构差异：`docs/01-architecture.md` §8-11。
+- 完整迁移设计：`docs/research/12-v2-migration.md`；架构差异：`docs/architecture/core.md` §8-11。

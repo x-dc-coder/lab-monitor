@@ -55,7 +55,7 @@
 
 | 设计项 | 实现 | 判定 |
 |---|---|---|
-| 纯增量（只加字段不改语义） | docs/03-protocol.md 头部 `lab-protocol/1.2` + §1.2 变更记录（147 行）；procs[].ppid/gpuUtilPct、experiment.procGroup/groupStats、snapshot.system、alerts[].evidence、history groupCpu/groupMem 全部新增 | ✅ |
+| 纯增量（只加字段不改语义） | docs/reference/protocol.md 头部 `lab-protocol/1.2` + §1.2 变更记录（147 行）；procs[].ppid/gpuUtilPct、experiment.procGroup/groupStats、snapshot.system、alerts[].evidence、history groupCpu/groupMem 全部新增 | ✅ |
 | gpu 遗留字段语义定稿 | 文档注明「gpu = GPU 利用率 %，与 gpuUtilPct 同值，兼容保留」 | ✅ |
 | 既有断言未破坏 | verify-host/mock-test 全过（含 1.1 全部断言） | ✅ |
 
@@ -108,10 +108,10 @@
 
 ### 偏差 2【低危】verify.sh [3] 契约断言脆弱（grep 1.1 侥幸通过）
 
-- **位置**：`scripts/verify.sh` [3] `grep -q "lab-protocol/1.1" docs/03-protocol.md`。
+- **位置**：`scripts/verify.sh` [3] `grep -q "lab-protocol/1.1" docs/reference/protocol.md`。
 - **现象**：协议头已升级为 `lab-protocol/1.2`，该 grep 靠 §1.2 变更记录第 147 行
   「lab-protocol/1.1 → 1.2」字样**侥幸匹配**；若未来清理变更记录即误报失败。
-- **建议**：改为 `grep -q "lab-protocol/1.2" docs/03-protocol.md`（协议头为权威）。
+- **建议**：改为 `grep -q "lab-protocol/1.2" docs/reference/protocol.md`（协议头为权威）。
 
 ### 偏差 3【低危】mock-test.js 未扩展 1.2 断言
 
@@ -157,6 +157,6 @@
 ## 4. 关联文档
 
 - 设计基线：`docs/research/14-process-tracking-design.md`（§2/§3/§5/§6）
-- 协议：`docs/03-protocol.md`（1.2 变更记录 §1.2）
+- 协议：`docs/reference/protocol.md`（1.2 变更记录 §1.2）
 - 实现：`src/sampler/backend-{windows,linux}.ts`、`src/core/{proc-aggregator,state-machine,balancer,types}.ts`、`src/index.ts`
 - 回归：`scripts/verify.sh` / `verify-host.js` / `mock-test.js` / `verify-sampler.js`

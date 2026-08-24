@@ -1,6 +1,6 @@
 # 01 架构基线（核心引擎层 + UI 出口适配层）
 
-> 来源：实施计划 v1.3 §2/§3.1/§3.2（`../docs/PLAN-v1.3.md`）。本文档与计划完全一致，是 Lab Monitor 的架构定稿。
+> 来源：实施计划 v1.3 §2/§3.1/§3.2（`../docs/plan/PLAN-v1.3.md`）。本文档与计划完全一致，是 Lab Monitor 的架构定稿。
 
 ## 1. 分层总览
 
@@ -54,7 +54,7 @@
 |---|---|
 | 状态 | `idle / running / done / crashed / alerting` |
 | 输入 | hooks.js 事件（start/execute 回传/end）、ps 进程表（5s，pid 存活）、采样快照 |
-| 判定 | 见 docs/02-data-model.md §3（状态机转移表，含 T1-1 pid 链路 / T1-2 配对 / kill 不误判 done） |
+| 判定 | 见 docs/reference/data-model.md §3（状态机转移表，含 T1-1 pid 链路 / T1-2 配对 / kill 不误判 done） |
 | 输出 | 实验记录数组 + `ctx.emit('lab/experiment-start|end')` |
 
 ### 2.4 balancer.js —— 平衡引擎（纯代码规则）
@@ -75,7 +75,7 @@
 ### 2.6 rpc.js —— harness.handle 注册（出口统一数据面）
 | 方法 | 输入 | 输出 |
 |---|---|---|
-| `labMonitor.snapshot` | `{ thresholds? }`（携带值=「建议更新」，last-write-wins，M3） | `{ ts, gpu[], cpu, mem, procs[], alerts[], alertsCriticalCount, experiment, callCount, ui }`（含 `ui.betterSidebarVisible`；**schema 见 docs/03-protocol.md**） |
+| `labMonitor.snapshot` | `{ thresholds? }`（携带值=「建议更新」，last-write-wins，M3） | `{ ts, gpu[], cpu, mem, procs[], alerts[], alertsCriticalCount, experiment, callCount, ui }`（含 `ui.betterSidebarVisible`；**schema 见 docs/reference/protocol.md**） |
 | `labMonitor.history` | `{ sinceMs, bucketMs }` | 降采样后的时间序列 |
 | `labMonitor.setThresholds` | `{ util, memPct, temp, pollMs }` | `{ ok, applied }`（直连更新通道；冲突以时间戳后者为准，M3） |
 | `labMonitor.control` | `{ action: 'start'\|'pause'\|'resume' }` | `{ ok, state }`（**护栏：仅控制监控/告警引擎，绝不触碰实验进程**） |
@@ -83,7 +83,7 @@
 ### 2.7 tools.js —— harness.defineTool（Agent 按需查询）
 | 工具 | 输出 |
 |---|---|
-| `lab_status` | Agent 友好快照文本/JSON（同 snapshot；schema 见 docs/03-protocol.md） |
+| `lab_status` | Agent 友好快照文本/JSON（同 snapshot；schema 见 docs/reference/protocol.md） |
 | `lab_advice` | 平衡引擎当前建议（分级 + 置信度 + 可执行动作） |
 | `lab_ctl`（可选） | 启停/阈值控制（**护栏：仅监控/告警引擎启停，绝不碰实验进程；写操作明示风险；pause 类限 UI 或 approval/request 确认**） |
 
@@ -97,7 +97,7 @@
 ### 2.9 Client 数据消费者（核心层在 Client 侧的延伸，出口共享）
 - 所有出口共用「host.call 轮询 → 模块级 `last` 快照 → 各自渲染」；`last` 是各出口 badge/label/title 的唯一只读源（O(1)）；
 - 轮询代码形态（计划 §3.2.1）：`refresh()` 带 try/catch（T2-3 失败退避 5s→10s→30s 封顶）+ `ctx.setInterval`（禁 window.setInterval）；
-- **阈值事实来源 = host 侧 settings 服务**（V2）：pluginSettings 仅作 sidebar 出口 UI 编辑同步面；last-write-wins 仲裁见 docs/03-protocol.md；
+- **阈值事实来源 = host 侧 settings 服务**（V2）：pluginSettings 仅作 sidebar 出口 UI 编辑同步面；last-write-wins 仲裁见 docs/reference/protocol.md；
 - **conversation.view 出口渲染路径**：label thunk 实时摘要（仅 `last` 变化时更新 label）+ 面板组件（若 M7 实证支持；常驻 5s 节流，不依赖 visible）——D-B1 实现者须同时产出两条路径。
 
 ## 3. UI 出口适配层（四出口注册策略）
@@ -133,12 +133,12 @@ return {
   inject: ['timer'],                       // ★只声明核心依赖；betterSidebar 不进 inject
   apply(ctx) {
     // ① 无条件：数据消费者（host.call 轮询 → last）
-    // ② 无条件：conversation.view 默认出口注册（见 docs/05-ui-adapters.md §2）
+    // ② 无条件：conversation.view 默认出口注册（见 docs/architecture/ui-adapters.md §2）
     const slots = ctx.get('slots')
     if (slots) ctx.effect(() => slots.register({ ... }))
     // ③ 条件：better-sidebar 适配器（ctx.get 免声明、缺席返回 undefined）
     const bs = ctx.get('betterSidebar')
-    if (bs) { /* 双检查通过后 registerTab（见 docs/05-ui-adapters.md §3） */ }
+    if (bs) { /* 双检查通过后 registerTab（见 docs/architecture/ui-adapters.md §3） */ }
   },
 }
 ```
@@ -156,10 +156,10 @@ return {
 
 ## 7. 关联文档
 
-- 数据模型/状态机：`docs/02-data-model.md`
-- RPC/工具/事件契约：`docs/03-protocol.md`
-- 验收清单：`docs/04-milestones.md`
-- 出口层详细契约（双检查/重探/webServer 约束）：`docs/05-ui-adapters.md`
+- 数据模型/状态机：`docs/reference/data-model.md`
+- RPC/工具/事件契约：`docs/reference/protocol.md`
+- 验收清单：`docs/reference/milestones.md`
+- 出口层详细契约（双检查/重探/webServer 约束）：`docs/architecture/ui-adapters.md`
 - 调研归档：`docs/research/`（00-t8 基线、05 0.13.0 契约、07 webServer 预审）
 
 ---

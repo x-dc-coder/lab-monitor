@@ -41,7 +41,7 @@ v1.2 架构方向**正确且执行度高**：核心引擎层独立性声明（§
 |---|---|---|---|
 | H3 | **P0 验收 2 与 v1.2 默认出口矛盾**：P0 阶段 better-sidebar"最后开发"尚未实现（默认出口是 conversation.view），但 P0 验收 2 仍写"`visible=false` → 零渲染轮询，仅低频保活"——**conversation.view 无 visible 语义（3.2.1 自述"常驻 5s 节流"）**，该断言在 P0 无对象；P0 验收 1 的"Tab 显示"也未区分是哪个出口 | **高** | P0 验收按出口分轨重写：验收 1/2 以 **conversation.view 默认出口**为对象（"会话头部 tab 环显示 ≥1 GPU 卡…；数据正确性偏差 <5%"；轮询断言改"常驻 5s 节流 + callCount 增量符合 5s 节奏，tab 内容区不可见时无渲染开销（若平台支持卸载；实证后定口径）"）；visible=false 语义的断言**移到 P2 better-sidebar 出口验收** |
 | M8 | **§5.1/5.2 任务包未按"sidebar 最后"更新**：D-B 仍为"UI 工程师 client Tab + 轮询 + badge/settings"单包，未拆分为"conversation.view 默认出口先行（P0）→ better-sidebar 适配器（P2）"两段；D-B 与 D-A 并行前提未更新 | 中 | D-B 拆 **D-B1**（conversation.view 默认出口 + 数据消费者，P0，与 D-A 并行，契约=snapshot schema 冻结）与 **D-B2**（better-sidebar 适配器，P2，依赖 P0/P1）；D-B2 与 D-E 合并或串行 |
-| L4 | §7 时间盒未体现"better-sidebar 最后开发"（P0 工作量仍含 tab 渲染描述）；§8 交付物未列 docs/05-ui-adapters.md 定稿动作 | 低 | 时间盒按 D-B1/D-B2 拆分更新；交付物加"05-ui-adapters.md 定稿（出口注册策略/优先级/互斥规则/降级矩阵）" |
+| L4 | §7 时间盒未体现"better-sidebar 最后开发"（P0 工作量仍含 tab 渲染描述）；§8 交付物未列 docs/architecture/ui-adapters.md 定稿动作 | 低 | 时间盒按 D-B1/D-B2 拆分更新；交付物加"05-ui-adapters.md 定稿（出口注册策略/优先级/互斥规则/降级矩阵）" |
 
 ### 维度 4：前轮修正回归抽查（T1-1/T1-2/T2-1/T2-2/R-1）
 

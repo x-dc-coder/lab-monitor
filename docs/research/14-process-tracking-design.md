@@ -4,7 +4,7 @@
 > ——GPU 每进程数据源不可靠，防误报以 CPU/内存/存在性为主、GPU 整卡交叉验证，每进程 GPU
 > 显存为预留字段当前不启用）。输入：src/core/state-machine.ts、src/core/balancer.ts、
 > src/core/types.ts、src/sampler/*（backend-interface/backend-linux/backend-windows/windows-paths）、
-> src/index.ts、src/client.ts、docs/02-data-model.md、docs/03-protocol.md、docs/research/08-sampling-empirical.md。
+> src/index.ts、src/client.ts、docs/reference/data-model.md、docs/reference/protocol.md、docs/research/08-sampling-empirical.md。
 > 全部关键能力经本机（WSL2 + RTX 5060 Ti）实测，实证记录见 §1.3/§2.1/§6。
 > 实现者：tracking-engineer（按 §5 分阶段清单落地）；本文档只设计不写实现代码。
 
@@ -313,7 +313,7 @@ export interface ProcSample {
   `gpuMemMiB` 声明为预留字段、当前不启用（受限于 N/A），消费方按 null 处理。
 - 新增字段值可为 null（平台不可得），消费方必须容忍 null（client 已有 null 容忍先例：
   `cpu.percent: null`）。
-- 版本号：docs/03-protocol.md 头部 `lab-protocol/1.1` → `1.2`，变更记录列出本文件 §3 增量。
+- 版本号：docs/reference/protocol.md 头部 `lab-protocol/1.1` → `1.2`，变更记录列出本文件 §3 增量。
 
 ### 4.2 UI（client）消费
 
@@ -396,7 +396,7 @@ export interface ProcSample {
 
 ## 7. 关联文档
 
-- 数据模型/协议：docs/02-data-model.md、docs/03-protocol.md（本设计落地时同步 1.2 变更记录）
+- 数据模型/协议：docs/reference/data-model.md、docs/reference/protocol.md（本设计落地时同步 1.2 变更记录）
 - 采样实证：docs/research/08-sampling-empirical.md（§4.2 偏差结论）
-- 架构：docs/01-architecture.md；UI 消费：docs/05-ui-adapters.md
+- 架构：docs/architecture/core.md；UI 消费：docs/architecture/ui-adapters.md
 - 实现迁移：docs/research/12-v2-migration.md

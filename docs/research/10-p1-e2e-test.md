@@ -10,7 +10,7 @@
 > （pre-execute 命中 → running → pid 关联 → 正常 done / kill → crashed + CRITICAL 告警），
 > 并复核 7'（并发单跟踪）与 5'（平衡引擎构造触发）。
 > 前置事实：P1 4'（prompt 注入）、5'（thermal/oom/io 构造）、7'（并发 aborted）已由集成工程师
-> 于 2026-08-19 会话内回填（见 docs/04-milestones.md）。
+> 于 2026-08-19 会话内回填（见 docs/reference/milestones.md）。
 
 ## 0. 执行环境与观测手段
 
@@ -101,6 +101,6 @@ machine.history 未暴露）——P2 增强 history RPC 时补充实验记录面
 
 ### 5.2 执行后动作
 
-1. ✅ 回填 docs/04-milestones.md P1 1'/2' 会话内实证结论（见 §6）；
+1. ✅ 回填 docs/reference/milestones.md P1 1'/2' 会话内实证结论（见 §6）；
 2. ✅ 本文件补执行记录（本节）；
 3. ✅ verify.sh 回归全绿（改动无副作用）；e2e-host.js 保留为可选 CI（真实进程 60s，默认不并入 verify.sh）。

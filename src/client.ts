@@ -459,7 +459,7 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
     if (m !== null) body.memWarn = Math.max(0, Math.min(100, m))
     if (t !== null) body.tempWarn = Math.max(0, Math.min(120, t))
     const n = num(procTopN); const g = num(wGpu); const c = num(wCpu); const mm = num(wMem)
-    if (n !== null) body.procTopN = Math.max(5, Math.min(500, Math.round(n)))
+    if (n !== null) body.procTopN = Math.max(5, Math.min(1000, Math.round(n)))
     if (g !== null) body.wGpu = Math.max(0, Math.min(20, g))
     if (c !== null) body.wCpu = Math.max(0, Math.min(20, c))
     if (mm !== null) body.wMem = Math.max(0, Math.min(20, mm))
@@ -493,6 +493,32 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
       .finally(() => setBusy(false))
   }
 
+  // 2026-08-24（#10 实验历史管理）：列表 + 单条删除 + 清空（可保留最近 N）；删除/清空后
+  // host 立即持久化，面板 ended 随下一轮快照刷新（≤5s）
+  const ended = (s && s.ended) || []
+  const [keepN, setKeepN] = React.useState<string>('10')
+  const [hMsg, setHMsg] = React.useState<string | null>(null)
+  const [hBusy, setHBusy] = React.useState(false)
+  const delRun = (runId: string) => {
+    setHBusy(true); setHMsg(null)
+    apiCall<{ ok?: boolean; state?: string }>('historyManage', { op: 'delete', runId })
+      .then((r) => setHMsg((r && (r as { ok?: boolean }).ok) ? '已删除 ' + runId : '删除失败（' + ((r as { state?: string } | undefined)?.state || '') + '）'))
+      .catch(() => setHMsg('调用失败'))
+      .finally(() => setHBusy(false))
+  }
+  const clearHist = () => {
+    const n = Number(keepN)
+    const keep = keepN.trim() !== '' && isFinite(n) ? Math.max(0, Math.round(n)) : 0
+    setHBusy(true); setHMsg(null)
+    apiCall<{ ok?: boolean; removed?: string[] }>('historyManage', { op: 'clear', keep })
+      .then((r) => {
+        const rem = r && (r as { removed?: string[] }).removed
+        setHMsg('已清空' + (Array.isArray(rem) && rem.length ? ' ' + rem.length + ' 条' : '（无残留）') + (keep ? '，保留最近 ' + keep + ' 条' : ''))
+      })
+      .catch(() => setHMsg('调用失败'))
+      .finally(() => setHBusy(false))
+  }
+
   const pollChip = thr
     ? React.createElement('span', { style: { fontSize: 11, color: C.label2, marginLeft: 'auto', padding: '1px 7px', borderRadius: 10, background: C.border } },
         '轮询 ' + Math.round(thr.pollMs / 1000) + 's')
@@ -520,7 +546,7 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
     ),
     // 进程排序：取前 N + CPU/GPU/内存 权重（2026-08-23）
     React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(104px, 1fr))', gap: 10, marginTop: 8 } },
-      field('取前N进程', procTopN, setProcTopN, '按加权打分取前 N 个高占用进程（5..500）'),
+      field('取前N进程', procTopN, setProcTopN, '按加权打分取前 N 个高占用进程（5..1000）'),
       field('权重GPU', wGpu, setWGpu, 'GPU 利用率权重（0..20）'),
       field('权重CPU', wCpu, setWCpu, 'CPU 利用率权重（0..20）'),
       field('权重内存', wMem, setWMem, '内存占用权重（0..20）'),
@@ -531,6 +557,41 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
       React.createElement('button', { onClick: () => setPaused(!paused), disabled: busy, style: btnStyle }, paused ? '恢复' : '暂停'),
       React.createElement('button', { onClick: clearAlerts, disabled: busy, style: btnStyle },
         '清除告警' + (s && s.alertsCriticalCount ? '（' + s.alertsCriticalCount + '）' : '')),
+    ),
+    // 2026-08-24（#10 实验历史管理）：已结束实验列表 + 单条删除 + 清空（保留最近 N）
+    React.createElement('div', { key: 'hist-manage', style: { marginTop: 10, borderTop: '1px solid ' + C.border, paddingTop: 8 } },
+      React.createElement('div', { style: { fontSize: 11, color: C.label2, marginBottom: 4 } },
+        '实验历史管理（' + ended.length + ' 条）'),
+      ended.length
+        ? React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, marginBottom: 6 } },
+            ended.map((e) => React.createElement('div', {
+              key: 'hm-' + e.runId,
+              style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 },
+            },
+              React.createElement('span', { style: { width: 7, height: 7, borderRadius: 4, background: e.state === 'done' ? C.success : e.state === 'crashed' ? C.error : C.label2, flexShrink: 0 } }),
+              React.createElement('span', { style: { fontWeight: 600, flexShrink: 0 } }, e.runId),
+              React.createElement('span', { style: { color: C.label2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, maxWidth: 220 } },
+                e.cmd || e.cmdFeature || ''),
+              React.createElement('button', {
+                onClick: () => delRun(e.runId),
+                disabled: hBusy,
+                title: '删除 ' + e.runId,
+                style: { ...btnStyle, padding: '0 6px', fontSize: 10 },
+              }, '删'),
+            )),
+          )
+        : React.createElement('div', { style: { fontSize: 11, color: C.label2, marginBottom: 6 } }, '暂无已结束实验'),
+      React.createElement('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+        React.createElement('input', {
+          value: keepN,
+          onChange: (e: React.ChangeEvent<HTMLInputElement>) => setKeepN(e.target.value),
+          title: '清空时保留最近 N 条',
+          style: { ...inputStyle, width: 52, textAlign: 'right' },
+        }),
+        React.createElement('span', { style: { fontSize: 10, color: C.label2 } }, '保留最近 N'),
+        React.createElement('button', { onClick: clearHist, disabled: hBusy, style: btnStyle }, '清空'),
+      ),
+      hMsg ? React.createElement('div', { style: { fontSize: 11, color: C.brand, marginTop: 6 } }, hMsg) : null,
     ),
     msg ? React.createElement('div', { style: { fontSize: 11, color: C.brand, marginTop: 8 } }, msg) : null,
   )

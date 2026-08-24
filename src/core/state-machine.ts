@@ -32,6 +32,10 @@ export interface StateMachine {
   setAlerting(on: boolean, runId?: string | null): void
   snapshot(): { main: ExperimentSnapshot | null; all: ExperimentSnapshot[]; ended: EndedRunSnapshot[] }
   restoreEnded(snapshots: EndedRunSnapshot[]): void
+  /** 2026-08-24（#10 实验历史管理）：按 runId 删除单条已结束记录 */
+  removeRun(runId: string): boolean
+  /** 2026-08-24（#10 实验历史管理）：清空已结束记录，保留最近 N 条（默认 0），返回被移除的 */
+  clearHistory(keep?: number): RunRecord[]
   cur(): RunRecord | null
   all(): RunRecord[]
   history: RunRecord[]
@@ -356,6 +360,23 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     }
   }
 
+  // 2026-08-24（#10 实验历史管理）：按 runId 删除单条已结束记录（不存在返回 false）
+  function removeRun(runId: string): boolean {
+    const idx = state.history.findIndex((r) => r.runId === runId)
+    if (idx < 0) return false
+    state.history.splice(idx, 1)
+    return true
+  }
+
+  // 2026-08-24（#10 实验历史管理）：清空已结束记录，保留最近 N 条（keep 钳位 0..MAX_HISTORY），
+  // 返回被移除的记录（调用方用于持久化与反馈）。splice 而非 length=——避免 n>实际长度时撑出空洞
+  function clearHistory(keep = 0): RunRecord[] {
+    const n = Math.max(0, Math.min(MAX_HISTORY, Math.round(keep)))
+    const removed = state.history.slice(n)
+    state.history.splice(n)
+    return removed
+  }
+
   function snapshot(): { main: ExperimentSnapshot | null; all: ExperimentSnapshot[]; ended: EndedRunSnapshot[] } {
     const runs = all()
     // 2026-08-22（P1 实验历史）：已结束实验（done/crashed/aborted）历史投影——倒序（最新在前），
@@ -371,5 +392,5 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     }
   }
 
-  return { start, associatePid, associateProc, markResult, tick, tickGrace, setAlerting, snapshot, restoreEnded, cur, all, history: state.history }
+  return { start, associatePid, associateProc, markResult, tick, tickGrace, setAlerting, snapshot, restoreEnded, removeRun, clearHistory, cur, all, history: state.history }
 }

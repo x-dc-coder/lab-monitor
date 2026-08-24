@@ -1078,7 +1078,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       const k = keys[n]
       if (typeof a[k] !== 'number' || !isFinite(a[k])) continue
       let v = a[k]
-      if (k === 'procTopN') v = Math.max(5, Math.min(500, Math.round(v))) // 进程排序取前 N（5..500，全量进程 ~400）
+      if (k === 'procTopN') v = Math.max(5, Math.min(1000, Math.round(v))) // 进程排序取前 N（5..1000，全量进程 ~400）
       else if (k === 'wGpu' || k === 'wCpu' || k === 'wMem') v = Math.max(0, Math.min(20, v)) // 权重 0..20
       applied[k] = v
     }
@@ -1167,6 +1167,26 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     return { ok: false, error: '未知 tag 操作: ' + op }
   }
 
+  // 2026-08-24（#10 实验历史管理）：list/delete/clear（keep 最近 N）——
+  // 删除/清空后显式 persistState()（惰性检测按 endTs 变化触发，删非首条不会命中）
+  function rpcHistoryManage(args: { op?: string; runId?: string | null; keep?: number }): { ok: boolean; state: string; removed?: string[]; remaining: number } {
+    const op = args.op || 'list'
+    if (op === 'delete') {
+      const runId = typeof args.runId === 'string' && args.runId ? args.runId : ''
+      if (!runId) return { ok: false, state: 'missing-runId', remaining: machine.history.length }
+      if (!machine.removeRun(runId)) return { ok: false, state: 'not-found', remaining: machine.history.length }
+      void persistState()
+      return { ok: true, state: 'deleted', removed: [runId], remaining: machine.history.length }
+    }
+    if (op === 'clear') {
+      const keep = typeof args.keep === 'number' && isFinite(args.keep) ? Math.max(0, Math.round(args.keep)) : 0
+      const removed = machine.clearHistory(keep)
+      void persistState()
+      return { ok: true, state: 'cleared', removed: removed.map((r) => r.runId), remaining: machine.history.length }
+    }
+    return { ok: true, state: 'list', remaining: machine.history.length }
+  }
+
   // ── webServer HTTP 路由（替代动态版 harness.handle RPC）───────────────
   const API_BASE = '/lab-monitor/api'
   const apiHandlers: Record<string, (body: Record<string, unknown>) => unknown> = {
@@ -1186,6 +1206,12 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       persistState()
       return { ok: true, state: 'watchlist-updated', watchProcs: watchSet() }
     },
+    // 2026-08-24（#10 实验历史管理）：浏览器端 lab_ctl history-manage 等效路由（list/delete/clear）
+    historyManage: (body) => rpcHistoryManage({
+      op: body.op as string | undefined,
+      runId: body.runId as string | null | undefined,
+      keep: body.keep as number | undefined,
+    }),
   }
 
   function httpHandler(req: IncomingMessage, res: ServerResponse) {
@@ -1296,9 +1322,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         toolsService.register(
           defineTool({
             name: 'lab_ctl',
-            description: '控制 Lab Monitor 监控/告警引擎（start/pause/resume/set-threshold/watch/tag/clear-alerts）。护栏：只控制监控引擎，绝不触碰实验进程。',
+            description: '控制 Lab Monitor 监控/告警引擎（start/pause/resume/set-threshold/watch/tag/clear-alerts/history-manage）。护栏：只控制监控引擎，绝不触碰实验进程。',
             parameters: {
-              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch', 'tag', 'clear-alerts', 'set-notify'], description: '操作类型（set-notify=设置告警通知策略）' },
+              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch', 'tag', 'clear-alerts', 'set-notify', 'history-manage'], description: '操作类型（set-notify=设置告警通知策略；history-manage=实验历史管理）' },
               keywords: {
                 type: 'array',
                 items: { type: 'string' },
@@ -1351,12 +1377,22 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                 type: 'number',
                 description: 'set-notify 时可选：同目标聚合窗口 ms（窗口内最多 1 条通知）',
               },
+              // #10（2026-08-24）：history-manage 参数（实验历史管理）
+              op: {
+                type: 'string',
+                enum: ['list', 'delete', 'clear'],
+                description: 'history-manage 时的操作：list=列出；delete=按 runId 删单条；clear=清空（可 keep 保留最近 N）',
+              },
+              keep: {
+                type: 'number',
+                description: 'history-manage clear 时可选：保留最近 N 条（默认 0=全清）',
+              },
             },
             output: {
               schema: { type: 'json' },
               render: (_args: Record<string, unknown>, value: unknown) => renderText(value),
             },
-            async execute(args: { action?: string; keywords?: string[]; thresholds?: Record<string, unknown>; tag?: Record<string, unknown>; runId?: string; rule?: string }) {
+            async execute(args: { action?: string; keywords?: string[]; thresholds?: Record<string, unknown>; tag?: Record<string, unknown>; runId?: string; rule?: string; op?: string; keep?: number }) {
               const a = args || {}
               if (a.action === 'watch') {
                 const kws = Array.isArray(a.keywords) ? a.keywords.filter((k) => typeof k === 'string' && k.trim()).map((k) => k.trim()) : []
@@ -1394,6 +1430,10 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                   escalateAfterSec: typeof na.escalateAfterSec === 'number' ? na.escalateAfterSec : undefined,
                   notifyThrottleMs: typeof na.notifyThrottleMs === 'number' ? na.notifyThrottleMs : undefined,
                 })) as never
+              }
+              if (a.action === 'history-manage') {
+                // #10（2026-08-24）：实验历史管理（list/delete/clear），Agent 可见证据（removed/remaining）
+                return sanitizeJson(rpcHistoryManage({ op: a.op, runId: a.runId ?? null, keep: a.keep })) as never
               }
               return { ok: true, state: rpcControl({ action: a.action }).state } as never
             },

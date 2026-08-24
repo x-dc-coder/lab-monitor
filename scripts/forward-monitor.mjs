@@ -74,6 +74,10 @@ function extract(snap) {
     cpuPct: t.cpuPct ?? null,
     memMiB: t.memMiB ?? null,
   }));
+  const cpuPct = snap.cpu && typeof snap.cpu.percent === 'number' ? snap.cpu.percent : null
+  const memAvail = snap.mem && typeof snap.mem.availableMiB === 'number' ? snap.mem.availableMiB : null
+  const memTotal = snap.mem && typeof snap.mem.totalMiB === 'number' ? snap.mem.totalMiB : null
+  const memPct = (memAvail != null && memTotal) ? Math.round((1 - memAvail / memTotal) * 1000) / 10 : null
   const metrics = [
     ['gpu_util_percent', g.utilPct ?? null],
     ['vram_used_mib', g.memUsedMiB ?? null],
@@ -81,6 +85,10 @@ function extract(snap) {
     ['vram_util_percent', (g.memUsedMiB != null && g.memTotalMiB)
       ? Math.round((g.memUsedMiB / g.memTotalMiB) * 1000) / 10 : null],
     ['gpu_temp_c', g.tempC ?? null],
+    ['cpu_percent', cpuPct],
+    ['mem_percent', memPct],
+    ['mem_used_mib', memAvail != null && memTotal != null ? Math.round(memTotal - memAvail) : null],
+    ['mem_total_mib', memTotal],
     ['experiment_active', exp ? 1 : 0],
     ['experiments_total', Array.isArray(snap.ended) ? snap.ended.length : 0],
     ['alerts_crit', alerts.filter((a) => a.level === 'critical').length],
@@ -95,6 +103,10 @@ function extract(snap) {
     vram_util_percent: (g.memUsedMiB != null && g.memTotalMiB)
       ? Math.round((g.memUsedMiB / g.memTotalMiB) * 1000) / 10 : null,
     gpu_temp_c: g.tempC ?? null,
+    cpu_percent: cpuPct,
+    mem_percent: memPct,
+    mem_used_mib: memAvail != null && memTotal != null ? Math.round(memTotal - memAvail) : null,
+    mem_total_mib: memTotal,
     experiment_active: exp ? 1 : 0,
     experiments_total: Array.isArray(snap.ended) ? snap.ended.length : 0,
     alerts_crit: alerts.filter((a) => a.level === 'critical').length,

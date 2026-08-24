@@ -6,6 +6,7 @@ import type { GpuSample, ProcSample } from '../sampler/backend-interface.js'
 /** 进程统计条目（实验组成员 / 系统 TopN 明细） */
 export interface ProcStat {
   pid: number
+  ppid?: number | null   // #16：父进程 pid（进程详情展示）
   cmd: string | null
   cpuPct: number | null
   memMiB: number | null

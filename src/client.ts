@@ -38,6 +38,7 @@ interface GpuView {
 }
 interface ProcView {
   pid: number
+  ppid?: number | null
   cmd: string
   cpuPct?: number | null
   memMiB?: number | null
@@ -1394,7 +1395,7 @@ interface DetailData {
 }
 
 /** 详情用的进程形状：兼容 ProcView（cmd: string）与标签组进程（cmd: string|null）两种来源。 */
-type ProcLike = { pid: number; cmd?: string | null; cpuPct?: number | null; memMiB?: number | null; gpuUtilPct?: number | null; gpu?: number | null }
+type ProcLike = { pid: number; ppid?: number | null; cmd?: string | null; cpuPct?: number | null; memMiB?: number | null; gpuUtilPct?: number | null; gpu?: number | null }
 
 /** 进程详情数据（供 ProcsTable / TagGroups 点击查看）。 */
 function procDetailData(p: ProcLike, tagLabel?: string): DetailData {
@@ -1403,6 +1404,7 @@ function procDetailData(p: ProcLike, tagLabel?: string): DetailData {
     : (p.gpu !== undefined && p.gpu !== null && !Number.isNaN(p.gpu) ? p.gpu : null)
   const stats: DetailStat[] = [
     { label: '进程 PID', value: String(p.pid) },
+    { label: '父进程 PPID', value: p.ppid !== undefined && p.ppid !== null ? String(p.ppid) : '-' },
     { label: 'GPU 占用', value: gpu !== null ? Math.round(gpu) + '%' : '-', color: utilColor(gpu) },
     { label: 'CPU 占用', value: p.cpuPct !== null && p.cpuPct !== undefined ? Math.round(p.cpuPct) + '%' : '-', color: utilColor(p.cpuPct) },
     { label: '内存', value: fmtGiB(p.memMiB) + 'G' },

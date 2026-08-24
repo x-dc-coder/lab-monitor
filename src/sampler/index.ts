@@ -12,8 +12,14 @@ import { WindowsNativeBackend } from './backend-windows-native.js'
 /** #14 监控目标模式：auto=按平台自动（WSL→windows）；windows/linux=强制指定 */
 export type BackendMode = 'auto' | 'windows' | 'linux' | 'windows-native'
 
-/** 平台探测：/proc/version 含 microsoft → 'wsl'；否则纯 Linux */
+/** 平台探测：#15 原生 Windows（process.platform==='win32'，无 /proc）→ 'windows-native'；
+ *  否则 /proc/version 含 microsoft → 'wsl'；其余 'linux' */
 export async function detectPlatform(runner: Runner): Promise<string> {
+  // 原生 Windows：node 直接跑在 Windows（无 WSL interop），process.platform 可信
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (typeof process !== 'undefined' && (process as any).platform === 'win32') {
+    return 'windows-native'
+  }
   const r = await runner.exec('cat /proc/version 2>/dev/null | head -1')
   const v = (r.stdout || '') + ' ' + (r.stderr || '')
   if (/microsoft/i.test(v)) return 'wsl'
@@ -40,6 +46,9 @@ export async function createBackend(runner: Runner, mode: BackendMode = 'auto'):
   }
   // auto：按平台自动（现状）
   const platform = await detectPlatform(runner)
+  if (platform === 'windows-native') {
+    return { backend: new WindowsNativeBackend(runner), platform }
+  }
   if (platform === 'wsl') {
     return { backend: new WindowsBackend(runner), platform }
   }

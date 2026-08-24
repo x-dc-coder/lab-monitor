@@ -200,3 +200,16 @@ MONITOR_INGEST_TOKEN=<openssl rand -hex 32>
 - SSE 实时事件通道（实验 start/end 即时翻牌、告警即时上屏）——补 EventSource 或 `curl -N`；
 - 面板侧 lab 告警联动（实验崩溃 → 面板红灯/webhook）；
 - 多节点（pi 实验机）同协议接入（node_id 区分即可）。
+
+---
+
+## 附录：#13 待优化项落地记录（2026-08-24）
+
+| 项 | 状态 | 落地 |
+|---|---|---|
+| #13-2 GPU 趋势 | ✅ 部署 | lab 视图趋势图（1h/24h，samples 通道）+ 转发器 30s 窗口聚合 avg/max 双值（gpu_util_max） |
+| #13-1 SSE 数据模型 | ✅ 部署 | 转发器 payload 加 procs_top（Top10 进程）+ tags（标签组聚合）；面板 Top 进程/标签组窗口 |
+| 附加 CPU/内存 | ✅ 部署 | 转发器补推 cpu_percent/mem_percent/used/total；前端 5 gauge 卡 |
+| #13-3 差异化阈值 | 🔧 代码完成 | resolveThresholds 覆盖链（全局→byExpType→byTag）；set-threshold 支持 thresholdOverrides；client 设置页 JSON 编辑；**待 DSH 重启 + 阈值数值拍板** |
+
+版本锚点：monitor-panel releases 20260824-181416 / 182702 / 184356；lab-monitor 提交 4d792ac / 76e1b1d（+ 转发器 9722278）

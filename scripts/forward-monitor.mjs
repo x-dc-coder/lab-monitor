@@ -75,7 +75,7 @@ function extract(snap) {
     alerts_crit: alerts.filter((a) => a.level === 'critical').length,
     alerts_warn: alerts.filter((a) => a.level === 'warn').length,
     monitor_enabled: snap.enabled === true ? 1 : 0,
-    experiment: exp ? { cmd: exp.cmd, type: exp.type, startTs: exp.startTs } : null,
+    experiment: exp ? { runId: exp.runId, cmd: exp.cmd, type: exp.type, startTs: exp.startTs } : null,
   };
   return { metrics, payload };
 }

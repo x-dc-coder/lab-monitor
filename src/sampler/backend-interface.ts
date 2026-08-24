@@ -47,6 +47,8 @@ export interface ProcSample {
   ppid?: number | null
   /** 每进程显存 MiB —— 预留字段，当前不启用（Windows/WSL 受限于 [N/A]，恒 null） */
   gpuMemMiB?: number | null
+  /** #16 进程启动时间（epoch 毫秒；Windows 来自 CIM CreationDate，Linux 来自 ps etimes） */
+  startTs?: number
   /** v1.1 遗留字段：语义定稿为 GPU 利用率 %（与 gpuUtilPct 同值，兼容保留） */
   gpu?: number | null
 }

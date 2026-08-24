@@ -44,6 +44,8 @@ interface ProcView {
   memMiB?: number | null
   gpu?: number | null
   gpuUtilPct?: number | null
+  /** #16 进程启动时间（epoch 毫秒；Windows CIM / Linux ps） */
+  startTs?: number
 }
 interface AlertView {
   level: string
@@ -1413,7 +1415,32 @@ interface DetailData {
 }
 
 /** 详情用的进程形状：兼容 ProcView（cmd: string）与标签组进程（cmd: string|null）两种来源。 */
-type ProcLike = { pid: number; ppid?: number | null; cmd?: string | null; cpuPct?: number | null; memMiB?: number | null; gpuUtilPct?: number | null; gpu?: number | null }
+type ProcLike = { pid: number; ppid?: number | null; cmd?: string | null; cpuPct?: number | null; memMiB?: number | null; gpuUtilPct?: number | null; gpu?: number | null; startTs?: number }
+
+/** #16 启动时间格式化：MM-DD HH:MM:SS（跨天可见日期） */
+function fmtDateTime(ts: number | null | undefined): string {
+  if (!ts || !Number.isFinite(ts)) return '-'
+  try {
+    const d = new Date(ts)
+    const p = (n: number): string => ('0' + n).slice(-2)
+    return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds())
+  } catch (e) {
+    return '-'
+  }
+}
+
+/** #16 运行时长格式化：从 startTs 到当前（<60s 显示秒；<24h 显示时分；以上显示天） */
+function fmtElapsed(startTs: number | null | undefined): string {
+  if (!startTs || !Number.isFinite(startTs)) return '-'
+  const diffMs = Math.max(0, Date.now() - startTs)
+  const s = Math.floor(diffMs / 1000)
+  if (s < 60) return s + 's'
+  const m = Math.floor(s / 60)
+  if (m < 60) return m + 'm' + (s % 60) + 's'
+  const h = Math.floor(m / 60)
+  if (h < 24) return h + 'h' + (m % 60) + 'm'
+  return Math.floor(h / 24) + 'd ' + (h % 24) + 'h'
+}
 
 /** #16 增强上下文：进程详情所需的全局数据（experiments 关联 / 监控目标 / 全量 procs 进程树） */
 interface ProcDetailCtx {
@@ -1433,6 +1460,9 @@ function procDetailData(p: ProcLike, tagLabel?: string, ctx?: ProcDetailCtx): De
   const stats: DetailStat[] = [
     { label: '进程 PID', value: String(p.pid) },
     { label: '父进程 PPID', value: p.ppid !== undefined && p.ppid !== null ? String(p.ppid) : '-' },
+    // #16 启动时间 / 运行时长（startTs 来自 Windows CIM / Linux ps）
+    { label: '启动时间', value: fmtDateTime(p.startTs) },
+    { label: '已运行', value: fmtElapsed(p.startTs) },
     { label: 'GPU 占用', value: gpu !== null ? Math.round(gpu) + '%' : '-', color: utilColor(gpu) },
     { label: 'CPU 占用', value: p.cpuPct !== null && p.cpuPct !== undefined ? Math.round(p.cpuPct) + '%' : '-', color: utilColor(p.cpuPct) },
     { label: '内存', value: fmtGiB(p.memMiB) + 'G' },

@@ -47,7 +47,7 @@ export const PS_SYSMEM = [
     '$p=Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average; ' +
     '$m=Get-CimInstance Win32_OperatingSystem; ' +
     '"{0};{1};{2}" -f $p.Average,$m.TotalVisibleMemorySize,$m.FreePhysicalMemory; ' +
-    'Get-CimInstance Win32_Process | ForEach-Object { "{0};{1};{2}" -f $_.ProcessId,$_.ParentProcessId,$_.Name }',
+    'Get-CimInstance Win32_Process | ForEach-Object { "{0};{1};{2};{3}" -f $_.ProcessId,$_.ParentProcessId,$_.Name,[DateTimeOffset]::new($_.CreationDate).ToUnixTimeMilliseconds() }',
 ]
 
 /** Windows 进程表（tasklist）：CSV 含头部 */

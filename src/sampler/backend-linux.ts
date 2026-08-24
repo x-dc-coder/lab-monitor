@@ -107,21 +107,24 @@ export class LinuxBackend implements SamplerBackend {
     const [mem, stat, psOut] = await Promise.all([
       this.readMeminfo(),
       this.readStat(),
-      this.runner.exec('ps -eo pid=,ppid=,pcpu=,rss=,args= --no-headers 2>/dev/null | head -100'),
+      this.runner.exec('ps -eo pid=,ppid=,pcpu=,rss=,etimes=,args= --no-headers 2>/dev/null | head -100'),
     ])
     const cpu = { percent: null as number | null, cores: null as number | null }
     if (stat) cpu.percent = this.cpuPercent(stat)
     const procs: ProcSample[] = []
     if (psOut && psOut.code === 0) {
       for (const line of (psOut.stdout || '').split('\n')) {
-        const mm = line.trim().match(/^(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(.*)$/)
+        // #16 启动时间：ps etimes（运行秒数，纯数字无空格）→ startTs = now - etimes*1000
+        const mm = line.trim().match(/^(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\d+)\s+(.*)$/)
         if (mm) {
+          const etimes = parseInt(mm[5], 10)
           procs.push({
             pid: parseInt(mm[1], 10),
             ppid: parseInt(mm[2], 10),
-            cmd: mm[5],
+            cmd: mm[6],
             cpuPct: parseFloat(mm[3]),
             memMiB: Math.round(parseInt(mm[4], 10) / 1024), // rss kB → MiB（A3 补齐）
+            startTs: Number.isFinite(etimes) ? ts - etimes * 1000 : undefined,
           })
         }
       }

@@ -22,7 +22,7 @@ export class WindowsBackend implements SamplerBackend {
 
   private runner: Runner
   private spawned: { kill(): void }[] = [] // spawn 记录（close 清理，D2-1）
-  private cimCache: CacheEntry<{ ok: boolean; cpuPercent: number | null; totalMiB: number; availableMiB: number; ppidMap: Record<number, number>; reason?: string }> | null = null
+  private cimCache: CacheEntry<{ ok: boolean; cpuPercent: number | null; totalMiB: number; availableMiB: number; ppidMap: Record<number, number>; startTsMap: Record<number, number>; reason?: string }> | null = null
   private taskCache: CacheEntry<{ ok: boolean; procs: ProcSample[]; reason?: string }> | null = null
   private gpuQueryCache: CacheEntry<{ ok: boolean; gpus: GpuSample[]; reason?: string }> | null = null
   private pmonCache: CacheEntry<{ ok: boolean; byPid: Map<number, number>; reason?: string }> | null = null
@@ -138,21 +138,27 @@ export class WindowsBackend implements SamplerBackend {
    * CPU/内存/进程树（CIM，TTL 5s；interop 断 → 回退 /proc，D1-1）
    * 输出：首行 "cpuLoad;totalKB;freeKB"，随后每进程 "pid;ppid;name" 行 → ppidMap（进程树骨架，A4）
    */
-  private async sysMemCim(): Promise<{ ok: boolean; cpuPercent: number | null; totalMiB: number; availableMiB: number; ppidMap: Record<number, number>; reason?: string }> {
+  private async sysMemCim(): Promise<{ ok: boolean; cpuPercent: number | null; totalMiB: number; availableMiB: number; ppidMap: Record<number, number>; startTsMap: Record<number, number>; reason?: string }> {
     const cached = this.cacheGet(this.cimCache, WIN.TTL.CIM)
     if (cached !== undefined) return cached
     const r = await this.runner.execArgs(WIN.POWERSHELL, WIN.PS_SYSMEM)
-    if (r.code !== 0) return { ok: false, cpuPercent: null, totalMiB: 0, availableMiB: 0, ppidMap: {}, reason: 'CIM 失败 code=' + r.code }
+    if (r.code !== 0) return { ok: false, cpuPercent: null, totalMiB: 0, availableMiB: 0, ppidMap: {}, startTsMap: {}, reason: 'CIM 失败 code=' + r.code }
     const lines = (r.stdout || '').trim().split('\n')
     const parts = lines.length ? lines[0].trim().split(';') : []
-    if (parts.length < 3) return { ok: false, cpuPercent: null, totalMiB: 0, availableMiB: 0, ppidMap: {}, reason: 'CIM 输出格式异常: ' + r.stdout }
+    if (parts.length < 3) return { ok: false, cpuPercent: null, totalMiB: 0, availableMiB: 0, ppidMap: {}, startTsMap: {}, reason: 'CIM 输出格式异常: ' + r.stdout }
     const ppidMap: Record<number, number> = {}
+    const startTsMap: Record<number, number> = {}
     for (let i = 1; i < lines.length; i++) {
       const f = lines[i].trim().split(';')
       if (f.length >= 3) {
         const pid = parseInt(f[0], 10)
         const ppid = parseInt(f[1], 10)
         if (Number.isFinite(pid) && Number.isFinite(ppid)) ppidMap[pid] = ppid
+        // #16 启动时间：PowerShell 端 [DateTimeOffset].ToUnixTimeMilliseconds() 已算好毫秒（本地时区正确，避免 Node Date.parse 斜杠格式按 UTC 解析的 8h 偏差）
+        if (f.length >= 4) {
+          const t = parseInt(f[3], 10)
+          if (Number.isFinite(t) && t > 0) startTsMap[pid] = t
+        }
       }
     }
     const res = {
@@ -171,6 +177,7 @@ export class WindowsBackend implements SamplerBackend {
         return Number.isFinite(n) ? Math.round(n / 1024) : 0
       })(),
       ppidMap,
+      startTsMap,
     }
     this.cacheSet('_cimCache', res)
     return res
@@ -347,6 +354,13 @@ export class WindowsBackend implements SamplerBackend {
       for (let i = 0; i < procs.length; i++) {
         const pp = sys.ppidMap[procs[i].pid]
         if (pp !== undefined) procs[i].ppid = pp
+      }
+    }
+    // #16 启动时间：CIM CreationDate 按 pid 归并到进程表
+    if (sys.ok && Object.keys(sys.startTsMap).length > 0) {
+      for (let i = 0; i < procs.length; i++) {
+        const st = sys.startTsMap[procs[i].pid]
+        if (st !== undefined) procs[i].startTs = st
       }
     }
     if (pmon.byPid.size > 0) {

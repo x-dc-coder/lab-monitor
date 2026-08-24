@@ -1078,8 +1078,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         for (const p of baseProcsFull) {
           if (p.cmd && tagMatches(rule, p.cmd)) {
             pids.push(p.pid)
-            // #16：members 补 ppid（进程详情展示父进程）
-            members.push({ pid: p.pid, ppid: typeof p.ppid === 'number' ? p.ppid : null, cmd: p.cmd, cpuPct: typeof p.cpuPct === 'number' ? p.cpuPct : null, memMiB: typeof p.memMiB === 'number' ? p.memMiB : null, gpuUtilPct: typeof p.gpuUtilPct === 'number' ? p.gpuUtilPct : null })
+            // #16：members 补 ppid/startTs（进程详情展示父进程 + 启动时间/运行时长）
+            members.push({ pid: p.pid, ppid: typeof p.ppid === 'number' ? p.ppid : null, cmd: p.cmd, cpuPct: typeof p.cpuPct === 'number' ? p.cpuPct : null, memMiB: typeof p.memMiB === 'number' ? p.memMiB : null, gpuUtilPct: typeof p.gpuUtilPct === 'number' ? p.gpuUtilPct : null, startTs: typeof p.startTs === 'number' ? p.startTs : undefined })
           }
         }
         if (!pids.length) continue

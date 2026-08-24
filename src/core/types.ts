@@ -47,6 +47,10 @@ export interface SamplePoint {
   system?: SystemStats | null
   /** 1.2：是否有实验 running（告警归属仲裁输入） */
   experimentActive?: boolean
+  /** #13-3 差异化阈值：当前主实验类型（gpu-train/gpu-calc/long/...；无实验=undefined） */
+  experimentType?: string | null
+  /** #13-3 差异化阈值：主实验 cmd 命中的标签组 label 列表（byTag 覆盖键） */
+  tagHits?: string[] | null
   degraded?: { gpu?: string; reason?: string } | null
 }
 

@@ -10,7 +10,7 @@
  */
 import { ALERT_MAX, SAMPLE_MS, THRESHOLD_DEFAULTS } from './constants.js'
 import type { Alert, ProcStat, SamplePoint } from './types.js'
-import type { Thresholds } from './constants.js'
+import type { ThresholdOverrides, Thresholds } from './constants.js'
 
 // ── §6 阈值 ──────────────────────────────────────────────────────────────────
 
@@ -18,10 +18,14 @@ export interface ThresholdCtrl {
   get(): Thresholds
   effectiveTimestamp(): number
   apply(patch: Partial<Thresholds>, isDirect: boolean): boolean
+  /** #13-3 差异化阈值：设置分层覆盖（实验类型 / 标签组级） */
+  setOverrides(overrides: ThresholdOverrides | null | undefined): void
+  getOverrides(): ThresholdOverrides
 }
 
 export function createThresholds(): ThresholdCtrl {
   const t: Thresholds = { ...THRESHOLD_DEFAULTS }
+  let overrides: ThresholdOverrides = {}
   let appliedAt = 0
   return {
     get(): Thresholds {
@@ -45,7 +49,35 @@ export function createThresholds(): ThresholdCtrl {
       if (changed) appliedAt = Date.now()
       return changed
     },
+    setOverrides(o: ThresholdOverrides | null | undefined): void {
+      overrides = (o && typeof o === 'object') ? o : {}
+    },
+    getOverrides(): ThresholdOverrides {
+      return overrides
+    },
   }
+}
+
+/** #13-3 差异化阈值：解析当前生效阈值——覆盖链 全局 → 实验类型 → 标签组（后级覆盖前级同名键） */
+export function resolveThresholds(
+  w: { experimentType?: string | null; tagHits?: string[] | null },
+  thr: Thresholds,
+  overrides: ThresholdOverrides,
+): Thresholds {
+  const ov = { ...thr }
+  const byExp = overrides.byExpType || {}
+  const byTag = overrides.byTag || {}
+  // 1) 实验类型级
+  if (w.experimentType && byExp[w.experimentType]) {
+    Object.assign(ov, byExp[w.experimentType])
+  }
+  // 2) 标签组级（主实验进程组命中的标签，按序覆盖——后命中的标签后覆盖）
+  if (w.tagHits && w.tagHits.length) {
+    for (const label of w.tagHits) {
+      if (byTag[label]) Object.assign(ov, byTag[label])
+    }
+  }
+  return ov
 }
 
 // ── §5 balancer（1.2：归属仲裁） ─────────────────────────────────────────────
@@ -325,6 +357,8 @@ export interface AlertClearFilter {
 
 interface BalancerDeps {
   thresholds(): Thresholds
+  /** #13-3 差异化阈值：分层覆盖配置（createThresholds.getOverrides） */
+  thresholdOverrides(): ThresholdOverrides
   emitLab(type: string, data: Record<string, unknown>): void
   /** M1（issue#5 升级规则）：warn 持续超该时长 → notify 视为 critical；≤0 = 关闭 */
   escalateAfterMs(): number
@@ -445,7 +479,8 @@ export function createBalancer(deps: BalancerDeps): Balancer {
   function evaluate(windowSnaps: SamplePoint[], runId: string | null): Alert[] {
     if (!windowSnaps || !windowSnaps.length) return []
     const w = windowSnaps[windowSnaps.length - 1]
-    const thr = deps.thresholds()
+    // #13-3 差异化阈值：全局 → 实验类型 → 标签组 覆盖链（无覆盖时等效全局）
+    const thr = resolveThresholds(w, deps.thresholds(), deps.thresholdOverrides())
     const out: Alert[] = []
     for (let i = 0; i < RULES.length; i++) {
       const R = RULES[i]

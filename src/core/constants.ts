@@ -29,6 +29,13 @@ export const THRESHOLD_DEFAULTS = {
   // 2026-08-23：进程排序（取前 N + 权重，均可调）
   procTopN: 30, wGpu: 1, wCpu: 1, wMem: 1,
 }
+/** #13-3 差异化阈值：全局阈值的分层覆盖（全局 → 实验类型 → 标签组）
+ *  byExpType: { gpu-train: { utilWarn: 60, memWarn: 90 }, ... }
+ *  byTag:     { "推理服务": { memWarn: 95 }, ... }（按主实验进程组命中的标签组） */
+export interface ThresholdOverrides {
+  byExpType?: Record<string, Partial<Thresholds>>
+  byTag?: Record<string, Partial<Thresholds>>
+}
 export type Thresholds = typeof THRESHOLD_DEFAULTS
 export const THRESH_KEYS = ['utilWarn', 'memWarn', 'tempWarn', 'pollMs', 'procTopN', 'wGpu', 'wCpu', 'wMem'] as const
 

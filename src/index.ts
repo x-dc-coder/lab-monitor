@@ -35,7 +35,7 @@ import {
   matchTrainFeature,
   normalizeCmdForMatch,
 } from './core/constants.js'
-import type { Thresholds } from './core/constants.js'
+import type { ThresholdOverrides, Thresholds } from './core/constants.js'
 import type { ExpType } from './core/types.js'
 import type { MonitorSnapshot, SamplePoint } from './core/types.js'
 
@@ -385,6 +385,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   const recentWindow: SamplePoint[] = [] // 最近 10s 快照窗口（2s × 5）
   const balancer = createBalancer({
     thresholds: () => thresholds.get(),
+    // #13-3 差异化阈值：分层覆盖配置
+    thresholdOverrides: () => thresholds.getOverrides(),
     emitLab,
     // M1（issue#5 升级规则）：warn 持续超 escalateAfterSec → 通知升 critical（≤0 关闭）
     escalateAfterMs: () => (cfg.escalateAfterSec > 0 ? cfg.escalateAfterSec * 1000 : 0),
@@ -880,6 +882,16 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         pt.group = agg.group
         pt.system = agg.system
         pt.experimentActive = !!curRun
+        // #13-3 差异化阈值：注入主实验类型 + 命中的标签组（cmd 匹配标签规则）
+        pt.experimentType = curRun ? (curRun.type ?? null) : null
+        if (curRun) {
+          const tagHits = tagSet()
+            .filter((r) => r.kind === 'experiment' && curRun.cmd && tagMatches(r, curRun.cmd))
+            .map((r) => r.label)
+          pt.tagHits = tagHits.length ? tagHits : null
+        } else {
+          pt.tagHits = null
+        }
         // 并行实验各自聚合（非主实验；主实验走上面 agg 避免重复计算）
         for (const r of machine.all()) {
           if (!r.procGroup || !r.procGroup.size || r.runId === (curRun ? curRun.runId : null)) continue
@@ -905,6 +917,17 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         wLast.group = lastGroupStats
         wLast.system = lastSystemStats
         wLast.experimentActive = !!machine.cur()
+        // #13-3 差异化阈值：非 ps 周期回退点同步主实验类型/标签命中
+        const cur = machine.cur()
+        wLast.experimentType = cur ? (cur.type ?? null) : null
+        wLast.tagHits = cur
+          ? (() => {
+              const hits = tagSet()
+                .filter((r) => r.kind === 'experiment' && cur.cmd && tagMatches(r, cur.cmd))
+                .map((r) => r.label)
+              return hits.length ? hits : null
+            })()
+          : null
       }
       // 2026-08-20（A2 多轨）：资源类告警归属主实验（cur）；experiment-crash 走 run 独立路径（conclude 已带 runId）
       const mainRun = machine.cur()
@@ -1187,6 +1210,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             wCpu: Schema.number().default(THRESHOLD_DEFAULTS.wCpu),
             wMem: Schema.number().default(THRESHOLD_DEFAULTS.wMem),
           }),
+          // #13-3 差异化阈值：分层覆盖持久化（全局 → 实验类型 → 标签组）
+          // 宽松 schema：any 接受 {byExpType:{type:{utilWarn:60,...}}, byTag:{label:{...}}} 任意形态
+          thresholdOverrides: Schema.any().default({}),
           watchProcs: Schema.array(Schema.string()).default([]),
           // 2026-08-20（标签分组）：进程标签规则持久化
           tags: Schema.array(Schema.object({
@@ -1230,8 +1256,12 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         })
         settingsScope = settingsSvc.register('lab-monitor', persistSchema, { applies: 'live' })
         // 读回持久化基线（重启后 lab_ctl 改的阈值 / watch 动态注册 / 标签不再丢失）
-        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[]; history?: unknown[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; notifyTimeoutMs?: number; broadcast?: boolean; experimentTypes?: unknown[]; expTypeDefault?: string; expTypeLearning?: boolean; subagentPolicy?: 'readonly' | 'restricted' | 'full' } | null
+        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; thresholdOverrides?: ThresholdOverrides; watchProcs?: string[]; tags?: TagRule[]; history?: unknown[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; notifyTimeoutMs?: number; broadcast?: boolean; experimentTypes?: unknown[]; expTypeDefault?: string; expTypeLearning?: boolean; subagentPolicy?: 'readonly' | 'restricted' | 'full' } | null
         if (stored && stored.thresholds) thresholds.apply(stored.thresholds as never, true)
+        // #13-3 差异化阈值：恢复分层覆盖
+        if (stored && stored.thresholdOverrides && typeof stored.thresholdOverrides === 'object') {
+          thresholds.setOverrides(stored.thresholdOverrides)
+        }
         if (stored && Array.isArray(stored.watchProcs)) {
           cfg.watchProcs = stored.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
         }
@@ -1404,7 +1434,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     persistState() // 2026-08-20：P2 2' —— 阈值写回 settings 持久化（重启不丢失）
     return { ok: true, applied: thresholds.get() }
   }
-  function rpcControl(args?: { action?: string; runId?: string | null; rule?: string | null; alertNotify?: string; escalateAfterSec?: number; notifyThrottleMs?: number }) {
+  function rpcControl(args?: { action?: string; runId?: string | null; rule?: string | null; alertNotify?: string; escalateAfterSec?: number; notifyThrottleMs?: number; thresholds?: Partial<Record<string, number>>; thresholdOverrides?: ThresholdOverrides }) {
     const action = args && args.action
     if (action === 'start') { enabled = true; emitLab('lab/status-flip', { enabled: true }) }
     else if (action === 'pause') { enabled = false; emitLab('lab/status-flip', { enabled: false }) }
@@ -1666,6 +1696,15 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                 },
                 description: 'set-threshold 时的阈值',
               },
+              thresholdOverrides: {
+                type: 'object',
+                additionalProperties: true,
+                properties: {
+                  byExpType: { type: 'object', additionalProperties: true, description: '按实验类型覆盖：{"gpu-train": {"utilWarn": 60, "memWarn": 90}, "gpu-calc": {...}}' },
+                  byTag: { type: 'object', additionalProperties: true, description: '按标签组覆盖：{"推理服务": {"memWarn": 95}}（主实验 cmd 命中标签时生效）' },
+                },
+                description: '#13-3 差异化阈值（set-threshold 时可选）：全局 → 实验类型 → 标签组 分层覆盖链',
+              },
               tag: {
                 type: 'object',
                 additionalProperties: true,
@@ -1735,8 +1774,24 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                   const v = a.thresholds && (a.thresholds as Record<string, unknown>)[k]
                   if (typeof v === 'number' && isFinite(v)) thr[k] = v
                 }
+                // #13-3 差异化阈值：set-threshold 支持 thresholdOverrides（分层覆盖）写入
+                //   形态：{ byExpType: { "gpu-train": { utilWarn: 60, memWarn: 90 } },
+                //          byTag:     { "推理服务": { memWarn: 95 } } }
+                let ovChanged = false
+                const ov = (a as Record<string, unknown>).thresholdOverrides as ThresholdOverrides | undefined
+                if (ov && typeof ov === 'object') {
+                  const cur = thresholds.getOverrides()
+                  const next: ThresholdOverrides = {
+                    byExpType: ov.byExpType && typeof ov.byExpType === 'object' ? ov.byExpType : (cur.byExpType || {}),
+                    byTag: ov.byTag && typeof ov.byTag === 'object' ? ov.byTag : (cur.byTag || {}),
+                  }
+                  thresholds.setOverrides(next)
+                  ovChanged = true
+                }
                 // 1.2：写阈值时返回当前拆分统计（快照语义，Agent 设置前可见证据）
-                return sanitizeJson({ ok: true, applied: rpcSetThresholds(thr).applied, system: lastSystemStats }) as never
+                const r = rpcSetThresholds(thr)
+                if (r.applied || ovChanged) persistState()
+                return sanitizeJson({ ok: true, applied: r.applied, overrides: thresholds.getOverrides(), system: lastSystemStats }) as never
               }
               if (a.action === 'tag') {
                 return sanitizeJson(rpcTag(a.tag || {})) as never

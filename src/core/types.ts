@@ -214,6 +214,8 @@ export interface MonitorSnapshot {
     byExpType?: Record<string, { utilWarn?: number; memWarn?: number; tempWarn?: number }>
     byTag?: Record<string, { utilWarn?: number; memWarn?: number; tempWarn?: number }>
   }
+  /** #14 监控目标模式（auto/windows/linux/windows-native，配置页下拉显示） */
+  backendMode?: 'auto' | 'windows' | 'linux' | 'windows-native'
   /** 2026-08-22（P1 设置面）：监控引擎启停状态（start/pause/resume 的真实反映——UI 控制区显示） */
   enabled?: boolean
   /** M1（issue#5）：当前生效通知策略（client 设置页展示 + lab_status 可见） */

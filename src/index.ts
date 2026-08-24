@@ -18,7 +18,7 @@ import type { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import Schema from '@deepseek-ai/schemastery'
 
-import { createBackend, collectSnapshot, probeBackend } from './sampler/index.js'
+import { createBackend, collectSnapshot, probeBackend, type BackendMode } from './sampler/index.js'
 import type { ProcSample, Runner, SamplerBackend, Snapshot } from './sampler/backend-interface.js'
 import { createRing } from './core/ring.js'
 import { createStateMachine, parsePs } from './core/state-machine.js'
@@ -45,6 +45,8 @@ import type { MonitorSnapshot, SamplePoint } from './core/types.js'
 export interface LabMonitorConfig {
   /** 是否注入 labstatus 到 system prompt（默认关——KV 缓存友好；用 lab_status 工具按需查询） */
   promptInjection: boolean
+  /** #14 监控目标模式：auto=按平台（WSL→windows）/ windows / linux（强制切换） */
+  backendMode: BackendMode
   /** 采样周期 ms */
   sampleMs: number
   /** UI 轮询周期 ms */
@@ -301,6 +303,8 @@ export const inject = ['shell', 'timer', 'webServer', 'tools']
 export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   const cfg: LabMonitorConfig = {
     promptInjection: config.promptInjection ?? false,
+    // #14 监控目标模式：默认 auto（按平台）
+    backendMode: (config.backendMode === 'windows' || config.backendMode === 'linux' || config.backendMode === 'windows-native') ? config.backendMode : 'auto',
     sampleMs: config.sampleMs ?? SAMPLE_MS,
     pollMs: config.pollMs ?? THRESHOLD_DEFAULTS.pollMs,
     watchProcs: Array.isArray(config.watchProcs) ? config.watchProcs.slice() : [],
@@ -944,7 +948,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   let streamTask: Promise<void> | null = null
   async function startBackend() {
     try {
-      const res = await createBackend(runner)
+      const res = await createBackend(runner, cfg.backendMode)
       backendState.backend = res.backend
       backendState.platform = res.platform
       const probe = await probeBackend(res.backend)
@@ -1135,6 +1139,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       thresholds: thresholds.get(),
       // #13-3 差异化阈值：分层覆盖透出（client 设置页可读可编辑）
       thresholdOverrides: thresholds.getOverrides(),
+      // #14 监控目标模式透出（配置页下拉显示当前值）
+      backendMode: cfg.backendMode,
       enabled,
       // M1（issue#5）：通知策略当前生效值透出（client 设置页展示 + Agent lab_status 可见）
       notify: {
@@ -1216,6 +1222,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           // #13-3 差异化阈值：分层覆盖持久化（全局 → 实验类型 → 标签组）
           // 宽松 schema：any 接受 {byExpType:{type:{utilWarn:60,...}}, byTag:{label:{...}}} 任意形态
           thresholdOverrides: Schema.any().default({}),
+          // #14 监控目标模式（auto/windows/linux）
+          backendMode: Schema.union([Schema.const('auto'), Schema.const('windows'), Schema.const('linux')]).default('auto'),
           watchProcs: Schema.array(Schema.string()).default([]),
           // 2026-08-20（标签分组）：进程标签规则持久化
           tags: Schema.array(Schema.object({
@@ -1259,11 +1267,15 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         })
         settingsScope = settingsSvc.register('lab-monitor', persistSchema, { applies: 'live' })
         // 读回持久化基线（重启后 lab_ctl 改的阈值 / watch 动态注册 / 标签不再丢失）
-        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; thresholdOverrides?: ThresholdOverrides; watchProcs?: string[]; tags?: TagRule[]; history?: unknown[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; notifyTimeoutMs?: number; broadcast?: boolean; experimentTypes?: unknown[]; expTypeDefault?: string; expTypeLearning?: boolean; subagentPolicy?: 'readonly' | 'restricted' | 'full' } | null
+        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; thresholdOverrides?: ThresholdOverrides; backendMode?: BackendMode; watchProcs?: string[]; tags?: TagRule[]; history?: unknown[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; notifyTimeoutMs?: number; broadcast?: boolean; experimentTypes?: unknown[]; expTypeDefault?: string; expTypeLearning?: boolean; subagentPolicy?: 'readonly' | 'restricted' | 'full' } | null
         if (stored && stored.thresholds) thresholds.apply(stored.thresholds as never, true)
         // #13-3 差异化阈值：恢复分层覆盖
         if (stored && stored.thresholdOverrides && typeof stored.thresholdOverrides === 'object') {
           thresholds.setOverrides(stored.thresholdOverrides)
+        }
+        // #14 监控目标模式恢复（settings.yaml backendMode 或持久化值）
+        if (stored && (stored.backendMode === 'windows' || stored.backendMode === 'linux' || stored.backendMode === 'windows-native')) {
+          cfg.backendMode = stored.backendMode
         }
         if (stored && Array.isArray(stored.watchProcs)) {
           cfg.watchProcs = stored.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
@@ -1302,11 +1314,15 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         // 外部修改（用户手改 settings.yaml / 其他配置面）实时生效
         if (typeof settingsScope.watch === 'function') {
           settingsScope.watch((next) => {
-            const v = next as { thresholds?: Partial<Thresholds>; thresholdOverrides?: ThresholdOverrides; watchProcs?: string[]; tags?: TagRule[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; broadcast?: boolean } | null
+            const v = next as { thresholds?: Partial<Thresholds>; thresholdOverrides?: ThresholdOverrides; backendMode?: BackendMode; watchProcs?: string[]; tags?: TagRule[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; broadcast?: boolean } | null
             if (v && v.thresholds) thresholds.apply(v.thresholds as never, true)
             // #13-3 差异化阈值：外部改 settings.yaml → 热更新 overrides（无需重启）
             if (v && v.thresholdOverrides && typeof v.thresholdOverrides === 'object') {
               thresholds.setOverrides(v.thresholdOverrides)
+            }
+            // #14 监控目标模式热更新（生效需重启后端；此处更新 cfg 供下次 startBackend 使用）
+            if (v && (v.backendMode === 'auto' || v.backendMode === 'windows' || v.backendMode === 'linux')) {
+              cfg.backendMode = v.backendMode
             }
             if (v && Array.isArray(v.watchProcs)) {
               cfg.watchProcs = v.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
@@ -1352,6 +1368,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         thresholds: thresholds.get(),
         // #13-3 差异化阈值：分层覆盖持久化
         thresholdOverrides: thresholds.getOverrides(),
+        // #14 监控目标模式持久化
+        backendMode: cfg.backendMode,
         watchProcs: watchSet(),
         tags: tagSet(),
         // 2026-08-22（P2）：ended 投影持久化（倒序投影与 snapshot() 一致；重启 restoreEnded 恢复）
@@ -1443,7 +1461,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     persistState() // 2026-08-20：P2 2' —— 阈值写回 settings 持久化（重启不丢失）
     return { ok: true, applied: thresholds.get() }
   }
-  function rpcControl(args?: { action?: string; runId?: string | null; rule?: string | null; alertNotify?: string; escalateAfterSec?: number; notifyThrottleMs?: number; thresholds?: Partial<Record<string, number>>; thresholdOverrides?: ThresholdOverrides }) {
+  function rpcControl(args?: { action?: string; mode?: string; runId?: string | null; rule?: string | null; alertNotify?: string; escalateAfterSec?: number; notifyThrottleMs?: number; thresholds?: Partial<Record<string, number>>; thresholdOverrides?: ThresholdOverrides }) {
     const action = args && args.action
     if (action === 'start') { enabled = true; emitLab('lab/status-flip', { enabled: true }) }
     else if (action === 'pause') { enabled = false; emitLab('lab/status-flip', { enabled: false }) }
@@ -1688,11 +1706,16 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             name: 'lab_ctl',
             description: '控制 Lab Monitor 监控/告警引擎（start/pause/resume/set-threshold/watch/tag/clear-alerts/history-manage）。护栏：只控制监控引擎，绝不触碰实验进程。',
             parameters: {
-              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch', 'tag', 'clear-alerts', 'set-notify', 'history-manage'], description: '操作类型（set-notify=设置告警通知策略；history-manage=实验历史管理）' },
+              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch', 'tag', 'clear-alerts', 'set-notify', 'history-manage', 'backend-mode'], description: '操作类型（set-notify=设置告警通知策略；history-manage=实验历史管理；backend-mode=切换监控目标）' },
               keywords: {
                 type: 'array',
                 items: { type: 'string' },
                 description: 'watch 时的进程名关键词列表（如 ["llama-server","vllm"]）；空数组=清空动态注册',
+              },
+              mode: {
+                type: 'string',
+                enum: ['auto', 'windows', 'linux'],
+                description: 'backend-mode 时的监控目标（auto=按平台；windows=Windows tasklist；linux=WSL 内 Linux 进程）',
               },
               thresholds: {
                 type: 'object',
@@ -1775,6 +1798,17 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                 // 命中预览：立即返回当前快照中命中 watchlist 的进程（Agent 可见证据）
                 const wp = buildSnapshot().watchedPids || []
                 return { ok: true, state: 'watchlist-updated', keywords: watchSet(), matchedPids: wp } as never
+              }
+              // #14 监控目标模式切换（生效需重启后端；持久化后下次 startBackend 使用）
+              if (a.action === 'backend-mode') {
+                const m = (a as Record<string, unknown>).mode
+                if (m === 'auto' || m === 'windows' || m === 'linux') {
+                  cfg.backendMode = m
+                  persistState()
+                  return sanitizeJson({ ok: true, state: 'backend-mode-updated', mode: cfg.backendMode,
+                    note: '生效需重启 DSH（后端在启动时按 backendMode 构建）' }) as never
+                }
+                return sanitizeJson({ ok: false, state: 'invalid-mode', note: 'mode ∈ auto|windows|linux' }) as never
               }
               if (a.action === 'set-threshold') {
                 const thr: Record<string, number> = {}

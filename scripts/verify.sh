@@ -63,6 +63,9 @@ if timeout 30 node scripts/verify-overrides.js >/dev/null 2>&1; then ok "verify-
 echo "== [5d] 进程详情增强验证（verify-proc-detail.js，#16 所属实验/监控徽标/进程树） =="
 if timeout 30 node scripts/verify-proc-detail.js >/dev/null 2>&1; then ok "verify-proc-detail ALL PASS"; else bad "verify-proc-detail 失败"; fi
 
+echo "== [5e] 监控目标切换验证（verify-backend-mode.js，#14 createBackend 四态分发） =="
+if timeout 30 node scripts/verify-backend-mode.js >/dev/null 2>&1; then ok "verify-backend-mode ALL PASS"; else bad "verify-backend-mode 失败"; fi
+
 if [ "$RUN_SAMPLER" -eq 1 ]; then
   echo "== [6] 真实采样实证（verify-sampler.js，GPU/interop 实测） =="
   if timeout 150 node scripts/verify-sampler.js >/dev/null 2>&1; then ok "verify-sampler 通过"; else bad "verify-sampler 失败"; fi

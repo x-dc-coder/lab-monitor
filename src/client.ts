@@ -88,6 +88,8 @@ interface SnapView {
     byExpType?: Record<string, { utilWarn?: number; memWarn?: number; tempWarn?: number }>
     byTag?: Record<string, { utilWarn?: number; memWarn?: number; tempWarn?: number }>
   }
+  /** #14 监控目标模式（auto/windows/linux；WSL 下可切换监控 Windows/Linux） */
+  backendMode?: 'auto' | 'windows' | 'linux' | 'windows-native'
   /** 2026-08-22（P1 设置面）：监控引擎启停状态 */
   enabled?: boolean
   /** M1（issue#5）：当前生效通知策略（设置页展示） */
@@ -433,6 +435,10 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
   const [wGpu, setWGpu] = React.useState<string>(thr && typeof thr.wGpu === 'number' ? String(thr.wGpu) : '1')
   const [wCpu, setWCpu] = React.useState<string>(thr && typeof thr.wCpu === 'number' ? String(thr.wCpu) : '1')
   const [wMem, setWMem] = React.useState<string>(thr && typeof thr.wMem === 'number' ? String(thr.wMem) : '1')
+  // #14 监控目标模式（auto/windows/linux；WSL 下可切换监控 Windows/Linux）
+  const [backendMode, setBackendMode] = React.useState<string>(s && s.backendMode ? s.backendMode : 'auto')
+  const [bmMsg, setBmMsg] = React.useState<string | null>(null)
+  const [bmBusy, setBmBusy] = React.useState(false)
   // #13-3 差异化阈值：分层覆盖 JSON 编辑（byExpType / byTag）
   const ov0 = s && s.thresholdOverrides
   const [ovJson, setOvJson] = React.useState<string>(JSON.stringify(ov0 && Object.keys(ov0).length ? ov0 : {
@@ -449,8 +455,10 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
   const ovKey = ov0 ? JSON.stringify(ov0) : ''
   React.useEffect(() => {
     if (ov0 && Object.keys(ov0).length) setOvJson(JSON.stringify(ov0, null, 2))
+    // #14：外部改 backendMode → 快照变化 → 下拉跟随
+    if (s && s.backendMode) setBackendMode(s.backendMode)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ovKey])
+  }, [ovKey, s && s.backendMode])
 
   // 2026-08-22：外部（lab_ctl / settings.yaml）改阈值 → 快照 thresholds 变化 → 本地表单跟随
   React.useEffect(() => {
@@ -524,6 +532,21 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
       })
       .catch(() => setOvMsg('调用失败'))
       .finally(() => setOvBusy(false))
+  }
+
+  // #14 监控目标模式切换（control backend-mode；生效需重启 DSH）
+  const setBackendModeNow = () => {
+    setBmBusy(true); setBmMsg(null)
+    apiCall<{ ok?: boolean; state?: string; note?: string }>('control', { action: 'backend-mode', mode: backendMode })
+      .then((r) => {
+        if (r && (r as { ok?: boolean }).ok) {
+          setBmMsg('已保存：' + backendMode + '（' + ((r as { note?: string }).note || '生效需重启') + '）')
+        } else {
+          setBmMsg((r as { error?: string } | undefined)?.error || '设置失败')
+        }
+      })
+      .catch(() => setBmMsg('调用失败'))
+      .finally(() => setBmBusy(false))
   }
 
   const setPaused = (pausedTo: boolean) => {
@@ -602,6 +625,22 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
       field('权重GPU', wGpu, setWGpu, 'GPU 利用率权重（0..20）'),
       field('权重CPU', wCpu, setWCpu, 'CPU 利用率权重（0..20）'),
       field('权重内存', wMem, setWMem, '内存占用权重（0..20）'),
+    ),
+    // #14 监控目标模式：下拉 + 保存（WSL 下切换 Windows/Linux 监控目标）
+    React.createElement('div', { key: 'bm', style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+      React.createElement('label', { style: { fontSize: 11, color: C.label2 } }, '监控目标'),
+      React.createElement('select', {
+        value: backendMode,
+        onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setBackendMode(e.target.value),
+        style: { ...inputStyle, width: 130, textAlign: 'left', cursor: 'pointer' },
+        title: 'auto=按平台（WSL→Windows）；windows=Windows tasklist；linux=WSL 内 Linux 进程',
+      },
+        React.createElement('option', { value: 'auto' }, 'auto（按平台）'),
+        React.createElement('option', { value: 'windows' }, 'windows（Windows 进程）'),
+        React.createElement('option', { value: 'linux' }, 'linux（WSL 内 Linux）'),
+      ),
+      React.createElement('button', { onClick: setBackendModeNow, disabled: bmBusy, style: btnStyle }, '应用'),
+      bmMsg ? React.createElement('span', { style: { fontSize: 10.5, color: C.brand } }, bmMsg) : null,
     ),
     // 操作行：保存 / 暂停/恢复 / 清除告警
     React.createElement('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 } },

@@ -147,6 +147,9 @@ MONITOR_INGEST_TOKEN=<openssl rand -hex 32>
   pid 写入 `forward-monitor.pid`；提供 `scripts/forward-monitor.sh {start|stop|status}` 封装；
 - 开机自启：`.bashrc`/`.profile` 追加 start 检查（幂等：pid 存活则跳过），
   或 Windows 任务计划（二期，非必须）。
+- **运行身份**：本机为开发环境（local 主机，账号 dc 单用户），**不适用"一服务一用户"规则**
+  （该规则仅针对 cloud 等远程服务器——服务账号 `<服务>-<主机名>`，2026-08-24 确认）。
+  转发器以 dc 运行合规，token 存 dc 家目录 600 即可。
 
 ### 5.3 不引入 SSE 的原因（本期）
 

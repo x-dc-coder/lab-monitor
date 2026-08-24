@@ -213,3 +213,14 @@ MONITOR_INGEST_TOKEN=<openssl rand -hex 32>
 | #13-3 差异化阈值 | 🔧 代码完成 | resolveThresholds 覆盖链（全局→byExpType→byTag）；set-threshold 支持 thresholdOverrides；client 设置页 JSON 编辑；**待 DSH 重启 + 阈值数值拍板** |
 
 版本锚点：monitor-panel releases 20260824-181416 / 182702 / 184356；lab-monitor 提交 4d792ac / 76e1b1d（+ 转发器 9722278）
+
+---
+
+## 附录：#14/#15 多平台支持落地记录（2026-08-24）
+
+| Issue | 内容 | 状态 | 提交 |
+|---|---|---|---|
+| #14 P1 | backendMode(auto/windows/linux) 配置 + createBackend 分发 + 配置页下拉 + settings 持久化/热更新 | ✅ | 9eefd18 |
+| #14 P2 | 纯 Linux 验收：pi(aarch64) 实测 LinuxBackend probe ok / CPU 差分 / 内存 / 进程全通道无降级 | ✅ | 实测 |
+| #15 | WindowsNativeBackend 委托 WindowsBackend + localWinRunner（不经 WSL interop）+ detectPlatform win32 探测 + auto 分发 | ✅ | 8dd5d7a |
+| 验证 | verify-backend-mode 8 断言（四态分发 + windows-native 委托 + probe 结构化）入 verify.sh [5e] | ✅ | — |

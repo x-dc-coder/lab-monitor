@@ -125,7 +125,7 @@
 
 ```json
 {
-  "type": "lab/experiment-start | lab/experiment-end | lab/alert",
+  "type": "lab/experiment-start | lab/experiment-end | lab/alert | lab/status-flip",
   "ts": 1787030000000,
   "runId": "run-20260818-001",
   "data": {}
@@ -134,9 +134,20 @@
 
 | 事件 | data 内容 |
 |---|---|
-| `lab/experiment-start` | `{ cmd, cmdFeature, startTs }`（无 pid，T1-1） |
-| `lab/experiment-end` | `{ endReason: 'done'\|'crashed'\|'aborted'\|'timeout', summary }` |
-| `lab/alert` | `{ level, rule, msg, confidence, actions[] }` |
+| `lab/experiment-start` | `{ cmd, cmdFeature, startTs, type, expTypeLayer, agentId, agentRole }`（M2/M3 增补） |
+| `lab/experiment-end` | `{ state: 'done'\|'crashed'\|'aborted', endTs, summary, type, agentId }`（#11 补全，2026-08-24） |
+| `lab/alert` | `{ level, rule, msg, confidence, actions[], severity, urgency, trend, sustainedMs, resource, origin }`（M1 扩展字段） |
+| `lab/status-flip` | `{ enabled }`（#11：pause/resume 状态翻转，2026-08-24） |
+
+## 4.1 SSE 远端事件流（#11，2026-08-24 新增）
+
+`GET /lab-monitor/events`（SSE/EventSource 长连接，localhost only；与 `/lab-monitor/api/*` JSON 拉取互补）：
+
+- 响应头：`Content-Type: text/event-stream` / `Cache-Control: no-cache` / `Connection: keep-alive` / `X-Accel-Buffering: no`
+- 事件格式：`event: <name>\ndata: <json>\n\n`（`<name>` = lab/ 后缀，如 `experiment-start`；data 含 `{ts, runId, ...}` 与 §4 对齐）
+- 心跳：15s `: ping` 保活；连接 close 自动清理
+- 回放：新连接先推最近 20 条事件缓冲（订阅者连上即有上下文）
+- 鉴权：当前 localhost only（known-issues #6）；开放端口转发需先加鉴权（backlog）
 
 ## 5. 出口层消费约束
 

@@ -150,6 +150,15 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     state.runs.delete(run.runId)
     state.history.unshift(run)
     if (state.history.length > MAX_HISTORY) state.history.length = MAX_HISTORY
+    // #11（2026-08-24 SSE 远端扩展）：实验结束事件（done/crashed/aborted 统一出口，供 SSE/订阅者）
+    deps.emitLab('lab/experiment-end', {
+      runId: run.runId,
+      state: run.state,
+      endTs: run.endTs,
+      summary: run.summary || null,
+      type: run.type,
+      agentId: run.agentId,
+    })
   }
 
   function conclude(run: RunRecord, reason: 'done' | 'crashed'): void {

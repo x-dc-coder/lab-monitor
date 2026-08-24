@@ -34,16 +34,16 @@ if timeout 180 pnpm build >/dev/null 2>&1; then ok "构建产物 lib/ 生成"; e
 
 echo "== [2] 目录完整性（计划 §1） =="
 MISSING=0
-for f in   src/index.ts   src/client.ts   src/sampler/backend-interface.ts   src/sampler/backend-linux.ts   src/sampler/backend-windows.ts   src/sampler/backend-windows-native.ts   src/sampler/index.ts   src/sampler/windows-paths.ts   src/core/constants.ts   src/core/types.ts   src/core/ring.ts   src/core/state-machine.ts   src/core/balancer.ts   package.json   tsconfig.json   tsdown.config.ts   cordis.patch.yml   scripts/verify.sh   scripts/verify-host.js   scripts/verify-sampler.js   scripts/e2e-host.js   scripts/mock-test.js   docs/01-architecture.md   docs/02-data-model.md   docs/03-protocol.md   docs/04-milestones.md   docs/05-ui-adapters.md   docs/PLAN-v1.4.5.md   docs/research/12-v2-migration.md ; do
+for f in   src/index.ts   src/client.ts   src/sampler/backend-interface.ts   src/sampler/backend-linux.ts   src/sampler/backend-windows.ts   src/sampler/backend-windows-native.ts   src/sampler/index.ts   src/sampler/windows-paths.ts   src/core/constants.ts   src/core/types.ts   src/core/ring.ts   src/core/state-machine.ts   src/core/balancer.ts   package.json   tsconfig.json   tsdown.config.ts   cordis.patch.yml   scripts/verify.sh   scripts/verify-host.js   scripts/verify-sampler.js   scripts/e2e-host.js   scripts/mock-test.js   docs/architecture/core.md   docs/reference/data-model.md   docs/reference/protocol.md   docs/reference/milestones.md   docs/architecture/ui-adapters.md   docs/plan/PLAN-v1.4.5.md   docs/research/12-v2-migration.md ; do
   [ -f "$f" ] || { echo "  ✗ 缺: $f"; MISSING=1; }
 done
 [ "$MISSING" -eq 0 ] && ok "必备文件齐全" || bad "存在缺失文件"
 
 echo "== [3] 契约静态核对（docs/03-protocol lab-protocol/1.1） =="
 CONTRACT=1
-grep -q "lab-protocol/1.1" docs/03-protocol.md 2>/dev/null || { CONTRACT=0; }
+grep -q "lab-protocol/1.1" docs/reference/protocol.md 2>/dev/null || { CONTRACT=0; }
 for field in "alertsCriticalCount" "callCount" "betterSidebarVisible" "gpuState" "platform"; do
-  grep -q "$field" docs/03-protocol.md || { echo "  ✗ protocol 缺字段: $field"; CONTRACT=0; }
+  grep -q "$field" docs/reference/protocol.md || { echo "  ✗ protocol 缺字段: $field"; CONTRACT=0; }
   grep -q "$field" src/index.ts || { echo "  ✗ host 缺字段实现: $field"; CONTRACT=0; }
 done
 [ "$CONTRACT" -eq 1 ] && ok "契约关键字段 host 侧一致" || bad "契约字段不一致"

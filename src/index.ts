@@ -694,6 +694,60 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     if (ev.type === 'lab/alert') notifyAlerts()
   })
 
+  // ── #11（2026-08-24 SSE 远端扩展）：事件流推送（GET /lab-monitor/events）──
+  // 事件源 = labListeners 内部总线（experiment-start/end、alert、status-flip）；
+  // 事件缓冲（最近 20 条）供新连接回放；每个连接独立心跳保活；close 自动清理。
+  const SSE_BUFFER_MAX = 20
+  const sseBuffer: { type: string; data: Record<string, unknown>; ts: number }[] = []
+  const sseClients = new Set<ServerResponse>()
+  function sseWrite(res: ServerResponse, event: string, payload: Record<string, unknown>): void {
+    try {
+      res.write(`event: ${event}\n`)
+      res.write(`data: ${JSON.stringify(payload)}\n\n`)
+    } catch (e) {
+      /* 连接已断，由 close 清理 */
+    }
+  }
+  labListeners.push((ev) => {
+    // 仅转发 lab/* 事件（event 名去 lab/ 前缀）
+    const eventName = ev.type.indexOf('lab/') === 0 ? ev.type.slice(4) : null
+    if (!eventName) return
+    const payload = { ts: ev.ts, runId: ev.runId, ...(ev.data || {}) }
+    sseBuffer.unshift({ type: eventName, data: payload, ts: ev.ts })
+    if (sseBuffer.length > SSE_BUFFER_MAX) sseBuffer.length = SSE_BUFFER_MAX
+    for (const res of sseClients) sseWrite(res, eventName, payload)
+  })
+  function sseHandler(req: IncomingMessage, res: ServerResponse): void {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    })
+    // 回放：新连接先推最近事件（订阅者连上即有上下文）
+    for (let i = sseBuffer.length - 1; i >= 0; i--) {
+      const b = sseBuffer[i]
+      sseWrite(res, b.type, b.data)
+    }
+    sseClients.add(res)
+    // 心跳保活（15s；防代理/空闲超时）
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(': ping\n\n')
+      } catch (e) {
+        clearInterval(heartbeat)
+      }
+    }, 15000)
+    req.on('close', () => {
+      sseClients.delete(res)
+      clearInterval(heartbeat)
+    })
+    req.on('error', () => {
+      sseClients.delete(res)
+      clearInterval(heartbeat)
+    })
+  }
+
   // ── M3（issue#7，docs/research/22 §4.3）：消息链兜底——仅在链断裂证据时触发 ──
   // 明确不做「无 report/settle 活动即转发」（B1：静默处理是主通道常态路径，静默 ≠ 链断裂）。
   // 证据1：wake 档 followup 投递后 notifyTimeoutMs 内无 agent/inbox/claimed（未领取=未送达）→ 升根
@@ -1352,9 +1406,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   }
   function rpcControl(args?: { action?: string; runId?: string | null; rule?: string | null; alertNotify?: string; escalateAfterSec?: number; notifyThrottleMs?: number }) {
     const action = args && args.action
-    if (action === 'start') enabled = true
-    else if (action === 'pause') enabled = false
-    else if (action === 'resume') enabled = true
+    if (action === 'start') { enabled = true; emitLab('lab/status-flip', { enabled: true }) }
+    else if (action === 'pause') { enabled = false; emitLab('lab/status-flip', { enabled: false }) }
+    else if (action === 'resume') { enabled = true; emitLab('lab/status-flip', { enabled: true }) }
     else if (action === 'clear-alerts') {
       // 2026-08-22（P0 告警生命周期）：清除告警——无过滤=全清；支持 runId/rule 定向清除
       // M1（issue#5 I6）：同步重置插件通知指纹——同指纹告警在 clear 后再次触发可重新通知；
@@ -1518,6 +1572,13 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       handler: httpHandler,
     })
     ctx.effect(() => disposer)
+    // #11（2026-08-24 SSE 远端扩展）：事件流端点（GET 长连接，独立于 JSON API 前缀）
+    const sseDisposer = webServer.register({
+      kind: 'http',
+      path: '/lab-monitor/events',
+      handler: sseHandler,
+    })
+    ctx.effect(() => sseDisposer)
   } catch (e) {
     console.error('[lab-monitor] webServer 路由注册失败:', e)
   }

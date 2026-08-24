@@ -143,6 +143,17 @@ idle ──(start 命中)──► running ──(配对 result + 进程消失)�
   - balancer 一律用 host 持有值。
 - 阈值默认值：`utilWarn=90`、`memWarn=95`、`tempWarn=85`、`pollMs=5000`（可配）。
 
+## 6.1 差异化阈值分层覆盖（#13-3，2026-08-24）
+
+- **结构**：`thresholdOverrides = { byExpType: {<类型>: {utilWarn?, memWarn?, tempWarn?}}, byTag: {<标签label>: {...}} }`
+  - 持久化：`settings.yaml` → `lab-monitor.thresholdOverrides`；设置入口：client 设置页 JSON 编辑 / `lab_ctl set-threshold` 带 `thresholdOverrides`
+- **覆盖链**（`resolveThresholds(w, thr, overrides)`，balancer evaluate 入口解析）：
+  1. 全局阈值（`thr`，host 持有值）
+  2. 主实验类型命中 `byExpType[w.experimentType]` → 覆盖（仅覆盖存在的键）
+  3. 主实验 cmd 命中标签组的 `byTag[label]` → 再覆盖（标签组后级覆盖类型级）
+- **采样点注入**：`SamplePoint.experimentType`（主实验类型）+ `SamplePoint.tagHits`（命中标签 label 列表）；非 ps 周期 tick 由 `machine.cur()` 实时回填
+- **默认**：`overrides = {}`（空 = 不覆盖，等效全局阈值）；阈值数值由用户配置拍板（issue #13 讨论中）
+
 ## 7. 关联文档
 
 - 模块职责：`docs/architecture/core.md`

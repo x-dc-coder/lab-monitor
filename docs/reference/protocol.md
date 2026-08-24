@@ -149,6 +149,23 @@
 - 回放：新连接先推最近 20 条事件缓冲（订阅者连上即有上下文）
 - 鉴权：当前 localhost only（known-issues #6）；开放端口转发需先加鉴权（backlog）
 
+## 4.2 快照数据模型扩展（#13，2026-08-24）
+
+`labMonitor.snapshot` / `/lab-monitor/api/snapshot` 在 #11 基础上新增字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `thresholdOverrides` | `{byExpType?, byTag?}` | #13-3 差异化阈值分层覆盖（client 设置页可读可编辑；键=实验类型/标签组 label，值=`{utilWarn?, memWarn?, tempWarn?}`） |
+| `thresholds.*` | number | 全局阈值不变；覆盖链在 balancer 评估时解析（全局 → 类型 → 标签组，后级覆盖前级） |
+
+`labMonitor.control`（`set-threshold` action）新增可选参数 `thresholdOverrides`：
+```json
+{ "action": "set-threshold",
+  "thresholdOverrides": { "byExpType": { "gpu-train": { "utilWarn": 60, "memWarn": 90 } },
+                          "byTag": { "推理服务": { "memWarn": 95 } } } }
+```
+写后即时生效 + settings 持久化（`settings.yaml` → `lab-monitor.thresholdOverrides`）。
+
 ## 5. 出口层消费约束
 
 - 出口适配器只消费 §2 RPC 与 §4 事件（核心↔出口解耦契约，docs/architecture/core.md §4）；

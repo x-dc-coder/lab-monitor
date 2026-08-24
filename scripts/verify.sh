@@ -57,6 +57,9 @@ if timeout 60 node scripts/mock-test.js >/dev/null 2>&1; then ok "mock-test ALL 
 echo "== [5b] M1 告警通知单元验证（verify-m1.js，resolveAction 全格 + metricOf） =="
 if timeout 30 node scripts/verify-m1.js >/dev/null 2>&1; then ok "verify-m1 ALL PASS"; else bad "verify-m1 失败"; fi
 
+echo "== [5c] 差异化阈值覆盖链验证（verify-overrides.js，#13-3 resolveThresholds 全链路） =="
+if timeout 30 node scripts/verify-overrides.js >/dev/null 2>&1; then ok "verify-overrides ALL PASS"; else bad "verify-overrides 失败"; fi
+
 if [ "$RUN_SAMPLER" -eq 1 ]; then
   echo "== [6] 真实采样实证（verify-sampler.js，GPU/interop 实测） =="
   if timeout 150 node scripts/verify-sampler.js >/dev/null 2>&1; then ok "verify-sampler 通过"; else bad "verify-sampler 失败"; fi

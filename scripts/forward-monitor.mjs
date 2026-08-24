@@ -18,6 +18,8 @@ const SNAPSHOT_URL = process.env.LAB_SNAPSHOT_URL || 'http://127.0.0.1:3080/lab-
 const INGEST_URL = process.env.LAB_INGEST_URL || 'https://monitor.dc-sy.cn/api/ingest';
 const NODE_ID = process.env.LAB_NODE_ID || 'dc-desktop';
 const INTERVAL_MS = 30000;
+const WINDOW_MS = 30000;   // #13-2 上报窗口（与 INTERVAL 对齐）
+const SAMPLE_MS = 5000;    // #13-2 窗口内采样间隔（30s 窗口 → 6 采样）
 
 const CFG_PATH = join(homedir(), '.config', 'lab-monitor-forward.env');
 const LOG_PATH = join(process.cwd(), 'forward-monitor.log');
@@ -80,7 +82,8 @@ function extract(snap) {
   return { metrics, payload };
 }
 
-async function oneRound() {
+/** 一次采样：拉 snapshot 并提取指标 + payload */
+async function sampleOnce() {
   let snap;
   try {
     const r = await fetch(SNAPSHOT_URL, { signal: AbortSignal.timeout(8000) });
@@ -88,10 +91,40 @@ async function oneRound() {
     snap = await r.json();
   } catch (e) {
     log(`⚠ 拉取 snapshot 失败（DSH 未起?）: ${e.message}`);
+    return null;
+  }
+  return extract(snap);
+}
+
+/** 一轮上报：#13-2 窗口聚合——WINDOW_MS 内 SAMPLE_MS 间隔采样 N 次，
+ *  GPU 利用率取 avg（gpu_util_percent）+ max（gpu_util_max）双值，其余字段取最后一次采样。 */
+async function oneRound() {
+  const samples = [];
+  const n = Math.max(1, Math.round(WINDOW_MS / SAMPLE_MS));
+  for (let i = 0; i < n; i++) {
+    const s = await sampleOnce();
+    if (s) samples.push(s);
+    if (i < n - 1) await new Promise((r) => setTimeout(r, SAMPLE_MS));
+  }
+  if (samples.length === 0) {
+    log(`✗ 本轮无采样（DSH 未起），跳过上报`);
     return;
   }
 
-  const { metrics, payload } = extract(snap);
+  // 聚合：GPU util avg/max；其余字段用最后一次采样
+  const last = samples[samples.length - 1];
+  const utils = samples.map((s) => s.metrics.find((m) => m.name === 'gpu_util_percent')?.value)
+    .filter((v) => typeof v === 'number');
+  const utilAvg = utils.length ? Math.round(utils.reduce((a, b) => a + b, 0) / utils.length * 10) / 10 : null;
+  const utilMax = utils.length ? Math.max(...utils) : null;
+
+  const metrics = last.metrics
+    .filter((m) => m.name !== 'gpu_util_percent')
+    .concat(utilAvg != null ? [{ name: 'gpu_util_percent', value: utilAvg }] : [])
+    .concat(utilMax != null ? [{ name: 'gpu_util_max', value: utilMax }] : []);
+
+  const payload = { ...last.payload, gpu_util_percent: utilAvg, gpu_util_max: utilMax };
+
   const body = JSON.stringify({
     results: [{ node_id: NODE_ID, group: 'lab_monitor', metrics, payload }],
   });
@@ -108,7 +141,7 @@ async function oneRound() {
     if (!r.ok) throw new Error(`ingest HTTP ${r.status}`);
     const j = await r.json().catch(() => ({}));
     const accepted = (j.data && j.data.accepted) ?? '?';
-    log(`✓ 上报成功 accepted=${accepted} gpu=${payload.gpu_util_percent}% exp=${payload.experiment_active}`);
+    log(`✓ 上报成功 accepted=${accepted} gpu=${utilAvg ?? '—'}% (max ${utilMax ?? '—'}%) exp=${payload.experiment_active} (${samples.length} 采样)`);
   } catch (e) {
     log(`✗ 上报失败: ${e.message}`);
   }

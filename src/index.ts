@@ -1345,6 +1345,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       const endKey = machine.history && machine.history.length ? String(machine.history[0].endTs) : 'none'
       await settingsScope.update({
         thresholds: thresholds.get(),
+        // #13-3 差异化阈值：分层覆盖持久化
+        thresholdOverrides: thresholds.getOverrides(),
         watchProcs: watchSet(),
         tags: tagSet(),
         // 2026-08-22（P2）：ended 投影持久化（倒序投影与 snapshot() 一致；重启 restoreEnded 恢复）

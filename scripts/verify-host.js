@@ -596,6 +596,23 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   assert(vSet.ok && vSet.applied.pollMs === 3000, 'lab_ctl set-threshold → pollMs=3000', vSet)
   const snapE = await G('snapshot')({})
   assert(snapE.thresholds && snapE.thresholds.pollMs === 3000, 'P1 阈值透出：pollMs=3000 进 snapshot.thresholds', snapE.thresholds && snapE.thresholds.pollMs)
+  // #13-3 差异化阈值：lab_ctl set-threshold 带 thresholdOverrides → 快照透出 + 持久化
+  const vOv = await tCtl.execute({
+    action: 'set-threshold',
+    thresholdOverrides: { byExpType: { 'gpu-train': { utilWarn: 60, memWarn: 90 } }, byTag: { '推理服务': { memWarn: 95 } } },
+  })
+  assert(vOv.ok && vOv.overrides && vOv.overrides.byExpType['gpu-train'].utilWarn === 60,
+    '#13-3 set-threshold 写 thresholdOverrides 生效（gpu-train util=60）', vOv.overrides)
+  const snapOv = await G('snapshot')({})
+  assert(snapOv.thresholdOverrides && snapOv.thresholdOverrides.byExpType['gpu-train'].memWarn === 90,
+    '#13-3 快照透出 thresholdOverrides（gpu-train mem=90）', snapOv.thresholdOverrides)
+  assert(lmNs && lmNs.user && lmNs.user.thresholdOverrides && lmNs.user.thresholdOverrides.byTag['推理服务'].memWarn === 95,
+    '#13-3 overrides 持久化写回 settings.user.thresholdOverrides（byTag 推理服务 mem=95）',
+    lmNs && lmNs.user && lmNs.user.thresholdOverrides)
+  // 清空覆盖 → 回退（快照透出空对象）
+  const vOvClear = await tCtl.execute({ action: 'set-threshold', thresholdOverrides: { byExpType: {}, byTag: {} } })
+  assert(vOvClear.ok && Object.keys(vOvClear.overrides.byExpType).length === 0 && Object.keys(vOvClear.overrides.byTag).length === 0,
+    '#13-3 清空 overrides → 空对象', vOvClear.overrides)
   const vPause = await tCtl.execute({ action: 'pause' })
   assert(vPause.ok && vPause.state === 'paused', 'lab_ctl pause → paused', vPause)
   const snapP = await G('snapshot')({})

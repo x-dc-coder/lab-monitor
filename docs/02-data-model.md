@@ -110,6 +110,11 @@ idle ──(start 命中)──► running ──(配对 result + 进程消失)�
 ```
 
 - `summary.dataPartial`：长实验超过 ring buffer 窗口（>30min）时标注「部分数据」（R-3）。
+- **V2.8/V2.9 字段增补**（`src/core/types.ts` 事实源）：
+  - `RunRecord` 增：`type?`（实验类型 8 类枚举：smoke/regression/full/short/long/gpu-calc/gpu-train/unknown，M2 start 时三层识别）、
+    `agentId?`（发起 agent session.id，M3 pre-execute 读 exec.agent）、`agentRole?`（root/subagent）、`parentId?`（子代理父会话）；
+  - `ExperimentSnapshot` / `EndedRunSnapshot` 同字段透出 + `EndedRunSnapshot.fingerprint?`（命令指纹，学习层历史归类/持久化恢复用）；
+  - `runId` 格式：`run-YYYYMMDD-HHMMSS-NNN`（V2.9 修复，含秒级时间戳防重启重复）。
 
 ## 5. 告警分级与防抖
 
@@ -122,6 +127,10 @@ idle ──(start 命中)──► running ──(配对 result + 进程消失)�
 - **防抖**：阈值需**持续 10s** 才触发（Prometheus `for:`）；同类告警**最小间隔 5 分钟**（W&B wait_duration）；
 - 告警对象：`{ level, rule, msg, confidence, actions[], ts, runId? }`；
 - host 预算 `alertsCriticalCount`（CRITICAL 计数，badge 直读，99+ 封顶由 UI 层处理）。
+- **V2.8/M1 扩展字段**（全部可选，旧消费者零感知）：`severity(1-5)`（rule 权重表静态映射）、`urgency(1-3)`（基准+rising+1）、
+  `trend('rising'|'steady'|'falling')`（sustainedMs 窗口判定）、`sustainedMs`（2s×命中数累计）、`resource('gpu-util'|'vram'|'temp'|'cpu'|'mem'|'io'|'process')`、
+  `origin('self'|'other'|'system')`（归属：实验自身/他人/系统级）、`notifyLevel('off'|'notice'|'wake')`（策略引擎输出回写）、
+  `escalate`（warn 持续超 `escalateAfterSec` → 通知按 critical，不改 level 本身）。
 
 ## 6. 阈值事实来源（V2 闭合，M3 仲裁）
 

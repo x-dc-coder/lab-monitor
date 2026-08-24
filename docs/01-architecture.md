@@ -205,3 +205,37 @@ return {
 - `scripts/verify.sh` 全绿：typecheck + 构建 + 目录 + 契约 + verify-host（47 断言）+ mock-test（10 组）+ verify-sampler（真实 interop）
 - `dsh plugin add` ✅（bundle 入列）+ `dsh --dump-config` 显示 lab-monitor 行 ✅ + client-modules 校验模拟 ✅
 - **DSH 重启后插件才实际加载**（红线：用户手动重启）；重启前文档已就绪
+
+## 12. M1/M2/M3 架构（issue #5 告警反馈全链路，2026-08-23~24）
+
+> 设计事实源：docs/research/22-issue5-alert-notify-design.md（综合定稿）+ 23 评审 + 24 T1 调研 + 25 架构。
+
+### 12.1 M1 告警严格分级 + 通知策略引擎
+
+- **数据面**：`Alert` 扩展 8 可选字段（severity/urgency/trend/sustainedMs/resource/origin/notifyLevel/escalate）；
+  生成侧 `balancer.evaluate`（rule 权重表静态映射 severity + sustainedMs 累计 + trend 窗口判定 + warn 超时升级 escalate）。
+- **策略引擎**：`lab/alert` 事件 → `notifyAlerts()`：advice 取批 → throttle 聚合窗口 → 指纹去重 →
+  `effectiveLevel()`（分级规则，不改 Alert.level）→ **档位计算** → `setNotifyLevel` 回写告警视图 →
+  目标选择 → `resolveAction(level, targetState)` 纯函数（off/inject/steer/followup/send-nq/escalate-root，全格测试）→
+  `agents.followup/steer/inject/send` 投递；护栏：聚合窗口/指纹/投递预算 ≤2/clear 重置指纹。
+
+### 12.2 M2 实验类型识别（三层）
+
+- `src/core/exp-type.ts` `classifyExpType`：**配置层**（experimentTypes 规则）→ **自动层**
+  （EXP_TYPE_PATTERNS 8 类保守正则 + TRAIN_PATTERNS 门控 gpu-train）→ **学习层**（fingerprint 历史时长 p90 ≥1h → long）→
+  兜底 unknown 不猜；`RunRecord.type` + 快照/ended 透出 + fingerprint 持久化（restoreEnded 补存）；
+  类型矩阵 `EXP_TYPE_DEFAULT_NOTIFY` 出厂默认（配置可覆盖，不硬编码分支）。
+
+### 12.3 M3 路由 + 权限 + 消息链
+
+- **agentDir 运行时索引**（Map<sessionId, {role, parentId, status, runs, disposed}>）：`agent/created|disposed|status` 维护 +
+  `rootAncestors` 根祖先链 + `isSubagentAgent`（delegationDepth>0 ∥ origin==='subagent'，不用 parentSession 防 fork 误伤）。
+- **路由决策树**（notifyAlerts）：runId → RunRecord.agentId（pre-execute 读 exec.agent 记录）→ 发起者在线
+  （子代理 = 发起者按矩阵 + 根祖先 notice 知情；root = 自身；crashed = 子代理降 notice + 根 wake 接管）→
+  发起者 absent/disposed → 立即升根 roots() → 无实验上下文 → roots() 兜底。
+- **权限三件套**：① host 全局 `tools.guard` 执行期拒绝子代理 `lab_ctl`（谓词读 subagentPolicy 策略存储，restricted
+  白名单放行、full 放行）；② `registerContinuableSetup` 给可继续子代理注入只读 `lab_status_ro` + restrict deny
+  lab_ctl（fresh+cold resume 生效，仿 installReportTool 范本）；③ agent/created 兜底（一次性子代理靠 guard）。
+- **消息链兜底**（仅链断裂证据）：证据1 = wake 档 followup 投递后 notifyTimeoutMs 内无 `agent/inbox/claimed` → 超时升根；
+  证据3 = `subagent/end` stopReason∈{max-tokens,error,cancelled} 且有在途实验 → roots 升根；
+  明确不做「无 report/settle 活动即转发」（静默处理是主通道常态路径，B1 红线）。

@@ -332,6 +332,60 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 
 > 注意：本段 **host 半改动（持久化链路），需 DSH 重启生效**（client 无改动，浏览器刷新即可）。
 
+### V2.7 进程展示增强：家族聚合 + 采样自曝过滤 + 上限放宽（2026-08-24）
+
+> 触发：用户反馈"打开折叠的进程有很多重名进程"（404 进程仅 141 种程序名）。
+> 专项：plugin-specialist 重名进程分析 → ①②③ 落地。
+
+1. **③ 采样自曝过滤**（`backend-windows.ts` 新增 `purgeSamplerSelf()`）：剔除 tasklist.exe/nvidia-smi.exe
+   采样工具自身 + 其伴随 conhost（ppid 指向采样工具），用户程序 conhost 不受影响——实测 tasklist/nvidia-smi
+   从进程表清零。
+2. **① 组内二级折叠**（`client.ts` ProcsTable）：展开分组后按 cmd 名聚合 → "chrome.exe ×40" 一行，点击展开 PID 明细。
+3. **② 家族归类**（`client.ts` `PROC_FAMILIES` ~90 条映射）：组 → **家族行**（如 `Windows 系统 ×167`）→ 种类行 → PID 明细
+   三级折叠；系统进程组正则补全（svchost/conhost 等归组）；WeChatAppEx 归常用应用组（微信家族不再跨组分裂）。
+   实测：141 种 → 79 家族行，折叠态密度提升近半。
+4. **procTopN 上限 500 → 1000**（两处 clamp + 设置页文案；用户配置 400 曾被 200 上限静默截断，链路实测定位）。
+
+### V2.8 实验历史管理（#10）+ M2 实验类型识别（#6）（2026-08-24）
+
+1. **实验历史管理（issue #10）**：`machine.removeRun/clearHistory`（splice 修复空洞 bug）+
+   `rpcHistoryManage`（list/delete/clear+keep 最近 N）+ `lab_ctl history-manage` action +
+   HTTP `/lab-monitor/api/historyManage` + 设置页「实验历史管理」块（列表/单删/清空保留 N）；删除/清空显式持久化。
+2. **M2 实验类型识别（issue #6，docs/research/22 §3）**：
+   - 新增 `src/core/exp-type.ts` `classifyExpType` **三层识别**：配置层（experimentTypes 规则）→ 自动层
+     （EXP_TYPE_PATTERNS 8 类保守正则 + TRAIN_PATTERNS 门控 gpu-train）→ 学习层（fingerprint 历史时长 p90 ≥3600s → long）
+     → 兜底 unknown 不猜；
+   - 数据面：`RunRecord.type` + 快照/ended 透出 + **restoreEnded 补存 fingerprint**（学习层前置修复）；
+   - 配置面：settings `experimentTypes/expTypeDefault/expTypeLearning` 三键；
+   - **通知矩阵接线**：告警 runId → run.type → 配置覆盖 > `EXP_TYPE_DEFAULT_NOTIFY` 出厂矩阵 > 全局 fallback
+     （gpu-train×warn→wake、smoke×warn→off 等）；
+   - client 实验历史行类型徽标（unknown 不显示）。
+   - 验证：24 项单测 + 误报回归（grep/heredoc/zipfile/env-check 均不猜）+ 端到端模拟 + 真实 DSH 实测
+     （`python3 -c "...nn.Module(); backward()..."` → gpu-train，pyc: 指纹持久化）。
+
+### V2.9 M3 通知链路闭环（#7）+ 实测修复（2026-08-24）
+
+> 触发：issue #7（M3 子代理路由/权限/消息链）——issue #5 全链路最后阶段。docs/research/22 §4/§5 设计落地。
+
+1. **① 路由**（§4）：`RunRecord.agentId/agentRole/parentId` + pre-execute 读 `exec.agent`（session.id + header 判主/子）
+   + agentDir 运行时索引（agent/created|disposed|status + rootAncestors 根祖先链 + isSubagentAgent）；
+   notifyAlerts **路由决策树**：发起者优先（子代理 → 发起者按矩阵档位 + 根祖先 notice 知情；crashed → 子代理降 notice
+   + **根 wake 接管**；发起者 absent/disposed → **立即升根 roots**；无实验上下文 → roots 兜底）。
+2. **② 权限**（§5）：`subagentPolicy`（readonly 默认/restricted/full，settings 持久化）+ host 全局
+   `tools.guard` 执行期拒绝子代理 `lab_ctl`（谓词读策略存储；restricted 白名单 watch/tag/history-manage 放行）+
+   `registerContinuableSetup` 注入只读 `lab_status_ro` + restrict deny lab_ctl（可继续子代理 fresh+cold resume 生效）。
+3. **③ 消息链**（§4.3）：仅链断裂证据触发——证据1：wake 档 followup 投递子代理后 `notifyTimeoutMs` 内无
+   `agent/inbox/claimed` → 超时升根；证据3：`subagent/end` 异常结算（max-tokens/error/cancelled）且有在途实验 → roots 升根；
+   投递预算 ≤2；明确不做「无活动即转发」（B1：静默处理是常态路径）。
+4. **两个实测修复**：
+   - `makeRunId` 重启重复（日期+计数器 → **日期+HHMMSS+计数器**，仿 makeTagId；实测 run-20260824-001 出现两条）；
+   - 通知投递 off 档误投递（M1 遗留 `t.level==='off' ? 'notice'` fallback 把 info 级告警打扰主代理，链路实测抓到；
+     改为 off 直接跳过，符合设计 §2.2「info 仅 UI/工具可见不投递」）。
+5. **验证**：M3 逻辑单测 14 项（路由决策树/guard/isSubagent）+ verify.sh 7 组全绿 + **真实链路实测**
+   （memWarn 调低触发 other-occupancy → lab/alert 事件 → 投递日志 → 用户收到告警消息；agentId 链路、settings 持久化确认）。
+
+> 注意：V2.7-V2.9 **host 半改动均需 DSH 重启生效**（client 半刷新页面即可）。
+
 ## 未完成项清单（2026-08-20 对照 PLAN v1.4.5 + 04-milestones）
 
 > 对照依据：PLAN §0 三层组合 / §1 目录树 / §6 风险表 / §4 验收清单；04-milestones 勾选状态。
@@ -342,7 +396,7 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 | # | 未完成项 | 文档依据 | 现状 |
 |---|---|---|---|
 | A1 | ~~指挥层 Agent 预设 lab-commander~~ → **使用文档**（lab_status/lab_advice/lab_ctl 用法手册） | PLAN §0 三层组合第 2 层、§1 目录树 | ✅ **2026-08-22 落地（V2.5）**：`docs/usage.md`——工具用法手册 + 面板 UI + 阈值/标签/多轨语义 + 持久化说明；用户决策不做 Agent 预设（插件功能未完善时预设无收益）；prompt 注入增强待讨论（KV 缓存影响） |
-| A1.5 | **告警通知闭环（issue #5 方案 M1）** | docs/research/22-issue5-alert-notify-design.md（设计）+ 23 评审 + 25 架构 | ✅ **2026-08-23 实施完成（V2.7→V2.8）**：告警严格分级（Alert 8 扩展字段 severity/urgency/trend/sustainedMs/resource/origin/notifyLevel/escalate + rule 权重表 + warn 升级）+ 通知策略引擎（effectiveLevel→档位→resolveAction 全格→投递 agents.roots()；节流/指纹去重/预算守卫/clear 重置）+ 配置面（settings 六键 + lab_ctl set-notify + 设置页 NotifyCard）+ 告警多维徽标 + TRAIN_PATTERNS 精度修复（torchrun 句式化、python -c/-m 排除特征；20 条误报 history 清理）。**V2.8 收尾**：M1 缺口补齐（notifyLevel 回写告警视图 + trend=falling 窗口判定 + verify-m1.js 19 断言）、测试转绿（mock-test 20→0、verify-host B3b 4→0）；架构文档 `25-issue5-alert-architecture.md`（codex 交叉审查修正）。**M2/M3 拆分到 issue #6/#7**（不阻塞） |
+| A1.5 | **告警通知闭环（issue #5 方案 M1→M3）** | docs/research/22-issue5-alert-notify-design.md（设计）+ 23 评审 + 25 架构 | ✅ **M1（2026-08-23，V2.7→V2.8）**：告警严格分级（Alert 8 扩展字段 severity/urgency/trend/sustainedMs/resource/origin/notifyLevel/escalate + rule 权重表 + warn 升级）+ 通知策略引擎（effectiveLevel→档位→resolveAction 全格→投递；节流/指纹去重/预算守卫/clear 重置）+ 配置面（settings 六键 + lab_ctl set-notify + 设置页 NotifyCard）+ TRAIN_PATTERNS 精度修复。**M2（#6）+ M3（#7）（2026-08-24，V2.8→V2.9）**：实验类型三层识别（配置>自动>学习>unknown 不猜）+ 类型×通知矩阵接线（gpu-train warn→wake 等）+ 子代理路由（发起者优先/根祖先知情/absent 升根）+ 权限（subagentPolicy + guard 拒 lab_ctl + lab_status_ro）+ 消息链兜底（异常结算/未领取超时升根）。**issue #5 全链路闭环**（剩余「prompt 注入形式」与 KV 缓存冲突，维持工具按需查询——17-kv-cache 决策） |
 | A2 | **多实验并行跟踪**（R-2「多轨并存留 v2」） | 风险 11 | ✅ **2026-08-20 实施完成（V2.3）**：多轨（上限 4 + per-run 判定 + runId 归属）+ 标签分组（规则式打标 + lab_ctl tag + tags 聚合 + UI 分组展示）；verify-host [B3]/[E2] 全绿 |
 | A3 | webServer 自托管面板（出口④） | 风险 14 + §3.2.4（「v2 前置」） | 仅实现 HTTP 数据面 `/lab-monitor/api/*`；自托管 HTML 面板未实现 |
 | A4 | SSE `/lab/events` 远端扩展 | README v2 演进表「webServer SSE /lab/events（手机端/对接 monitor-panel）」 | 源码无 SSE/EventSource 实现 |

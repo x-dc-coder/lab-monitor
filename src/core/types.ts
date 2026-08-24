@@ -11,6 +11,7 @@ export interface ProcStat {
   cpuPct: number | null
   memMiB: number | null
   gpuUtilPct?: number | null
+  startTs?: number        // #16：进程启动时间（epoch 毫秒；Windows CIM / Linux ps）
 }
 /** 实验进程组聚合（5s 周期；主=CPU/内存/存在性，辅=GPU 每进程，预留=显存恒 null） */
 export interface GroupStats {

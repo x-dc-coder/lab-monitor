@@ -60,6 +60,9 @@ if timeout 30 node scripts/verify-m1.js >/dev/null 2>&1; then ok "verify-m1 ALL 
 echo "== [5c] 差异化阈值覆盖链验证（verify-overrides.js，#13-3 resolveThresholds 全链路） =="
 if timeout 30 node scripts/verify-overrides.js >/dev/null 2>&1; then ok "verify-overrides ALL PASS"; else bad "verify-overrides 失败"; fi
 
+echo "== [5d] 进程详情增强验证（verify-proc-detail.js，#16 所属实验/监控徽标/进程树） =="
+if timeout 30 node scripts/verify-proc-detail.js >/dev/null 2>&1; then ok "verify-proc-detail ALL PASS"; else bad "verify-proc-detail 失败"; fi
+
 if [ "$RUN_SAMPLER" -eq 1 ]; then
   echo "== [6] 真实采样实证（verify-sampler.js，GPU/interop 实测） =="
   if timeout 150 node scripts/verify-sampler.js >/dev/null 2>&1; then ok "verify-sampler 通过"; else bad "verify-sampler 失败"; fi

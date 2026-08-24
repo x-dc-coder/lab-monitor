@@ -136,6 +136,8 @@ interface ExperimentView {
   cmd?: string | null
   pid?: number | null
   startTs: number
+  /** #16 增强：实验进程组 pid 集合（进程详情关联用） */
+  procGroup?: number[] | null
   groupStats?: { cpuPct?: number | null; memMiB?: number | null; memberCount?: number } | null
 }
 interface TagGroupView {
@@ -668,8 +670,15 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
 }
 
 /** 2026-08-20（标签分组）：用户标签规则命中的分组展示——组头（label+kind+聚合）+ 命中进程行 */
-function TagGroups(props: { tags: TagGroupView[]; onDetail: (d: DetailData) => void }): React.ReactElement {
+function TagGroups(props: { tags: TagGroupView[]; snap: SnapView | null; onDetail: (d: DetailData) => void }): React.ReactElement {
   const groups = props.tags || []
+  // #16 增强：进程详情上下文（所属实验 / 监控目标 / 进程树）
+  const s = props.snap
+  const detailCtx: ProcDetailCtx = {
+    experiments: s && Array.isArray(s.experiments) ? s.experiments : [],
+    watchedPids: s && Array.isArray(s.watchedPids) ? s.watchedPids : [],
+    allProcs: s && Array.isArray(s.procs) ? s.procs : [],
+  }
   return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 4 } },
     groups.map((g) => {
       const color = g.rule && g.rule.color ? g.rule.color : C.label
@@ -714,7 +723,7 @@ function TagGroups(props: { tags: TagGroupView[]; onDetail: (d: DetailData) => v
           g.procs.map((p) => (
             React.createElement('div', {
               key: p.pid,
-              onClick: () => props.onDetail(procDetailData(p, g.rule && g.rule.label)),
+              onClick: () => props.onDetail(procDetailData(p, g.rule && g.rule.label, detailCtx)),
               title: '点击查看进程详情',
               style: { display: 'grid', gridTemplateColumns: '52px 1fr 44px 44px 44px', gap: 6, alignItems: 'center', fontSize: 11, cursor: 'pointer' },
             },
@@ -1044,6 +1053,12 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
   const all = (s && Array.isArray(s.procs)) ? s.procs : []
   if (!all.length || !s) return null
   const watched = new Set<number>(Array.isArray(s.watchedPids) ? s.watchedPids : [])
+  // #16 增强：进程详情上下文（所属实验 / 监控目标 / 进程树）
+  const detailCtx: ProcDetailCtx = {
+    experiments: Array.isArray(s.experiments) ? s.experiments : [],
+    watchedPids: Array.isArray(s.watchedPids) ? s.watchedPids : [],
+    allProcs: all,
+  }
   // 进程排序配置：从快照 thresholds 读 取前N + CPU/GPU/内存 权重（默认 30 / 1:1:1，设置页可调）
   const thr = (s && s.thresholds) as { procTopN?: number; wGpu?: number; wCpu?: number; wMem?: number } | undefined
   const procTopN = (thr && typeof thr.procTopN === 'number') ? Math.max(5, Math.round(thr.procTopN)) : 30
@@ -1168,7 +1183,7 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
     const bg = kind === 'watch' ? 'rgba(57,100,254,0.06)' : hot ? 'rgba(220,38,38,0.07)' : (kind === 'group' ? 'rgba(0,0,0,0.02)' : undefined)
     return React.createElement('tr', {
       key: 'p' + p.pid,
-      onClick: () => props.onDetail(procDetailData(p)),
+      onClick: () => props.onDetail(procDetailData(p, undefined, detailCtx)),
       title: '点击查看进程详情',
       style: { background: bg, cursor: 'pointer' },
     },
@@ -1386,19 +1401,32 @@ const HIST_BUCKET_MS = 20000
 // ----------------------------------------------------------------------------
 interface DetailStat { label: string; value: string; color?: string }
 interface DetailMeta { label: string; value: string }
+/** #16 增强：详情自由区块（如所属实验 / 进程树 / 监控徽标） */
+interface DetailSection { title: string; lines: { label?: string; value: string; color?: string }[] }
 interface DetailData {
   title: string
   sub?: string
   cmd?: string | null
   stats: DetailStat[]
   meta?: DetailMeta[]
+  sections?: DetailSection[]
 }
 
 /** 详情用的进程形状：兼容 ProcView（cmd: string）与标签组进程（cmd: string|null）两种来源。 */
 type ProcLike = { pid: number; ppid?: number | null; cmd?: string | null; cpuPct?: number | null; memMiB?: number | null; gpuUtilPct?: number | null; gpu?: number | null }
 
-/** 进程详情数据（供 ProcsTable / TagGroups 点击查看）。 */
-function procDetailData(p: ProcLike, tagLabel?: string): DetailData {
+/** #16 增强上下文：进程详情所需的全局数据（experiments 关联 / 监控目标 / 全量 procs 进程树） */
+interface ProcDetailCtx {
+  experiments?: { runId: string; pid?: number | null; procGroup?: number[] | null; cmd?: string | null; state?: string }[]
+  watchedPids?: number[]
+  allProcs?: ProcLike[]
+}
+
+/**
+ * 进程详情数据（供 ProcsTable / TagGroups 点击查看）。
+ * #16 增强：所属实验（procGroup 命中）、监控目标徽标、进程树（ppid 递归）。
+ */
+function procDetailData(p: ProcLike, tagLabel?: string, ctx?: ProcDetailCtx): DetailData {
   const gpu = (p.gpuUtilPct !== undefined && p.gpuUtilPct !== null && !Number.isNaN(p.gpuUtilPct))
     ? p.gpuUtilPct
     : (p.gpu !== undefined && p.gpu !== null && !Number.isNaN(p.gpu) ? p.gpu : null)
@@ -1409,7 +1437,54 @@ function procDetailData(p: ProcLike, tagLabel?: string): DetailData {
     { label: 'CPU 占用', value: p.cpuPct !== null && p.cpuPct !== undefined ? Math.round(p.cpuPct) + '%' : '-', color: utilColor(p.cpuPct) },
     { label: '内存', value: fmtGiB(p.memMiB) + 'G' },
   ]
-  return { title: '进程详情', sub: p.cmd || '未命名进程', cmd: p.cmd || null, stats, meta: tagLabel ? [{ label: '标签组', value: tagLabel }] : [] }
+  const meta: DetailMeta[] = []
+  if (tagLabel) meta.push({ label: '标签组', value: tagLabel })
+  // #16 增强①：监控目标徽标
+  if (ctx && ctx.watchedPids && ctx.watchedPids.includes(p.pid)) {
+    meta.push({ label: '监控', value: 'watchlist 命中' })
+  }
+  const sections: DetailSection[] = []
+  // #16 增强②：所属实验（pid ∈ experiments[].procGroup）
+  if (ctx && ctx.experiments && ctx.experiments.length) {
+    const exps = ctx.experiments.filter((e) =>
+      (e.pid !== null && e.pid !== undefined && e.pid === p.pid) ||
+      (Array.isArray(e.procGroup) && e.procGroup.includes(p.pid)))
+    if (exps.length) {
+      sections.push({
+        title: '所属实验',
+        lines: exps.map((e) => ({
+          value: (e.runId || '?') + (e.state ? ' [' + e.state + ']' : '') + (e.cmd ? ' — ' + e.cmd : ''),
+        })),
+      })
+    }
+  }
+  // #16 增强③：进程树（ppid 递归：子进程列表 + 父进程链）
+  if (ctx && ctx.allProcs && ctx.allProcs.length) {
+    const children = ctx.allProcs.filter((q) => q.ppid === p.pid && q.pid !== p.pid)
+    if (children.length) {
+      sections.push({
+        title: '子进程（' + children.length + '）',
+        lines: children.slice(0, 20).map((c) => ({
+          label: String(c.pid),
+          value: (c.cmd || '?') + (c.memMiB != null ? ' · ' + fmtGiB(c.memMiB) + 'G' : ''),
+        })),
+      })
+    }
+    // 父进程链（最多 5 级）
+    const chain: string[] = []
+    let cur = p.ppid ?? null
+    const guard = new Set<number>()
+    while (cur != null && !guard.has(cur) && chain.length < 5) {
+      guard.add(cur)
+      const parent = ctx.allProcs.find((q) => q.pid === cur)
+      chain.push((parent ? (parent.cmd || '?') : 'pid ' + cur) + (parent && parent.ppid != null ? '  ← 父 pid ' + parent.ppid : ''))
+      cur = parent ? parent.ppid ?? null : null
+    }
+    if (chain.length) {
+      sections.push({ title: '父进程链', lines: chain.map((v) => ({ value: v })) })
+    }
+  }
+  return { title: '进程详情', sub: p.cmd || '未命名进程', cmd: p.cmd || null, stats, meta, sections }
 }
 
 /** 实验/复盘详情数据（供 expBlock / EndedBlock 点击查看）。 */
@@ -1458,6 +1533,24 @@ function DetailOverlay(props: { detail: DetailData | null; onClose: () => void }
       d.meta && d.meta.length
         ? React.createElement('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 } },
             d.meta.map((m) => React.createElement('span', { key: m.label, style: { fontSize: 11, color: C.label2, padding: '2px 8px', borderRadius: 8, background: C.border } }, m.label + ': ' + m.value)))
+        : null,
+      // #16 增强：自由区块（所属实验 / 子进程 / 父进程链）
+      d.sections && d.sections.length
+        ? React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, marginTop: 14 } },
+            d.sections.map((sec) =>
+              React.createElement('div', { key: sec.title, style: { borderTop: '1px solid ' + C.border, paddingTop: 10 } },
+                React.createElement('div', { style: { fontSize: 11, fontWeight: 700, color: C.label, marginBottom: 6 } }, sec.title),
+                React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 3 } },
+                  sec.lines.map((ln, i) =>
+                    React.createElement('div', { key: i, style: { display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 11, color: C.label2, lineHeight: 1.4 } },
+                      ln.label ? React.createElement('span', { style: { fontWeight: 600, color: C.label, flexShrink: 0, fontVariantNumeric: 'tabular-nums' } }, ln.label) : null,
+                      React.createElement('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ln.color || C.label2 } }, ln.value),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          )
         : null,
       // 完整命令
       cmdText
@@ -1732,7 +1825,7 @@ function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
       : null,
     // ── 标签（2026-08-20：命中分组展示；管理区已迁到 DSH 设置页）──────────────
     s && Array.isArray(s.tags) && s.tags.length
-      ? React.createElement(TagGroups, { tags: s.tags, key: 'tags', onDetail: setDetail })
+      ? React.createElement(TagGroups, { tags: s.tags, snap: s, key: 'tags', onDetail: setDetail })
       : null,
     // ── 进程表 ──────────────────────────────────────────────────────────────
     React.createElement(ProcsTable, { snap: s, key: 'procs', onDetail: setDetail }),

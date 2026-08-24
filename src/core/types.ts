@@ -207,6 +207,11 @@ export interface MonitorSnapshot {
   ended?: EndedRunSnapshot[]
   /** 2026-08-22（P1 设置面）：当前生效阈值（client 轮询周期由 thresholds.pollMs 驱动，消除死配置；2026-08-23 含进程排序配置） */
   thresholds?: { utilWarn: number; memWarn: number; tempWarn: number; pollMs: number; procTopN?: number; wGpu?: number; wCpu?: number; wMem?: number }
+  /** #13-3 差异化阈值：分层覆盖透出（client 设置页可读可编辑） */
+  thresholdOverrides?: {
+    byExpType?: Record<string, { utilWarn?: number; memWarn?: number; tempWarn?: number }>
+    byTag?: Record<string, { utilWarn?: number; memWarn?: number; tempWarn?: number }>
+  }
   /** 2026-08-22（P1 设置面）：监控引擎启停状态（start/pause/resume 的真实反映——UI 控制区显示） */
   enabled?: boolean
   /** M1（issue#5）：当前生效通知策略（client 设置页展示 + lab_status 可见） */

@@ -1132,6 +1132,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       // 2026-08-22（P1 设置面）：透出当前生效阈值——client 轮询周期由 thresholds.pollMs 驱动
       // （此前 client 硬编码 5000，pollMs 死配置）
       thresholds: thresholds.get(),
+      // #13-3 差异化阈值：分层覆盖透出（client 设置页可读可编辑）
+      thresholdOverrides: thresholds.getOverrides(),
       enabled,
       // M1（issue#5）：通知策略当前生效值透出（client 设置页展示 + Agent lab_status 可见）
       notify: {

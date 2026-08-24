@@ -80,6 +80,11 @@ interface SnapView {
   ended?: EndedView[]
   /** 2026-08-22（P1 设置面）：当前生效阈值（轮询周期由 pollMs 驱动） */
   thresholds?: { utilWarn: number; memWarn: number; tempWarn: number; pollMs: number; procTopN?: number; wGpu?: number; wCpu?: number; wMem?: number }
+  /** #13-3 差异化阈值：分层覆盖（全局→实验类型→标签组），设置页 JSON 编辑 */
+  thresholdOverrides?: {
+    byExpType?: Record<string, { utilWarn?: number; memWarn?: number; tempWarn?: number }>
+    byTag?: Record<string, { utilWarn?: number; memWarn?: number; tempWarn?: number }>
+  }
   /** 2026-08-22（P1 设置面）：监控引擎启停状态 */
   enabled?: boolean
   /** M1（issue#5）：当前生效通知策略（设置页展示） */
@@ -423,9 +428,24 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
   const [wGpu, setWGpu] = React.useState<string>(thr && typeof thr.wGpu === 'number' ? String(thr.wGpu) : '1')
   const [wCpu, setWCpu] = React.useState<string>(thr && typeof thr.wCpu === 'number' ? String(thr.wCpu) : '1')
   const [wMem, setWMem] = React.useState<string>(thr && typeof thr.wMem === 'number' ? String(thr.wMem) : '1')
+  // #13-3 差异化阈值：分层覆盖 JSON 编辑（byExpType / byTag）
+  const ov0 = s && s.thresholdOverrides
+  const [ovJson, setOvJson] = React.useState<string>(JSON.stringify(ov0 && Object.keys(ov0).length ? ov0 : {
+    byExpType: { 'gpu-train': { utilWarn: 60, memWarn: 90 } },
+    byTag: {},
+  }, null, 2))
+  const [ovMsg, setOvMsg] = React.useState<string | null>(null)
+  const [ovBusy, setOvBusy] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
   const [msg, setMsg] = React.useState<string | null>(null)
   const paused = s && s.enabled === false
+
+  // #13-3：外部改 overrides → 快照变化 → JSON 编辑框跟随（不覆盖用户正在编辑的内容）
+  const ovKey = ov0 ? JSON.stringify(ov0) : ''
+  React.useEffect(() => {
+    if (ov0 && Object.keys(ov0).length) setOvJson(JSON.stringify(ov0, null, 2))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ovKey])
 
   // 2026-08-22：外部（lab_ctl / settings.yaml）改阈值 → 快照 thresholds 变化 → 本地表单跟随
   React.useEffect(() => {
@@ -475,6 +495,30 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
       })
       .catch(() => setMsg('调用失败'))
       .finally(() => setBusy(false))
+  }
+
+  // #13-3 差异化阈值：保存分层覆盖（JSON 解析 → control set-threshold 带 thresholdOverrides）
+  const setOverrides = () => {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(ovJson)
+    } catch (e) {
+      setOvMsg('JSON 格式错误: ' + (e instanceof Error ? e.message : String(e)))
+      return
+    }
+    const o = parsed as { byExpType?: Record<string, unknown>; byTag?: Record<string, unknown> }
+    if (!o || typeof o !== 'object') { setOvMsg('需为对象 {byExpType:{}, byTag:{}}'); return }
+    setOvBusy(true); setOvMsg(null)
+    apiCall<{ ok?: boolean; overrides?: unknown }>('control', {
+      action: 'set-threshold',
+      thresholdOverrides: { byExpType: o.byExpType || {}, byTag: o.byTag || {} },
+    })
+      .then((r) => {
+        if (r && (r as { ok?: boolean }).ok) setOvMsg('覆盖已生效（持久化）：' + JSON.stringify((r as { overrides?: unknown }).overrides || ''))
+        else setOvMsg((r as { error?: string } | undefined)?.error || '设置失败')
+      })
+      .catch(() => setOvMsg('调用失败'))
+      .finally(() => setOvBusy(false))
   }
 
   const setPaused = (pausedTo: boolean) => {
@@ -560,6 +604,28 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
       React.createElement('button', { onClick: () => setPaused(!paused), disabled: busy, style: btnStyle }, paused ? '恢复' : '暂停'),
       React.createElement('button', { onClick: clearAlerts, disabled: busy, style: btnStyle },
         '清除告警' + (s && s.alertsCriticalCount ? '（' + s.alertsCriticalCount + '）' : '')),
+    ),
+    // #13-3 差异化阈值：分层覆盖（全局 → 实验类型 → 标签组）JSON 编辑
+    React.createElement('div', { key: 'thr-ov', style: { marginTop: 10, borderTop: '1px solid ' + C.border, paddingTop: 8 } },
+      React.createElement('div', { style: { fontSize: 11, color: C.label2, marginBottom: 4 } },
+        '差异化阈值覆盖（JSON：byExpType 按实验类型 / byTag 按标签组，覆盖全局阈值）'),
+      React.createElement('textarea', {
+        value: ovJson,
+        onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setOvJson(e.target.value),
+        spellCheck: false,
+        style: {
+          width: '100%', boxSizing: 'border-box', minHeight: 96, background: C.layer1,
+          border: '1px solid ' + C.border, color: C.label, borderRadius: 4,
+          padding: '6px 8px', fontSize: 10.5, fontFamily: 'monospace', lineHeight: 1.45,
+        },
+        title: '示例：{"byExpType":{"gpu-train":{"utilWarn":60,"memWarn":90}},"byTag":{"推理服务":{"memWarn":95}}}',
+      }),
+      React.createElement('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 6, flexWrap: 'wrap' } },
+        React.createElement('button', { onClick: setOverrides, disabled: ovBusy, style: btnStyle }, '保存覆盖'),
+        React.createElement('span', { style: { fontSize: 10, color: C.label2 } },
+          '覆盖链：全局 → 实验类型 → 标签组（后级覆盖前级；留空对象=不覆盖）'),
+      ),
+      ovMsg ? React.createElement('div', { style: { fontSize: 11, color: C.brand, marginTop: 6 } }, ovMsg) : null,
     ),
     // 2026-08-24（#10 实验历史管理）：已结束实验列表 + 单条删除 + 清空（保留最近 N）
     React.createElement('div', { key: 'hist-manage', style: { marginTop: 10, borderTop: '1px solid ' + C.border, paddingTop: 8 } },

@@ -20,3 +20,6 @@ Thumbs.db
 .idea/
 .vscode/
 logs/
+
+# 转发器运行时产物
+forward-monitor.pid

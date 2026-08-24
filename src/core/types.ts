@@ -66,6 +66,10 @@ export interface RunRecord {
   fingerprint: string
   /** M2（issue#6）：实验类型（8 类枚举；start 时识别，unknown=未命中不猜） */
   type?: ExpType
+  /** M3（issue#7）：发起实验的 agent（pre-execute 读 exec.agent；无=旧宿主/外部，路由回退 roots()） */
+  agentId?: string | null
+  agentRole?: 'root' | 'subagent'
+  parentId?: string | null
   graceTicks: number
   alerting: boolean
   procGone?: boolean
@@ -93,6 +97,10 @@ export interface ExperimentSnapshot {
   endReason: string | null
   /** M2（issue#6）：实验类型（unknown=未识别） */
   type?: ExpType
+  /** M3（issue#7）：发起 agent（通知路由用） */
+  agentId?: string | null
+  agentRole?: 'root' | 'subagent'
+  parentId?: string | null
 }
 
 /** 已结束实验记录（对外协议：experiment 历史复盘；state-machine history 摘要投影，倒序=最新在前） */
@@ -108,6 +116,8 @@ export interface EndedRunSnapshot {
   /** M2（issue#6）：实验类型 + 命令指纹（指纹供学习层历史时长归类；restoreEnded 补存） */
   type?: ExpType
   fingerprint?: string
+  /** M3（issue#7）：发起 agent（通知路由用） */
+  agentId?: string | null
 }
 
 /** M2（issue#6）：实验类型 8 类枚举（unknown=未识别，保守默认不猜） */

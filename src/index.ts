@@ -91,6 +91,12 @@ export interface LabMonitorConfig {
   expTypeDefault: ExpType
   /** 是否启用学习层（按 fingerprint 历史时长归类 long；默认 true） */
   expTypeLearning: boolean
+  // ── M3（issue#7 子代理权限，docs/research/22 §5.2）：──
+  /**
+   * 子代理对 lab_ctl 的控制权限：readonly（默认，只读查询）/ restricted（白名单动作）/ full（等同主代理）。
+   * 安全边界：子代理默认只读——guard 执行期拒绝 lab_ctl，仅 lab_status/lab_advice 可调。
+   */
+  subagentPolicy: 'readonly' | 'restricted' | 'full'
 }
 
 /** dsh-settings 命名空间句柄（SettingsScope 子集：get/watch/update） */
@@ -316,6 +322,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     experimentTypes: Array.isArray(config.experimentTypes) ? config.experimentTypes.slice() : [],
     expTypeDefault: (config.expTypeDefault as ExpType | undefined) || 'unknown',
     expTypeLearning: config.expTypeLearning !== false,
+    // M3（issue#7 子代理权限）：默认 readonly（安全边界）——子代理只读查询，禁 lab_ctl 控制
+    subagentPolicy: (config.subagentPolicy as 'readonly' | 'restricted' | 'full' | undefined) || 'readonly',
   }
 
   // ── 运行时 watchlist（2026-08-20：用户配置静态基线 ∪ lab_ctl watch 动态注册）──
@@ -402,6 +410,74 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     }),
   })
 
+  // ── M3（issue#7，docs/research/22 §5.4）：agent 目录（路由+权限共用的运行时索引）──
+  // agent/created|disposed|status + subagent/start|end 维护；roots() 非持久化、冷 child 无事件、
+  // 跨进程不协调——目录缺失时路由回退 roots()/alertTargets（设计 §5.4 限制）。
+  interface AgentEntry {
+    id: string
+    role: 'root' | 'subagent'
+    parentId: string | null
+    status: string
+    runs: Set<string>
+    disposed: boolean
+  }
+  const agentDir = new Map<string, AgentEntry>()
+  /** 实验 start 时关联发起 agent（agentDir 条目存在才记——冷启动缺失时路由回退 roots） */
+  function touchAgentRun(agentId: string, runId: string): void {
+    const e = agentDir.get(agentId)
+    if (e) e.runs.add(runId)
+  }
+  /** isSubagent 判定（I4：delegationDepth>0 || origin==='subagent'；不用 parentSession 防 fork 误伤） */
+  function isSubagentAgent(a: unknown): boolean {
+    const h = (a as { session?: { header?: { parentSession?: string | null; origin?: string; delegationDepth?: number } } } | null | undefined)?.session?.header
+    return !!h && ((h.delegationDepth ?? 0) > 0 || h.origin === 'subagent')
+  }
+  /** 根祖先链（沿 parentId 向上；不含自己；最多 8 层防环） */
+  function rootAncestors(sessionId: string): string[] {
+    const out: string[] = []
+    let cur = agentDir.get(sessionId)
+    let guard = 0
+    while (cur && cur.parentId && guard < 8) {
+      const p = agentDir.get(cur.parentId)
+      if (!p || p.disposed) break
+      if (p.role === 'root') {
+        out.push(p.id)
+        break
+      }
+      out.push(p.id)
+      cur = p
+      guard += 1
+    }
+    return out
+  }
+  const agentSessionId = (a: unknown): string | null => {
+    const x = a as { id?: string; session?: { id?: string } } | null | undefined
+    return (x && x.session && x.session.id) || (x && x.id) || null
+  }
+  function onAgentCreated(ev: { agent?: unknown }): void {
+    const sid = agentSessionId(ev.agent)
+    if (!sid) return
+    const prev = agentDir.get(sid)
+    agentDir.set(sid, {
+      id: sid,
+      role: isSubagentAgent(ev.agent) ? 'subagent' : 'root',
+      parentId: (ev.agent as { session?: { header?: { parentSession?: string | null } } } | undefined)?.session?.header?.parentSession || null,
+      status: String((ev.agent as { status?: string } | undefined)?.status || 'unknown'),
+      runs: prev ? prev.runs : new Set(),
+      disposed: false,
+    })
+  }
+  function onAgentDisposed(ev: { agent?: unknown }): void {
+    const sid = agentSessionId(ev.agent)
+    const e = sid && agentDir.get(sid)
+    if (e) e.disposed = true
+  }
+  function onAgentStatus(ev: { agent?: unknown; status?: string }): void {
+    const sid = agentSessionId(ev.agent)
+    const e = sid && agentDir.get(sid)
+    if (e && ev.status) e.status = String(ev.status)
+  }
+
   // ── M1（issue#5，docs/research/22 §2）：告警通知策略引擎 ─────────────────────
   // 输入：lab/alert 事件（balancer.evaluate 规则告警 + pushExternal 外部告警，全部经 emitLab 总线）
   // 输出：按「有效级别 × 归属 × 实验状态」计算 notifyLevel → resolveAction(目标状态) → 投递
@@ -416,6 +492,10 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   const agentsSvc = ctx.get('agents' as never) as unknown as
     | { roots(): { id: string; status: string }[]; get(id: string): unknown }
     | undefined
+
+  /** roots() 实时视图（M3 共享：路由目标兜底 / 消息链升根） */
+  const rootsList = (): { id: string; status: string }[] =>
+    agentsSvc && typeof agentsSvc.roots === 'function' ? agentsSvc.roots().map((r) => ({ id: r.id, status: r.status })) : []
 
   /** 构造 user 消息（form:'notice'：一次性事件语义） */
   function buildNotifyMessage(alerts: readonly { level: string; rule: string; msg: string; actions?: string[] }[]): unknown {
@@ -481,8 +561,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       //   info/off           → off（仅 UI/工具可见）
       //   他人占用（origin=other）→ 不打扰（设计 §2.2 行 8/10）
       //   M2（issue#6）：告警关联到实验（runId → run.type）→ 按类型矩阵算档位（配置覆盖 > 出厂默认 > 全局 fallback）
+      //   M3（issue#7）：同时取 run.state/agentId 用于路由决策树
       const batchEff = batch.map((a) => ({ a, eff: effectiveLevel(a) }))
-      const runOf = (runId: string | null | undefined): { type?: ExpType } | null => {
+      const runOf = (runId: string | null | undefined): { type?: ExpType; state?: string; agentId?: string | null } | null => {
         if (!runId) return null
         return machine.all().find((r) => r.runId === runId) || machine.history.find((r) => r.runId === runId) || null
       }
@@ -517,21 +598,59 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           /* 回写失败不阻塞投递 */
         }
       }
-      const targets: { id: string; status: string }[] = []
-      if (cfg.alertTargets && cfg.alertTargets.length && agentsSvc) {
-        for (const id of cfg.alertTargets) {
-          const a = agentsSvc.get(id) as { status?: string } | undefined
-          if (a) targets.push({ id, status: a.status || 'idle' })
+      // ── M3（issue#7，docs/research/22 §4.2）：目标路由决策树 ──
+      //   告警 runId → RunRecord.agentId（发起者）：
+      //     · 发起者在线（root 或 subagent）：目标=发起者（按矩阵档位）；
+      //       子代理发起 → 根祖先链并行 notice 知情（crashed → 根 wake 接管，子代理降 notice 不激进唤醒）
+      //     · 发起者 absent/disposed 或目录缺失 → 立即升根 roots()（设计 §4.2 absent 行）
+      //   无实验上下文（runId=null / runId 查不到）→ roots()（M1 行为）
+      const targets: { id: string; status: string; level: 'off' | 'notice' | 'wake' }[] = []
+      const seenTargets = new Set<string>()
+      const addTarget = (id: string, status: string, level: 'off' | 'notice' | 'wake') => {
+        if (!id || seenTargets.has(id)) return
+        seenTargets.add(id)
+        targets.push({ id, status, level })
+      }
+      for (const { a, eff } of batchEff) {
+        if (a.origin === 'other' || eff === 'off') continue
+        const run = runOf(a.runId)
+        const runLevel = levelOf(a, eff)
+        const crashed = !!run && run.state === 'crashed'
+        if (run && run.agentId) {
+          const entry = agentDir.get(run.agentId)
+          if (entry && !entry.disposed) {
+            if (entry.role === 'subagent') {
+              // 子代理发起：发起者按矩阵档位（crashed 降 notice，实验已死不激进唤醒）+ 根祖先链知情
+              addTarget(run.agentId, entry.status, crashed ? 'notice' : runLevel)
+              for (const rootId of rootAncestors(run.agentId)) {
+                const re = agentDir.get(rootId)
+                addTarget(rootId, re ? re.status : 'idle', crashed ? 'wake' : 'notice')
+              }
+            } else {
+              // root 发起：目标=发起者自身（crashed → 强制 wake 接管检查/重跑决策）
+              addTarget(run.agentId, entry.status, crashed ? 'wake' : runLevel)
+            }
+          } else {
+            // 发起者 absent/disposed → 立即升根（设计 §4.2）
+            for (const r of rootsList()) addTarget(r.id, r.status, crashed ? 'wake' : runLevel)
+          }
+        } else if (a.runId || !targets.length) {
+          // runId 查不到（冷恢复/历史清理）或无实验上下文 → roots()（与 M1 一致的兜底）
+          for (const r of rootsList()) addTarget(r.id, r.status, runLevel)
         }
-      } else if (agentsSvc && typeof agentsSvc.roots === 'function') {
-        targets.push(...agentsSvc.roots().map((r) => ({ id: r.id, status: r.status })))
       }
-      if (!targets.length && agentsSvc) {
-        console.log('[lab-monitor] 通知跳过：无可用目标 agent（agents 服务存在但 roots 为空）')
+      if (!targets.length) {
+        for (const r of rootsList()) addTarget(r.id, r.status, rootLevel)
+        if (agentsSvc && !rootsList().length) {
+          console.log('[lab-monitor] 通知跳过：无可用目标 agent（agents 服务存在但 roots 为空）')
+        }
       }
-      // 投递（budget 断言：同目标 ≤2；M1 只走主通道 1 条）
+      // 投递（budget 断言：同目标 ≤2；M3：主通道 1 条 + 兜底仅链断裂时 1 条）
+      // 2026-08-24（链路实测修复）：off 档直接跳过，不再 fallback notice——设计 §2.2「info × 任意 → off
+      // （仅 UI/工具可见）不投递」；实测 other-occupancy（info）被 fallback 成 notice 打扰了主代理。
       for (const t of targets) {
-        const action = resolveAction(rootLevel === 'off' ? 'notice' /* off 不投递但作为 fallback 保持 notice 语义 */ : rootLevel, (t.status || 'idle') as 'running' | 'idle')
+        if (t.level === 'off') continue
+        const action = resolveAction(t.level, (t.status || 'idle') as 'running' | 'idle')
         if (action === 'off') continue
         const key = t.id
         const used = notifyBudget.get(key) || 0
@@ -556,7 +675,11 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           else continue
           notifyBudget.set(key, used + 1)
           notifyFingerprints.add(fp)
-          console.log(`[lab-monitor] 告警通知已投递 → ${t.id}（action=${action}, level=${rootLevel}, ${batch.length} 条）`)
+          // M3（issue#7 §4.3 证据1）：wake 档 followup 投递到子代理 → 登记超时未领取升根
+          if (t.level === 'wake' && action === 'followup' && agentDir.get(t.id)?.role === 'subagent') {
+            scheduleWakeEscalate(t.id)
+          }
+          console.log(`[lab-monitor] 告警通知已投递 → ${t.id}（action=${action}, level=${t.level}, ${batch.length} 条）`)
         } catch (e) {
           console.error('[lab-monitor] 告警通知投递失败:', (e as Error).message)
         }
@@ -570,6 +693,78 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   labListeners.push((ev) => {
     if (ev.type === 'lab/alert') notifyAlerts()
   })
+
+  // ── M3（issue#7，docs/research/22 §4.3）：消息链兜底——仅在链断裂证据时触发 ──
+  // 明确不做「无 report/settle 活动即转发」（B1：静默处理是主通道常态路径，静默 ≠ 链断裂）。
+  // 证据1：wake 档 followup 投递后 notifyTimeoutMs 内无 agent/inbox/claimed（未领取=未送达）→ 升根
+  const claimedTargets = new Set<string>() // notifyTimeoutMs 窗口内领取过消息的 agent
+  function scheduleWakeEscalate(targetId: string): void {
+    if (!(cfg.notifyTimeoutMs > 0)) return
+    setTimeout(() => {
+      try {
+        if (claimedTargets.has(targetId)) return // 已领取 = 已送达，不升根
+        const entry = agentDir.get(targetId)
+        if (entry && entry.disposed) return // 已 dispose，absent 路径已处理
+        const key = 'root:' + targetId
+        const used = notifyBudget.get(key) || 0
+        if (used >= 2) return
+        const agent = agentsSvc && (agentsSvc as unknown as Record<string, unknown>).get
+          ? (agentsSvc as unknown as { get(id: string): unknown }).get(targetId) as { followup?: (m: unknown) => void } | undefined
+          : undefined
+        if (agent && typeof agent.followup === 'function') {
+          agent.followup(buildNotifyMessage([{
+            level: 'critical', rule: 'notify-undelivered',
+            msg: '前一条告警通知（wake 档）在超时窗口内未被领取（疑似未送达），根代理请确认处理状态',
+            actions: ['检查目标 agent 运行状态 / 人工接管相关实验'],
+          }]))
+          notifyBudget.set(key, used + 1)
+          console.log(`[lab-monitor] 链断裂兜底（证据1）：告警未领取超时升根 → ${targetId}`)
+        }
+      } catch (e) {
+        console.error('[lab-monitor] 未领取超时升根错误:', (e as Error).message)
+      }
+    }, cfg.notifyTimeoutMs)
+  }
+  // 证据3：subagent/end 异常结算（stopReason∈{max-tokens,error,cancelled}）且该子代理有在途实验未 done → roots() 升根
+  function onSubagentEnd(ev: unknown): void {
+    try {
+      const payload = (ev as { payload?: unknown })?.payload
+      const p = (payload && typeof payload === 'object' ? payload : ev) as { id?: string; local?: string; stopReason?: string }
+      const sid = p.id || p.local
+      if (!sid) return
+      const entry = agentDir.get(sid)
+      if (!entry || entry.role !== 'subagent') return
+      const abnormal = p.stopReason === 'max-tokens' || p.stopReason === 'error' || p.stopReason === 'cancelled'
+      if (!abnormal) return
+      const pendingRuns = machine.all().filter((r) => r.agentId === sid && r.state === 'running')
+      if (!pendingRuns.length) return
+      const msg = buildNotifyMessage([{
+        level: 'critical', rule: 'subagent-abnormal-end',
+        msg: `子代理 ${sid} 异常结算（${p.stopReason}），其发起实验 ${pendingRuns.map((x) => x.runId).join('/')} 仍在运行，需人工接管（检查日志/重跑决策）`,
+      }])
+      for (const r of rootsList()) {
+        const key = 'root:' + r.id
+        const used = notifyBudget.get(key) || 0
+        if (used >= 2) continue
+        const agent = agentsSvc && (agentsSvc as unknown as Record<string, unknown>).get
+          ? (agentsSvc as unknown as { get(id: string): unknown }).get(r.id) as { followup?: (m: unknown) => void } | undefined
+          : undefined
+        if (agent && typeof agent.followup === 'function') {
+          try {
+            agent.followup(msg)
+            notifyBudget.set(key, used + 1)
+            console.log(`[lab-monitor] 链断裂兜底（证据3）：子代理异常结算升根 → ${r.id}`)
+          } catch (e) {
+            console.error('[lab-monitor] 升根投递失败:', (e as Error).message)
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[lab-monitor] subagent/end 处理错误:', (e as Error).message)
+    }
+  }
+  // wake 档 followup 投递时登记超时检查（证据1 入口；子代理目标才有升根意义）
+  // 注：投递循环内调用 scheduleWakeEscalate（见 notifyAlerts 目标投递段）
 
   // runner + 采样主流程
   const runner = makeRunner(ctx.shell, ctx)
@@ -976,10 +1171,12 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           })).default([]),
           expTypeDefault: Schema.string().default('unknown'),
           expTypeLearning: Schema.boolean().default(true),
+          // M3（issue#7 子代理权限）
+          subagentPolicy: Schema.union([Schema.const('readonly'), Schema.const('restricted'), Schema.const('full')]).default('readonly'),
         })
         settingsScope = settingsSvc.register('lab-monitor', persistSchema, { applies: 'live' })
         // 读回持久化基线（重启后 lab_ctl 改的阈值 / watch 动态注册 / 标签不再丢失）
-        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[]; history?: unknown[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; notifyTimeoutMs?: number; broadcast?: boolean; experimentTypes?: unknown[]; expTypeDefault?: string; expTypeLearning?: boolean } | null
+        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; watchProcs?: string[]; tags?: TagRule[]; history?: unknown[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; notifyTimeoutMs?: number; broadcast?: boolean; experimentTypes?: unknown[]; expTypeDefault?: string; expTypeLearning?: boolean; subagentPolicy?: 'readonly' | 'restricted' | 'full' } | null
         if (stored && stored.thresholds) thresholds.apply(stored.thresholds as never, true)
         if (stored && Array.isArray(stored.watchProcs)) {
           cfg.watchProcs = stored.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
@@ -1007,6 +1204,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         }
         if (stored && typeof stored.expTypeDefault === 'string' && EXP_TYPES_SET.has(stored.expTypeDefault as ExpType)) cfg.expTypeDefault = stored.expTypeDefault as ExpType
         if (stored && typeof stored.expTypeLearning === 'boolean') cfg.expTypeLearning = stored.expTypeLearning
+        // M3（issue#7）：子代理权限策略读回（默认 readonly 保守）
+        if (stored && (stored.subagentPolicy === 'readonly' || stored.subagentPolicy === 'restricted' || stored.subagentPolicy === 'full')) cfg.subagentPolicy = stored.subagentPolicy
         // 2026-08-22（P2 实验历史）：恢复已结束实验记录（settings 持久化 → 状态机 history）
         if (stored && Array.isArray(stored.history) && typeof machine.restoreEnded === 'function') {
           machine.restoreEnded(stored.history as never)
@@ -1086,6 +1285,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         experimentTypes: cfg.experimentTypes,
         expTypeDefault: cfg.expTypeDefault,
         expTypeLearning: cfg.expTypeLearning,
+        // M3（issue#7）：子代理权限策略持久化
+        subagentPolicy: cfg.subagentPolicy,
       })
       lastPersistedEndKey = endKey
     } catch (e) {
@@ -1503,6 +1704,79 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           }),
         ),
       )
+      // ── M3（issue#7，docs/research/22 §5.3）：子代理权限 guard + 只读工具注入 + agent 目录事件 ──
+      // ① host 全局 guard：谓词读策略存储（不写死拒绝）——子代理按 subagentPolicy 拒 lab_ctl
+      const LAB_CTL_RESTRICTED_WHITELIST = ['watch', 'tag', 'history-manage']
+      try {
+        if (ctx.tools && typeof ctx.tools.guard === 'function') {
+          disposers.push(ctx.tools.guard(((execution: { name?: string; arguments?: Record<string, unknown>; agent?: unknown }): string | undefined => {
+            try {
+              if (!execution.agent || !isSubagentAgent(execution.agent)) return undefined // 主代理/fork/无执行者不受限
+              if (cfg.subagentPolicy === 'full') return undefined
+              if (execution.name === 'lab_ctl') {
+                if (cfg.subagentPolicy === 'restricted') {
+                  const action = (execution.arguments as Record<string, unknown> | undefined)?.action
+                  if (typeof action === 'string' && LAB_CTL_RESTRICTED_WHITELIST.includes(action)) return undefined
+                  return `subagentPolicy=restricted：子代理禁止 lab_ctl（仅白名单动作：${LAB_CTL_RESTRICTED_WHITELIST.join('/')}）`
+                }
+                return 'subagentPolicy=readonly：子代理禁止 lab_ctl（只读；控制动作仅主代理可用）'
+              }
+              return undefined // lab_status/lab_advice 等只读工具放行
+            } catch (e) {
+              console.error('[lab-monitor] guard 判定错误:', (e as Error).message)
+              return undefined
+            }
+          }) as never))
+        }
+      } catch (e) {
+        console.error('[lab-monitor] guard 注册失败:', (e as Error).message)
+      }
+      // ② 可继续子代理：注入只读 lab_status_ro + restrict deny lab_ctl（仿 installReportTool 范本，fresh+cold resume 生效）
+      try {
+        const subagentsSvc = ctx.get('subagents' as never) as { registerContinuableSetup?: (fn: (childCtx: unknown) => void) => void } | undefined
+        if (subagentsSvc && typeof subagentsSvc.registerContinuableSetup === 'function') {
+          subagentsSvc.registerContinuableSetup((childCtx) => {
+            try {
+              const cc = childCtx as { tools?: { register?: (t: unknown) => void; restrict?: (r: unknown) => void } }
+              if (cc.tools && typeof cc.tools.register === 'function') {
+                cc.tools.register(defineTool({
+                  name: 'lab_status_ro',
+                  description: 'Lab Monitor 只读状态查询（子代理专用）：GPU/进程/实验摘要，不可控制。',
+                  parameters: { brief: { type: 'boolean', description: 'true=单行摘要' } },
+                  output: {
+                    schema: { type: 'json' },
+                    render: (_args: { brief?: boolean }, value: unknown) => renderText(value),
+                  },
+                  async execute(args: { brief?: boolean }) {
+                    const s = buildSnapshot()
+                    const ro = { gpu: s.gpu, cpu: s.cpu, mem: s.mem, procs: (s.procs || []).slice(0, 50), experiment: s.experiment, ended: (s.ended || []).slice(0, 10), alerts: s.alerts }
+                    return sanitizeJson(args && args.brief === true ? { ok: true, line: promptLine(s) } : ro) as never
+                  },
+                }))
+              }
+              if (cc.tools && typeof cc.tools.restrict === 'function') cc.tools.restrict({ deny: ['lab_ctl'] })
+            } catch (e) {
+              console.error('[lab-monitor] registerContinuableSetup 注入失败:', (e as Error).message)
+            }
+          })
+        }
+      } catch (e) {
+        console.error('[lab-monitor] registerContinuableSetup 注册失败:', (e as Error).message)
+      }
+      // ③ agent 目录事件监听（agent/created|disposed|status；无标签 host ctx 全量可见）
+      try {
+        ctx.on('agent/created' as never, onAgentCreated as never)
+        ctx.on('agent/disposed' as never, onAgentDisposed as never)
+        ctx.on('agent/status' as never, onAgentStatus as never)
+        // M3 §4.3：消息链兜底事件（subagent/end 异常结算升根；inbox/claimed 领取确认解除超时升根）
+        ctx.on('subagent/end' as never, onSubagentEnd as never)
+        ctx.on('agent/inbox/claimed' as never, ((ev: unknown) => {
+          const sid = agentSessionId((ev as { agent?: unknown }).agent)
+          if (sid) claimedTargets.add(sid)
+        }) as never)
+      } catch (e) {
+        console.error('[lab-monitor] agent 事件监听注册失败:', (e as Error).message)
+      }
       ctx.effect(() => () => disposers.forEach((d) => d()))
     } catch (e) {
       console.error('[lab-monitor] 工具注册失败:', e)
@@ -1528,15 +1802,26 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   // ── 生命周期 hooks ─────────────────────────────────────────────────────
   // ① pre-execute（waterfall，默认放行）——训练命令 → 实验开始
   // 注：exec 实参为 ToolExecution（arguments: unknown），用宽松结构接收
-  const preExecHandler = async (exec: { name?: string; arguments?: Record<string, unknown> }, next: () => Promise<{ kind: string }>) => {
+  // M3（issue#7）：exec.agent 由 agent-loop 注入（tools 执行身份），读发起者用于通知路由
+  const preExecHandler = async (exec: { name?: string; arguments?: Record<string, unknown>; agent?: unknown }, next: () => Promise<{ kind: string }>) => {
     try {
       if (enabled && exec && (exec.name === 'bash' || exec.name === 'run_code')) {
         const args = exec.arguments
         const cmd = args ? (args.command !== undefined ? String(args.command) : exec.name === 'bash' ? null : String(args.code ?? '')) : null
         const feature = matchTrainFeature(cmd || null)
         if (feature) {
-          const run = machine.start(cmd || '', feature)
-          console.log('[lab-monitor] 实验开始命中:', feature, '| runId=', run.runId, '| cmd=', String(cmd).slice(0, 80))
+          // M3（issue#7）：提取发起 agent（session.id + header；无 agent=旧宿主/外部调用 → 路由回退 roots()）
+          const agent = exec.agent as { id?: string; session?: { id?: string; header?: { parentSession?: string | null; origin?: string; delegationDepth?: number } } } | null | undefined
+          const sessionId = agent && agent.session && agent.session.id ? agent.session.id : (agent && agent.id) || null
+          const header = agent && agent.session && agent.session.header
+          const isSub = !!header && ((header.delegationDepth ?? 0) > 0 || header.origin === 'subagent')
+          const run = machine.start(cmd || '', feature, {
+            agentId: sessionId,
+            agentRole: isSub ? 'subagent' : 'root',
+            parentId: (header && header.parentSession) || null,
+          })
+          if (sessionId) touchAgentRun(sessionId, run.runId)
+          console.log('[lab-monitor] 实验开始命中:', feature, '| runId=', run.runId, '| agent=', sessionId || 'none', isSub ? '(subagent)' : '', '| cmd=', String(cmd).slice(0, 80))
         }
       }
     } catch (e) {

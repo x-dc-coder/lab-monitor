@@ -142,13 +142,22 @@ export function normalizeCmdForMatch(s: string | null | undefined): string {
 }
 
 let RUN_ID_COUNTER = 0
+/**
+ * runId（settings 持久化主键 / 告警 runId 关联 / history 去重）
+ * 2026-08-24（实测修复）：原实现仅日期+计数器，重启后计数器归零 → 同日重启多次会与
+ * settings 恢复的旧记录 runId 重复（实测 run-20260824-001 出现两条：恢复的历史 + 新 run）。
+ * 仿 makeTagId 修复：日期 + HHMMSS + 计数器（同一秒内最多 999 条，重启后同秒并发概率可忽略）。
+ */
 export function makeRunId(): string {
   RUN_ID_COUNTER += 1
   const d = new Date()
   const y = d.getFullYear()
   const mo = ('0' + (d.getMonth() + 1)).slice(-2)
   const dd = ('0' + d.getDate()).slice(-2)
-  return 'run-' + y + mo + dd + '-' + ('000' + RUN_ID_COUNTER).slice(-3)
+  const hh = ('0' + d.getHours()).slice(-2)
+  const mm = ('0' + d.getMinutes()).slice(-2)
+  const ss = ('0' + d.getSeconds()).slice(-2)
+  return 'run-' + y + mo + dd + '-' + hh + mm + ss + '-' + ('000' + RUN_ID_COUNTER).slice(-3)
 }
 
 let TAG_ID_COUNTER = 0

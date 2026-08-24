@@ -26,7 +26,7 @@ interface StateMachineDeps {
 }
 
 export interface StateMachine {
-  start(cmdStr: string, feature: string): RunRecord
+  start(cmdStr: string, feature: string, agent?: { agentId?: string | null; agentRole?: 'root' | 'subagent'; parentId?: string | null }): RunRecord
   associatePid(pid: number): void
   associateProc(pid: number): void
   markResult(paired: boolean, runId?: string | null): void
@@ -174,7 +174,11 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
   // ① start：pre-execute 命中训练命令（只记 runId/cmd 特征/startTs，无 pid，T1-1）
   // 2026-08-20（A2 多轨）：并行跟踪上限 MAX_PARALLEL_RUNS——超出时归档最旧 running 为 aborted；
   // 不再「新 start 即归档旧 run」（v1 单跟踪语义，P1 验收 7 已更新）。
-  function start(cmdStr: string, feature: string): RunRecord {
+  // ① start：pre-execute 命中训练命令（只记 runId/cmd 特征/startTs，无 pid，T1-1）
+  // 2026-08-20（A2 多轨）：并行跟踪上限 MAX_PARALLEL_RUNS——超出时归档最旧 running 为 aborted；
+  // 不再「新 start 即归档旧 run」（v1 单跟踪语义，P1 验收 7 已更新）。
+  // M3（issue#7）：agent 可选参——发起实验的 agent（agentId/agentRole/parentId），通知路由用
+  function start(cmdStr: string, feature: string, agent?: { agentId?: string | null; agentRole?: 'root' | 'subagent'; parentId?: string | null }): RunRecord {
     const running = all()
     if (running.length >= MAX_PARALLEL_RUNS) {
       const oldest = running.reduce((a, b) => (a.startTs <= b.startTs ? a : b))
@@ -203,6 +207,9 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       resultSeen: false,
       fingerprint: cmdFingerprint(cmdStr),
       type: typeInfo.type,
+      agentId: agent?.agentId ?? null,
+      agentRole: agent?.agentRole,
+      parentId: agent?.parentId ?? null,
       graceTicks: 0,
       alerting: false,
       procGone: false,
@@ -212,7 +219,7 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     }
     state.runs.set(run.runId, run)
     if (deps.ring) deps.ring.expand() // R-3：running 期扩容
-    deps.emitLab('lab/experiment-start', { runId: run.runId, cmd: cmdStr, cmdFeature: feature, startTs: run.startTs, type: run.type, expTypeLayer: typeInfo.layer })
+    deps.emitLab('lab/experiment-start', { runId: run.runId, cmd: cmdStr, cmdFeature: feature, startTs: run.startTs, type: run.type, expTypeLayer: typeInfo.layer, agentId: run.agentId, agentRole: run.agentRole })
     return run
   }
 
@@ -326,6 +333,9 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       summary: null,
       endReason: null,
       type: run.type,
+      agentId: run.agentId,
+      agentRole: run.agentRole,
+      parentId: run.parentId,
     }
   }
 
@@ -343,6 +353,8 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       // M2（issue#6）：类型 + 指纹透出（指纹供学习层历史归类；restoreEnded 恢复）
       type: run.type,
       fingerprint: run.fingerprint,
+      // M3（issue#7）：发起 agent 透出（通知路由用）
+      agentId: run.agentId,
     }
   }
 
@@ -370,6 +382,7 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
         fingerprint: typeof s.fingerprint === 'string' ? s.fingerprint : '',
         // M2（issue#6）：历史恢复保留类型（旧数据无 type → 不猜，留 unknown 语义由上层展示）
         type: s.type,
+        agentId: typeof s.agentId === 'string' ? s.agentId : null,
         graceTicks: 0,
         alerting: false,
         pidMissingStreak: 0,

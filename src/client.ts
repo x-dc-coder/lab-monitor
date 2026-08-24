@@ -459,7 +459,7 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
     if (m !== null) body.memWarn = Math.max(0, Math.min(100, m))
     if (t !== null) body.tempWarn = Math.max(0, Math.min(120, t))
     const n = num(procTopN); const g = num(wGpu); const c = num(wCpu); const mm = num(wMem)
-    if (n !== null) body.procTopN = Math.max(5, Math.min(200, Math.round(n)))
+    if (n !== null) body.procTopN = Math.max(5, Math.min(500, Math.round(n)))
     if (g !== null) body.wGpu = Math.max(0, Math.min(20, g))
     if (c !== null) body.wCpu = Math.max(0, Math.min(20, c))
     if (mm !== null) body.wMem = Math.max(0, Math.min(20, mm))
@@ -520,7 +520,7 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
     ),
     // 进程排序：取前 N + CPU/GPU/内存 权重（2026-08-23）
     React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(104px, 1fr))', gap: 10, marginTop: 8 } },
-      field('取前N进程', procTopN, setProcTopN, '按加权打分取前 N 个高占用进程（5..200）'),
+      field('取前N进程', procTopN, setProcTopN, '按加权打分取前 N 个高占用进程（5..500）'),
       field('权重GPU', wGpu, setWGpu, 'GPU 利用率权重（0..20）'),
       field('权重CPU', wCpu, setWCpu, 'CPU 利用率权重（0..20）'),
       field('权重内存', wMem, setWMem, '内存占用权重（0..20）'),
@@ -816,13 +816,70 @@ function memCard(s: SnapView | null) {
 
 // 常见默认进程聚合组（2026-08-20：避免列表被系统进程刷屏；折叠展示 + 统计行）
 const DEFAULT_PROC_GROUPS: { key: string; label: string; match: (cmd: string) => boolean }[] = [
-  { key: 'browser', label: '浏览器', match: (c) => /chrome|msedge|firefox|WeChatAppEx/i.test(c) },
+  { key: 'browser', label: '浏览器', match: (c) => /chrome|msedge|firefox/i.test(c) },
   { key: 'ide', label: '编辑器/终端', match: (c) => /Code\.exe|WindowsTerminal|ShellHost|coodesker|explorer/i.test(c) },
   { key: 'docker', label: 'Docker/WSL', match: (c) => /Docker|docker|wsl/i.test(c) },
-  { key: 'system', label: '系统进程', match: (c) => /System|Registry|smss|csrss|wininit|services|lsass|dwm|SearchHost|StartMenu|LockApp|TextInputHost|ApplicationFrame/i.test(c) },
+  { key: 'system', label: '系统进程', match: (c) => /System|Registry|smss|csrss|wininit|services|lsass|dwm|SearchHost|StartMenu|LockApp|TextInputHost|ApplicationFrame|svchost|conhost|RuntimeBroker|WUDFHost|fontdrvhost|dllhost|taskhostw|sihost|WmiPrvSE|unsecapp|AggregatorHost|LsaIso|NgcIso|SearchFilterHost|Widgets|Spoolsv|audiodg|dasHost/i.test(c) },
   { key: 'vm', label: '虚拟机', match: (c) => /vmmem|vmwp|vmms|VmCompute|HvHost|vmware|VirtualBox|VBoxHeadless|qemu|VGAuth/i.test(c) },
-  { key: 'other-app', label: '常用应用', match: (c) => /Weixin|QQ|ToDesk|TaiShanNet|llama-server/i.test(c) },
+  { key: 'other-app', label: '常用应用', match: (c) => /Weixin|WeChatAppEx|QQ|ToDesk|TaiShanNet|llama-server/i.test(c) },
 ]
+
+/**
+ * 进程家族映射（2026-08-24 重名进程优化 ②）：cmd 名（小写）→ 家族名。
+ * 用途：组内聚合从"程序名"升级为"程序家族"，折叠态信息密度更高；
+ * 家族名只影响聚合行标签，PID 明细行仍显示原始 cmd，信息不丢。
+ * 规则：多实例重名大户（svchost/conhost…）与同产品多进程名（华硕全家桶/wetype…）合并；
+ * 未映射的进程 fallback 到原 cmd 名（单实例保持一行一种，不做无意义合并）。
+ */
+const PROC_FAMILIES: Record<string, string> = {
+  // Windows 系统进程（服务宿主/控制台宿主/驱动宿主/会话组件/WMI）
+  'svchost.exe': 'Windows 系统', 'conhost.exe': 'Windows 系统', 'runtimebroker.exe': 'Windows 系统',
+  'wudfhost.exe': 'Windows 系统', 'fontdrvhost.exe': 'Windows 系统', 'dllhost.exe': 'Windows 系统',
+  'taskhostw.exe': 'Windows 系统', 'sihost.exe': 'Windows 系统', 'shellhost.exe': 'Windows 系统',
+  'wmiprvse.exe': 'Windows 系统', 'unsecapp.exe': 'Windows 系统', 'aggregatorhost.exe': 'Windows 系统',
+  'searchhost.exe': 'Windows 系统', 'searchfilterhost.exe': 'Windows 系统', 'textinputhost.exe': 'Windows 系统',
+  'startmenuexperiencehost.exe': 'Windows 系统', 'lockapp.exe': 'Windows 系统', 'applicationframehost.exe': 'Windows 系统',
+  'lsaiso.exe': 'Windows 系统', 'ngciso.exe': 'Windows 系统', 'explorer.exe': 'Windows 系统', 'dwm.exe': 'Windows 系统',
+  'widgets.exe': 'Windows 系统', 'spoolsv.exe': 'Windows 系统', 'audiodg.exe': 'Windows 系统', 'dasthost.exe': 'Windows 系统',
+  'csrss.exe': 'Windows 系统', 'smss.exe': 'Windows 系统', 'wininit.exe': 'Windows 系统', 'winlogon.exe': 'Windows 系统',
+  'services.exe': 'Windows 系统', 'lsass.exe': 'Windows 系统', 'system': 'Windows 系统',
+  'secure system': 'Windows 系统', 'registry': 'Windows 系统', 'memory compression': 'Windows 系统', 'system idle process': 'Windows 系统',
+  // Chromium / 浏览器
+  'chrome.exe': 'Chrome', 'msedge.exe': 'Edge', 'msedgewebview2.exe': 'Edge WebView2',
+  'crashpad_handler.exe': 'Chromium 崩溃上报',
+  // 腾讯
+  'weixin.exe': '微信', 'wechatappex.exe': '微信',
+  // 微软输入法（WeType）
+  'wetype_service.exe': '微软输入法', 'wetype_update.exe': '微软输入法',
+  'wetype_renderer.exe': '微软输入法', 'wetype_server.exe': '微软输入法',
+  // 华硕全家桶
+  'asus_framework.exe': '华硕', 'armourycrate.exe': '华硕', 'armourycrate.service.exe': '华硕',
+  'armoursocketserver.exe': '华硕', 'aac3572mbhal_x86.exe': '华硕', 'aac3572dramhal_x86.exe': '华硕',
+  'aackingstondramhal_x64.exe': '华硕', 'aackingstondramhal_x86.exe': '华硕', 'asufancontrolservice.exe': '华硕',
+  'lightingservice.exe': '华硕', 'rogliveservice.exe': '华硕', 'atkexcomsvc.exe': '华硕', 'dove-service.exe': '华硕',
+  'gameviewerservice.exe': '华硕', 'gameviewerserver.exe': '华硕', 'gameviewerhealthd.exe': '华硕',
+  'gameviewer.exe': '华硕', 'neatdm.exe': '华硕', 'extensioncardhal_x86.exe': '华硕',
+  // NVIDIA / Intel 显卡
+  'nvdisplay.container.exe': 'NVIDIA 驱动', 'intelcpchdpsvc.exe': 'Intel 显卡',
+  'intelgraphicsoftware.service.exe': 'Intel 显卡', 'oneapp.igcc.winservice.exe': 'Intel 显卡',
+  'presentmonservice.exe': 'Intel 显卡',
+  // 安全
+  'msmpeng.exe': 'Windows Defender', 'nissrv.exe': 'Windows Defender', 'mpdefendercore service.exe': 'Windows Defender',
+  // Docker / WSL
+  'wsl.exe': 'WSL', 'wslhost.exe': 'WSL', 'wslservice.exe': 'WSL', 'vmmemwsl': 'WSL', 'vmmem': 'WSL',
+  'docker desktop.exe': 'Docker', 'com.docker.backend.exe': 'Docker', 'vmcompute.exe': 'Docker',
+  // 网络工具
+  'tailscaled.exe': 'Tailscale', 'frpc.exe': 'frp', 'sshd.exe': 'OpenSSH', 'ssh-agent.exe': 'OpenSSH',
+  // 其他
+  'coodesker-x64.exe': 'Coodesker 桌面', 'everything.exe': 'Everything 搜索', 'msrdc.exe': '远程桌面',
+  'openconsole.exe': 'Windows 终端', 'logi_lamparray_service.exe': '罗技', 'zcode.exe': 'ZCode',
+}
+
+/** cmd 名 → 家族名（未映射 fallback 原 cmd 名） */
+const familyOf = (cmd: string): string => {
+  const k = (cmd || '').trim().toLowerCase()
+  return PROC_FAMILIES[k] || (cmd || '').trim()
+}
 
 /** GPU 利用率取值：优先 gpuUtilPct（backend 填充），回退 v1.1 遗留 gpu 字段 */
 function procGpu(p: ProcView): number | null {
@@ -884,8 +941,83 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
     if (mem > 0) out.push(React.createElement('span', { key: 'mem', style: { ...tok, color: C.label2 } }, '内存 ' + fmtGiB(mem) + 'G'))
     return out
   }
-  const row = (p: ProcView, kind?: 'watch' | 'group') => {
-    const gpu = procGpu(p) || 0
+  // 组内二级聚合（2026-08-24 重名进程优化 ②）：成员先按家族聚合 → 家族内再按 cmd 名聚合
+  // 折叠态：组标题下只看到家族行（如 "Windows 系统 ×133"）；展开家族 → 种类行（如 "svchost.exe ×101"）；再展开 → PID 明细
+  // 排序按总占用（与组排序一致），最重的家族/种类排最前；cmd 大小写不敏感聚合（tasklist 输出实测小写）
+  const familyGroupsOf = (members: ProcView[]): { family: string; kinds: { cmd: string; members: ProcView[] }[]; members: ProcView[] }[] => {
+    const byFamily = new Map<string, ProcView[]>()
+    for (const m of members) {
+      const key = familyOf(m.cmd || '')
+      if (!byFamily.has(key)) byFamily.set(key, [])
+      byFamily.get(key)!.push(m)
+    }
+    const fams = [...byFamily.entries()].map(([family, ms]) => {
+      const byName = new Map<string, ProcView[]>()
+      for (const m of ms) {
+        const k = (m.cmd || '').trim().toLowerCase()
+        if (!byName.has(k)) byName.set(k, [])
+        byName.get(k)!.push(m)
+      }
+      const kinds = [...byName.entries()].map(([k, mm]) => ({ cmd: mm[0].cmd || k, members: mm }))
+      kinds.sort((a, b) => groupScore(b.members) - groupScore(a.members))
+      return { family, kinds, members: ms }
+    })
+    fams.sort((a, b) => groupScore(b.members) - groupScore(a.members))
+    return fams
+  }
+  // 种类行（可点击展开/收起 PID 明细）+ 展开时成员行；明细 >30 截断（与组内原行为一致）
+  const kindRow = (keyPrefix: string, sub: { cmd: string; members: ProcView[] }): React.ReactElement[] => {
+    const subOpen = !!expanded[keyPrefix + '::' + sub.cmd]
+    const rows: React.ReactElement[] = []
+    rows.push(React.createElement('tr', {
+      key: 'kind-' + keyPrefix + '-' + sub.cmd,
+      onClick: () => toggle(keyPrefix + '::' + sub.cmd),
+      style: { cursor: 'pointer' },
+    },
+      React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 11, paddingLeft: 30 } },
+        React.createElement('span', { key: 'label' },
+          (subOpen ? '▼ ' : '▸ ') + sub.cmd + '（×' + sub.members.length + '）'),
+        ...aggTokens(sub.members),
+        (subOpen ? null : React.createElement('span', { key: 'prev', style: { marginLeft: 8, color: C.label2 } },
+          'PID ' + sub.members.slice(0, 3).map((m) => m.pid).join(' / ') + (sub.members.length > 3 ? ' …' : ''))),
+      ),
+    ))
+    if (subOpen) {
+      for (const m of sub.members.slice(0, 30)) rows.push(row(m, 'group'))
+      if (sub.members.length > 30) rows.push(React.createElement('tr', { key: 'kindmore-' + keyPrefix + '-' + sub.cmd },
+        React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 10, padding: '2px 6px 2px 30px' } },
+          '… 还有 ' + (sub.members.length - 30) + ' 个成员')),
+      )
+    }
+    return rows
+  }
+  // 家族行（可点击展开/收起种类行）+ 展开时种类行们；种类 >30 截断
+  const familyRow = (gKey: string, fam: { family: string; kinds: { cmd: string; members: ProcView[] }[]; members: ProcView[] }): React.ReactElement[] => {
+    const famOpen = !!expanded[gKey + '::' + fam.family]
+    const rows: React.ReactElement[] = []
+    rows.push(React.createElement('tr', {
+      key: 'fam-' + gKey + '-' + fam.family,
+      onClick: () => toggle(gKey + '::' + fam.family),
+      style: { cursor: 'pointer' },
+    },
+      React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label, fontSize: 11, paddingLeft: 12, fontWeight: 600 } },
+        React.createElement('span', { key: 'label' },
+          (famOpen ? '▼ ' : '▸ ') + fam.family + '（×' + fam.members.length + '）'),
+        ...aggTokens(fam.members),
+        (famOpen ? null : React.createElement('span', { key: 'prev', style: { marginLeft: 8, color: C.label2, fontWeight: 400 } },
+          fam.kinds.slice(0, 3).map((k) => k.cmd + ' ×' + k.members.length).join(' / ') + (fam.kinds.length > 3 ? ' …' : ''))),
+      ),
+    ))
+    if (famOpen) {
+      for (const k of fam.kinds.slice(0, 30)) rows.push(...kindRow(gKey + '::' + fam.family, k))
+      if (fam.kinds.length > 30) rows.push(React.createElement('tr', { key: 'fammore-' + gKey + '-' + fam.family },
+        React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 10, padding: '2px 6px 2px 30px' } },
+          '… 还有 ' + (fam.kinds.length - 30) + ' 种进程')),
+      )
+    }
+    return rows
+  }
+  const row = (p: ProcView, kind?: 'watch' | 'group') => {    const gpu = procGpu(p) || 0
     const cpu = p.cpuPct || 0
     const hot = gpu >= 80 || cpu >= 80
     const bg = kind === 'watch' ? 'rgba(57,100,254,0.06)' : hot ? 'rgba(220,38,38,0.07)' : (kind === 'group' ? 'rgba(0,0,0,0.02)' : undefined)
@@ -912,9 +1044,10 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
   const tbodyRows: unknown[] = []
   // watched 置顶（独立高亮行）
   for (const p of watchedRows) tbodyRows.push(row(p, 'watch'))
-  // 聚合组：标题行（点击展开/收起，含资源聚合）+ 展开时全部成员行
+  // 聚合组：标题行（点击展开/收起，含资源聚合）+ 展开时家族聚合行（重名进程优化 ②）
   for (const g of groupRows) {
     const open = !!expanded[g.key]
+    const fams = familyGroupsOf(g.members)
     tbodyRows.push(React.createElement('tr', {
       key: 'grp-' + g.label,
       onClick: () => toggle(g.key),
@@ -925,20 +1058,21 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
           (open ? '▼ ' : '▸ ') + g.label + '（' + g.members.length + '）'),
         ...aggTokens(g.members),
         (open ? null : React.createElement('span', { key: 'prev', style: { marginLeft: 8, color: C.label2 } },
-          g.members.slice(0, 3).map((m) => m.cmd || '').join(' / '))),
+          fams.slice(0, 3).map((f) => f.family + ' ×' + f.members.length).join(' / '))),
       ),
     ))
     if (open) {
-      for (const m of g.members.slice(0, 30)) tbodyRows.push(row(m, 'group'))
-      if (g.members.length > 30) tbodyRows.push(React.createElement('tr', { key: 'more-' + g.key },
+      for (const f of fams.slice(0, 30)) tbodyRows.push(...familyRow(g.key, f))
+      if (fams.length > 30) tbodyRows.push(React.createElement('tr', { key: 'more-' + g.key },
         React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 10, padding: '2px 6px' } },
-          '… 还有 ' + (g.members.length - 30) + ' 个成员')),
+          '… 还有 ' + (fams.length - 30) + ' 个家族')),
       )
     }
   }
-  // 其余普通进程（非默认组）：做成**可折叠**组（默认收起，点击展开），与默认聚合组一致，避免刷屏
+  // 其余普通进程（非默认组）：同家族聚合，做成**可折叠**组（默认收起，点击展开），与默认聚合组一致，避免刷屏
   if (otherRows.length) {
     const open = !!expanded['other']
+    const fams = familyGroupsOf(otherRows)
     tbodyRows.push(React.createElement('tr', {
       key: 'grp-other',
       onClick: () => toggle('other'),
@@ -949,14 +1083,14 @@ function ProcsTable(props: { snap: SnapView | null; onDetail: (d: DetailData) =>
           (open ? '▼ ' : '▸ ') + '其他进程（' + otherRows.length + '）'),
         ...aggTokens(otherRows),
         (open ? null : React.createElement('span', { key: 'prev', style: { marginLeft: 8, color: C.label2 } },
-          otherRows.slice(0, 3).map((m) => m.cmd || '').join(' / '))),
+          fams.slice(0, 3).map((f) => f.family + ' ×' + f.members.length).join(' / '))),
       ),
     ))
     if (open) {
-      for (const p of otherRows.slice(0, 30)) tbodyRows.push(row(p, 'group'))
-      if (otherRows.length > 30) tbodyRows.push(React.createElement('tr', { key: 'more-other' },
+      for (const f of fams.slice(0, 30)) tbodyRows.push(...familyRow('other', f))
+      if (fams.length > 30) tbodyRows.push(React.createElement('tr', { key: 'more-other' },
         React.createElement('td', { colSpan: 5, style: { ...tdStyle, color: C.label2, fontSize: 10, padding: '2px 6px' } },
-          '… 还有 ' + (otherRows.length - 30) + ' 个成员')),
+          '… 还有 ' + (fams.length - 30) + ' 个家族')),
       )
     }
   }

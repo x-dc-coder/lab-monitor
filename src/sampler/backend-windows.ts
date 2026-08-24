@@ -359,6 +359,12 @@ export class WindowsBackend implements SamplerBackend {
       }
     }
 
+    // 净化：剔除采样自曝进程（tasklist/nvidia-smi 采样工具自身 + 它们的 conhost 宿主）
+    // 2026-08-24（重名进程优化 ③）：tasklist 快照窗口会采到自身；nvidia-smi 含 dmon 长驻流
+    // 每帧必现；它们的控制台宿主 conhost 一并剔除（ppid 指向采样工具）。用户手动运行的
+    // conhost.exe 不受影响（ppid 指向用户程序）。
+    procs = this.purgeSamplerSelf(procs)
+
     const snap: Snapshot = {
       ts,
       platform: 'wsl', // 标注真实采样视图（WSL 视角），不因通道降级改变（D1-1）
@@ -374,6 +380,27 @@ export class WindowsBackend implements SamplerBackend {
     }
     if (degraded !== null) snap.degraded = degraded
     return snap
+  }
+
+  /**
+   * 剔除采样自曝进程（重名进程优化 ③）：
+   * 1. 采样工具自身：tasklist.exe（快照窗口自采）/ nvidia-smi.exe（含 dmon 长驻流，每帧必现）
+   * 2. 它们的控制台宿主 conhost.exe（ppid 指向采样工具）——用户程序的 conhost 保留
+   * 匹配按 Windows 侧映像名，大小写不敏感（tasklist 输出实测小写）。
+   */
+  private purgeSamplerSelf(procs: ProcSample[]): ProcSample[] {
+    const SELF = new Set(['tasklist.exe', 'nvidia-smi.exe'])
+    const selfPids = new Set<number>()
+    for (const p of procs) {
+      const name = (p.cmd || '').trim().toLowerCase()
+      if (SELF.has(name)) selfPids.add(p.pid)
+    }
+    if (selfPids.size === 0) return procs
+    return procs.filter((p) => {
+      if (selfPids.has(p.pid)) return false
+      if ((p.cmd || '').trim().toLowerCase() === 'conhost.exe' && p.ppid !== undefined && p.ppid !== null && selfPids.has(p.ppid)) return false
+      return true
+    })
   }
 
   /** ③ stream：dmon 长驻流（指数退避重启 → query-fallback） */

@@ -1078,7 +1078,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       const k = keys[n]
       if (typeof a[k] !== 'number' || !isFinite(a[k])) continue
       let v = a[k]
-      if (k === 'procTopN') v = Math.max(5, Math.min(200, Math.round(v))) // 进程排序取前 N（5..200）
+      if (k === 'procTopN') v = Math.max(5, Math.min(500, Math.round(v))) // 进程排序取前 N（5..500，全量进程 ~400）
       else if (k === 'wGpu' || k === 'wCpu' || k === 'wMem') v = Math.max(0, Math.min(20, v)) // 权重 0..20
       applied[k] = v
     }

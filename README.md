@@ -411,7 +411,11 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
    TRAIN_PATTERNS 保守识别限制（如 `python infer.py`/`vllm serve`）；显式 run **跳过幽灵豁免**（crash 严格判定）；
    规则持久化（settings `trackRules`），HTTP 面 `/lab-monitor/api/track` 等效路由。
 4. **验证**：verify-host 新增 [A2.5]（run_code 不误判）/[A2.6]（track 显式跟踪闭环）/ [B2.5]（幽灵 run 豁免）/
-   [B2.6]（显式 run 严格 crash）四段回归 + verify.sh 7 组全绿；契约 protocol.md 升 1.5（source 字段 + track 路由）。
+   [B2.6]（显式 run 严格 crash）/[B2.7]（通知路由绑定发起 session）五段回归 + verify.sh 7 组全绿；契约 protocol.md 升 1.5（source 字段 + track 路由）。
+5. **#17 衍生修复（通知路由绑定发起 session）**：误判 crash 告警曾因 `agentDir` 缺宿主会话条目（无
+   `agent/created` 登记）走 absent 分支广播 `roots()`，唤醒全部 root 会话（实测多个 session 启动）。
+   修复：目录缺失 ≠ 目标不可达——先 `agentsSvc.get(run.agentId)` 精确投递发起会话，真不可达才广播；
+   同时 `persistState` 历史持久化补存 `agentId`（重启恢复后路由仍绑定发起会话，不退回 roots 广播）。
 
 ## 未完成项清单（2026-08-20 对照 PLAN v1.4.5 + 04-milestones）
 

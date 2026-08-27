@@ -42,6 +42,12 @@ function fakeShellResult(text, code) {
   return { exitCode: code !== undefined ? code : 0, stdout: { text: text || '', truncated: false }, stderr: { text: '', truncated: false } }
 }
 
+// #17 衍生（2026-08-27）：agents 服务 mock——M3 通知路由测试（roots/get 动态读 FAKE；默认空 = 等效无 agents）
+const agentsMock = {
+  roots() { return typeof FAKE.agentsRoots === 'function' ? FAKE.agentsRoots() : [] },
+  get(id) { return typeof FAKE.agentsGet === 'function' ? FAKE.agentsGet(id) : undefined },
+}
+
 // ── mock cordis ctx / services ─────────────────────────────────────────────
 function makeCtx() {
   const intervals = []
@@ -131,6 +137,8 @@ function makeCtx() {
       // 2026-08-20（M4 重探测试）：settingsAvailable=false 模拟 settings 服务晚于 apply 就绪
       if (name === 'settings') return settingsMock.available === false ? undefined : settingsMock
       if (name === 'systemPrompt') return promptService
+      // #17 衍生（2026-08-27）：agents 服务 mock（M3 通知路由测试；默认 roots 空 → 等效无 agents）
+      if (name === 'agents') return agentsMock
       return undefined
     },
     on(name, fn) {
@@ -376,6 +384,32 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   assert((snap.alerts || []).some((a) => a.rule === 'experiment-crash'), '显式 run crashed → 触发 experiment-crash 告警', snap.alerts)
   await tCtlB.execute({ action: 'track', track: { op: 'remove', id: vTrkE.rule.id } })
   FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 92, 19200, 24576, 80, 350.00' // 恢复高 util
+
+  console.log('\n[B2.7] #17 衍生：通知路由绑定发起 session——agentDir 缺失时精确投递不广播 roots')
+  // agents mock：两个 root 在线 + 发起 session 'sess-main' 可投递（记录投递目标）
+  const deliveries = []
+  const deliveredRoots = []
+  FAKE.agentsRoots = () => [{ id: 'root-A', status: 'idle' }, { id: 'root-B', status: 'idle' }]
+  FAKE.agentsGet = (id) => {
+    if (id === 'sess-main') return { followup: (m) => deliveries.push({ to: 'sess-main' }), steer: (m) => deliveries.push({ to: 'sess-main' }) }
+    if (id === 'root-A') return { followup: (m) => deliveredRoots.push('root-A'), steer: (m) => deliveredRoots.push('root-A') }
+    if (id === 'root-B') return { followup: (m) => deliveredRoots.push('root-B'), steer: (m) => deliveredRoots.push('root-B') }
+    return undefined
+  }
+  await tCtlB.execute({ action: 'clear-alerts' }) // 重置通知指纹（同指纹告警可再投递）
+  await tick(31) // 过 notifyThrottleMs（默认 60s）
+  // 发起者 session 执行 bash（agentDir 无条目——无 agent/created 事件）→ crashed → 通知路由
+  await pre({ name: 'bash', arguments: { command: 'python train_routed.py --epochs 1' }, agent: { session: { id: 'sess-main', header: {} } } }, async () => ({ kind: 'allow' }))
+  FAKE.psLines = ['8888 1 0.5 300000 node server.js']
+  await tick(3)
+  await tick(3)
+  snap = await G('snapshot')({})
+  assert(snap.ended && snap.ended.some((e) => e.state === 'crashed' && e.cmd.indexOf('train_routed') !== -1),
+    '路由测试 run crashed（agentId=sess-main）', snap.ended && snap.ended.map((e) => e.state))
+  assert(deliveries.length >= 1, '通知精确投递到发起 session（agentDir 缺失不广播，绑定 agentId）', deliveries)
+  assert(deliveredRoots.length === 0, '未广播到 root-A/root-B', deliveredRoots)
+  FAKE.agentsRoots = undefined
+  FAKE.agentsGet = undefined
 
   console.log('\n[B3] 多轨并行（A2：并行跟踪上限 4 + 各自独立判定）')
   // 实验 A start → pid 关联 101

@@ -645,8 +645,19 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
               addTarget(run.agentId, entry.status, crashed ? 'wake' : runLevel)
             }
           } else {
-            // 发起者 absent/disposed → 立即升根（设计 §4.2）
-            for (const r of rootsList()) addTarget(r.id, r.status, crashed ? 'wake' : runLevel)
+            // 发起者 absent/disposed 或 agentDir 缺条目（宿主会话未登记/冷启动）——
+            // 2026-08-27 修复（#17 衍生，issue#17 复现现场：误判 crash 告警广播唤醒多个 root 会话）：
+            // 目录缺失 ≠ 目标不可达——agentsSvc.get(agentId) 为实时视图，能拿到 agent 对象即目标存在，
+            // 应精确投递发起会话（等效绑定 sessionId），仅当目标真不可达才升根广播 roots()。
+            const direct = agentsSvc && typeof (agentsSvc as unknown as { get?: unknown }).get === 'function'
+              ? (agentsSvc as unknown as { get(id: string): unknown }).get(run.agentId)
+              : undefined
+            if (direct) {
+              const st = (direct as { status?: string }).status || (entry && !entry.disposed ? entry.status : 'idle')
+              addTarget(run.agentId, st, crashed ? 'wake' : runLevel)
+            } else {
+              for (const r of rootsList()) addTarget(r.id, r.status, crashed ? 'wake' : runLevel)
+            }
           }
         } else if (a.runId || !targets.length) {
           // runId 查不到（冷恢复/历史清理）或无实验上下文 → roots()（与 M1 一致的兜底）
@@ -1260,6 +1271,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             // M2（issue#6）：类型 + 指纹（学习层历史归类数据面）
             type: Schema.any(),
             fingerprint: Schema.any(),
+            // #17 衍生（2026-08-27）：发起 agent 持久化（重启恢复后路由仍绑定发起会话）
+            agentId: Schema.any(),
           })).default([]),
           // ── M1（issue#5 告警通知，docs/research/22 §6.1）──
           alertNotify: Schema.union([Schema.const('off'), Schema.const('notice'), Schema.const('wake')]).default('notice'),
@@ -1405,6 +1418,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           // M2（issue#6）：类型 + 指纹持久化（重启 restoreEnded 恢复，供学习层历史归类）
           type: r.type,
           fingerprint: r.fingerprint,
+          // #17 衍生（2026-08-27）：发起 agent 持久化——重启后恢复的历史 run 仍绑定发起会话，
+          // 通知路由不因 agentId=null 退回 roots() 广播（原缺省导致误判 crash 告警广播唤醒全部 root）
+          agentId: r.agentId ?? null,
         })),
         // M1（issue#5）：通知配置持久化
         alertNotify: cfg.alertNotify,

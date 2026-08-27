@@ -149,4 +149,4 @@ lab_ctl history-manage op=clear keep=5
 | V2.7（2026-08-24） | 进程展示增强：采样自曝过滤（tasklist/nvidia-smi + 伴随 conhost）+ 组内 cmd 聚合 + 家族归类三级折叠（PROC_FAMILIES ~90 条）+ 系统组正则补全 + procTopN 上限 1000 |
 | V2.8（2026-08-24） | #10 实验历史管理（rpcHistoryManage + lab_ctl history-manage + 设置页管理块）；M2 实验类型识别（三层识别 + 数据面 type/fingerprint + 配置三键 + 通知矩阵接线 + 类型徽标） |
 | V2.9（2026-08-24） | M3 通知链路闭环（#7）：发起者路由决策树 + subagentPolicy 权限（guard/lab_status_ro）+ 消息链兜底（异常结算/未领取升根）；修复 makeRunId 重启重复 + off 档误投递 |
-| V2.10（2026-08-27） | #17 修复：run_code 代码体（含 train*.py 字样）不再误判为实验（pre-execute 仅 bash 参与识别）+ 幽灵 run crash 门控（从未关联进程 + <30s + 无资源活动 → aborted 不告警）+ **lab_ctl track 显式注册实验跟踪**（非训练命令也可指定为实验监控，explicit 跳过幽灵豁免）；回归测试 verify-host [A2.5]/[A2.6]/[B2.5]/[B2.6] |
+| V2.10（2026-08-27） | #17 修复：run_code 代码体（含 train*.py 字样）不再误判为实验（pre-execute 仅 bash 参与识别）+ 幽灵 run crash 门控（从未关联进程 + <30s + 无资源活动 → aborted 不告警）+ **lab_ctl track 显式注册实验跟踪**（非训练命令也可指定为实验监控，explicit 跳过幽灵豁免）+ **通知路由绑定发起 session**（agentDir 缺失时 agentsSvc.get 精确投递不广播 roots；history 持久化补 agentId）；回归测试 verify-host [A2.5]/[A2.6]/[B2.5]/[B2.6]/[B2.7] |

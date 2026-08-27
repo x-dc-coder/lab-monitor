@@ -25,7 +25,7 @@ import { createStateMachine, parsePs } from './core/state-machine.js'
 import { createBalancer, createThresholds } from './core/balancer.js'
 import { aggregateProcStats } from './core/proc-aggregator.js'
 import { EXP_TYPES_SET, type ExpTypeRule } from './core/exp-type.js'
-import type { GroupStats, ProcStat, SystemStats, TagGroup, TagRule } from './core/types.js'
+import type { GroupStats, ProcStat, SystemStats, TagGroup, TagRule, TrackRule } from './core/types.js'
 import {
   SAMPLE_MS,
   PS_INTERVAL_MS,
@@ -63,6 +63,12 @@ export interface LabMonitorConfig {
    * 来源：settings.yaml（lab-monitor 段）静态基线 + lab_ctl tag 运行时动态合并。
    */
   tags: TagRule[]
+  /**
+   * #17 增强（2026-08-27）：显式跟踪规则（lab_ctl track）——命中 cmdline 的命令无条件记为实验并监控，
+   * 不受 TRAIN_PATTERNS 保守识别限制（如 python infer.py / vllm serve 等非训练形态），且跳过幽灵 run 豁免
+   * （crash 严格判定）。来源：settings.yaml 静态基线 + lab_ctl track 运行时动态合并。
+   */
+  trackRules: TrackRule[]
   // ── M1（issue#5 告警通知，docs/research/22 §6）：──
   /**
    * 告警通知通道 fallback（off|notice|wake）：仅无实验上下文/unknown 类型时作为兜底档位；
@@ -309,6 +315,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     pollMs: config.pollMs ?? THRESHOLD_DEFAULTS.pollMs,
     watchProcs: Array.isArray(config.watchProcs) ? config.watchProcs.slice() : [],
     tags: Array.isArray(config.tags) ? config.tags.slice() : [],
+    // #17 增强：显式跟踪规则（lab_ctl track）
+    trackRules: Array.isArray(config.trackRules) ? config.trackRules.slice() : [],
     // M1（issue#5 告警通知）：默认保守——notice 不主动唤醒
     alertNotify: (config.alertNotify as LabMonitorConfig['alertNotify']) ?? 'notice',
     alertTargets: Array.isArray(config.alertTargets) ? config.alertTargets.slice() : [],
@@ -1233,6 +1241,13 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             kind: Schema.union([Schema.const('experiment'), Schema.const('process')]),
             color: Schema.any(),
           })).default([]),
+          // #17 增强：显式跟踪规则（lab_ctl track）持久化
+          trackRules: Schema.array(Schema.object({
+            id: Schema.string(),
+            label: Schema.string(),
+            patterns: Schema.array(Schema.string()),
+            color: Schema.any(),
+          })).default([]),
           // 2026-08-22（P2 实验历史）：已结束实验记录持久化（ended 投影，重启恢复）
           history: Schema.array(Schema.object({
             runId: Schema.string(),
@@ -1267,7 +1282,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         })
         settingsScope = settingsSvc.register('lab-monitor', persistSchema, { applies: 'live' })
         // 读回持久化基线（重启后 lab_ctl 改的阈值 / watch 动态注册 / 标签不再丢失）
-        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; thresholdOverrides?: ThresholdOverrides; backendMode?: BackendMode; watchProcs?: string[]; tags?: TagRule[]; history?: unknown[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; notifyTimeoutMs?: number; broadcast?: boolean; experimentTypes?: unknown[]; expTypeDefault?: string; expTypeLearning?: boolean; subagentPolicy?: 'readonly' | 'restricted' | 'full' } | null
+        const stored = settingsScope.get() as { thresholds?: Partial<Thresholds>; thresholdOverrides?: ThresholdOverrides; backendMode?: BackendMode; watchProcs?: string[]; tags?: TagRule[]; trackRules?: TrackRule[]; history?: unknown[]; alertNotify?: string; alertTargets?: string[]; notifyThrottleMs?: number; escalateAfterSec?: number; notifyTimeoutMs?: number; broadcast?: boolean; experimentTypes?: unknown[]; expTypeDefault?: string; expTypeLearning?: boolean; subagentPolicy?: 'readonly' | 'restricted' | 'full' } | null
         if (stored && stored.thresholds) thresholds.apply(stored.thresholds as never, true)
         // #13-3 差异化阈值：恢复分层覆盖
         if (stored && stored.thresholdOverrides && typeof stored.thresholdOverrides === 'object') {
@@ -1282,6 +1297,10 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         }
         if (stored && Array.isArray(stored.tags)) {
           cfg.tags = stored.tags.filter(isValidTagRule)
+        }
+        // #17 增强：显式跟踪规则读回（settings 持久化 → 内存）
+        if (stored && Array.isArray(stored.trackRules)) {
+          cfg.trackRules = stored.trackRules.filter(isValidTrackRule)
         }
         // M1（issue#5）：通知配置读回
         if (stored && typeof stored.alertNotify === 'string' && (stored.alertNotify === 'off' || stored.alertNotify === 'notice' || stored.alertNotify === 'wake')) {
@@ -1372,6 +1391,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         backendMode: cfg.backendMode,
         watchProcs: watchSet(),
         tags: tagSet(),
+        // #17 增强：显式跟踪规则持久化
+        trackRules: cfg.trackRules,
         // 2026-08-22（P2）：ended 投影持久化（倒序投影与 snapshot() 一致；重启 restoreEnded 恢复）
         history: (machine.history || []).map((r) => ({
           runId: r.runId,
@@ -1429,6 +1450,44 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     if (r.kind !== 'experiment' && r.kind !== 'process') return false
     if (r.color !== undefined && typeof r.color !== 'string') return false
     return true
+  }
+
+  // ── #17 增强（2026-08-27）：显式跟踪规则（lab_ctl track）──
+  /** 跟踪规则合法性过滤（settings 读回 / lab_ctl track add 的守卫；仿 isValidTagRule） */
+  function isValidTrackRule(t: unknown): t is TrackRule {
+    if (!t || typeof t !== 'object') return false
+    const r = t as Partial<TrackRule>
+    if (typeof r.id !== 'string' || !r.id) return false
+    if (typeof r.label !== 'string' || !r.label) return false
+    if (!Array.isArray(r.patterns) || !r.patterns.length) return false
+    for (const p of r.patterns) {
+      if (typeof p !== 'string' || !p) return false
+      try { new RegExp(p) } catch (e) { return false }
+    }
+    if (r.color !== undefined && typeof r.color !== 'string') return false
+    return true
+  }
+  /** cmdline 是否命中显式跟踪规则（正则全串匹配；任一 pattern 命中即 true） */
+  function trackRuleMatches(rule: TrackRule, cmd: string): boolean {
+    if (!cmd || !rule || !Array.isArray(rule.patterns)) return false
+    for (const p of rule.patterns) {
+      if (!p) continue
+      try {
+        const re = new RegExp(p, 'i')
+        if (re.test(cmd)) return true
+      } catch (e) {
+        /* 非法正则忽略 */
+      }
+    }
+    return false
+  }
+  /** 显式跟踪命中查找：返回第一个命中的规则（无则 null）——pre-execute 显式注册优先于 TRAIN_PATTERNS */
+  function matchTrackRule(cmd: string | null | undefined): TrackRule | null {
+    if (!cmd || !cfg.trackRules.length) return null
+    for (const r of cfg.trackRules) {
+      if (trackRuleMatches(r, cmd)) return r
+    }
+    return null
   }
 
   // ── RPC 方法集合（webServer HTTP 数据面）───────────────────────────────
@@ -1542,6 +1601,50 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     return { ok: false, error: '未知 tag 操作: ' + op }
   }
 
+  // #17 增强（2026-08-27）：lab_ctl track —— 显式注册实验跟踪规则（add/remove/list）
+  // 语义：命中 cmdline 的命令在 pre-execute 无条件记为实验（不受 TRAIN_PATTERNS 保守识别限制），
+  // 且跳过幽灵 run 豁免（crash 严格判定）。规则存 cfg.trackRules（settings 持久化唯一来源）。
+  function rpcTrack(a: Record<string, unknown>) {
+    const op = a.op === undefined || a.op === null ? 'list' : String(a.op)
+    if (op === 'list') {
+      const procsAll = backendState.lastSnap && Array.isArray((backendState.lastSnap as { procs?: unknown[] }).procs) ? (backendState.lastSnap as { procs: { pid: number; cmd: string }[] }).procs : []
+      const matched = procsAll.filter((p) => p.cmd && cfg.trackRules.some((r) => trackRuleMatches(r, p.cmd))).map((p) => ({ pid: p.pid, cmd: p.cmd }))
+      return { ok: true, rules: cfg.trackRules, matchedProcs: matched }
+    }
+    if (op === 'add') {
+      const label = typeof a.label === 'string' && a.label.trim() ? a.label.trim() : null
+      if (!label) return { ok: false, error: 'track add 需要 label（规则名，如 "训练实验A"）' }
+      const color = typeof a.color === 'string' && a.color.trim() ? a.color.trim() : undefined
+      let patterns: string[] = []
+      // 快速注册：pid → 取当前进程 cmdline 生成 pattern（正则转义；等价规则式，重启后仍命中）
+      if (typeof a.pid === 'number' && a.pid > 0) {
+        const procsAll = backendState.lastSnap && Array.isArray((backendState.lastSnap as { procs?: unknown[] }).procs) ? (backendState.lastSnap as { procs: { pid: number; cmd: string }[] }).procs : []
+        const hit = procsAll.find((p) => p.pid === a.pid)
+        if (!hit || !hit.cmd) return { ok: false, error: 'pid ' + a.pid + ' 不在当前进程表（进程可能已退出，请用 patterns 注册）' }
+        const esc = hit.cmd.replace(/[.*+?^${}()|[]\]/g, '\\$&')
+        patterns = [esc]
+      } else if (Array.isArray(a.patterns) && a.patterns.length) {
+        patterns = a.patterns.filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+      }
+      if (!patterns.length) return { ok: false, error: 'track add 需要 patterns 或 pid（cmdline 正则，如 "python.*infer"）' }
+      const rule: TrackRule = { id: makeTagId(), label, patterns, color }
+      if (!isValidTrackRule(rule)) return { ok: false, error: '跟踪规则非法（pattern 正则或字段类型错误）' }
+      cfg.trackRules.push(rule)
+      persistState()
+      return { ok: true, state: 'track-added', rule, note: '命中该命令的 bash 执行将记为实验（explicit）并监控' }
+    }
+    if (op === 'remove') {
+      const id = typeof a.id === 'string' && a.id ? a.id : null
+      if (!id) return { ok: false, error: 'track remove 需要 id' }
+      const idx = cfg.trackRules.findIndex((t) => t.id === id)
+      if (idx === -1) return { ok: true, state: 'track-not-found', id }
+      cfg.trackRules.splice(idx, 1)
+      persistState()
+      return { ok: true, state: 'track-removed', id }
+    }
+    return { ok: false, error: '未知 track 操作: ' + op }
+  }
+
   // 2026-08-24（#10 实验历史管理）：list/delete/clear（keep 最近 N）——
   // 删除/清空后显式 persistState()（惰性检测按 endTs 变化触发，删非首条不会命中）
   function rpcHistoryManage(args: { op?: string; runId?: string | null; keep?: number }): { ok: boolean; state: string; removed?: string[]; remaining: number } {
@@ -1587,6 +1690,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       runId: body.runId as string | null | undefined,
       keep: body.keep as number | undefined,
     }),
+    // #17 增强（2026-08-27）：浏览器端 lab_ctl track 等效路由（add/remove/list）
+    track: (body) => rpcTrack((body.track || {}) as Record<string, unknown>),
   }
 
   function httpHandler(req: IncomingMessage, res: ServerResponse) {
@@ -1706,7 +1811,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             name: 'lab_ctl',
             description: '控制 Lab Monitor 监控/告警引擎（start/pause/resume/set-threshold/watch/tag/clear-alerts/history-manage）。护栏：只控制监控引擎，绝不触碰实验进程。',
             parameters: {
-              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch', 'tag', 'clear-alerts', 'set-notify', 'history-manage', 'backend-mode'], description: '操作类型（set-notify=设置告警通知策略；history-manage=实验历史管理；backend-mode=切换监控目标）' },
+              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch', 'tag', 'clear-alerts', 'set-notify', 'history-manage', 'backend-mode', 'track'], description: '操作类型（set-notify=设置告警通知策略；history-manage=实验历史管理；backend-mode=切换监控目标；track=显式注册实验跟踪规则）' },
               keywords: {
                 type: 'array',
                 items: { type: 'string' },
@@ -1783,12 +1888,26 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                 type: 'number',
                 description: 'history-manage clear 时可选：保留最近 N 条（默认 0=全清）',
               },
+              // #17 增强（2026-08-27）：track 参数（显式注册实验跟踪规则）
+              track: {
+                type: 'object',
+                additionalProperties: true,
+                properties: {
+                  op: { type: 'string', enum: ['add', 'remove', 'list'], description: 'add=注册跟踪规则（label+patterns 或 label+pid）；remove=按 id 删除；list=列出全部' },
+                  label: { type: 'string', description: '规则名（如 "训练实验A"、"推理服务"）' },
+                  patterns: { type: 'array', items: { type: 'string' }, description: 'cmdline 正则列表（任一命中即无条件记为实验并监控；如 "python.*infer.py"、"vllm serve"）' },
+                  pid: { type: 'number', description: '快速注册：按 pid 取该进程 cmdline 自动生成 pattern（等价规则式，重启后仍命中）' },
+                  color: { type: 'string', description: '展示色（可选，16 进制如 #3964fe）' },
+                  id: { type: 'string', description: 'remove 时的规则 id' },
+                },
+                description: '#17 增强：track 操作的参数（action=track 时使用）——显式指定命令作为实验监控',
+              },
             },
             output: {
               schema: { type: 'json' },
               render: (_args: Record<string, unknown>, value: unknown) => renderText(value),
             },
-            async execute(args: { action?: string; keywords?: string[]; thresholds?: Record<string, unknown>; tag?: Record<string, unknown>; runId?: string; rule?: string; op?: string; keep?: number }) {
+            async execute(args: { action?: string; keywords?: string[]; thresholds?: Record<string, unknown>; tag?: Record<string, unknown>; track?: Record<string, unknown>; runId?: string; rule?: string; op?: string; keep?: number }) {
               const a = args || {}
               if (a.action === 'watch') {
                 const kws = Array.isArray(a.keywords) ? a.keywords.filter((k) => typeof k === 'string' && k.trim()).map((k) => k.trim()) : []
@@ -1857,6 +1976,11 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
               if (a.action === 'history-manage') {
                 // #10（2026-08-24）：实验历史管理（list/delete/clear），Agent 可见证据（removed/remaining）
                 return sanitizeJson(rpcHistoryManage({ op: a.op, runId: a.runId ?? null, keep: a.keep })) as never
+              }
+              if (a.action === 'track') {
+                // #17 增强（2026-08-27）：显式注册实验跟踪规则（add/remove/list）
+                // 命中该命令的 bash 执行将无条件记为实验（explicit）并监控，不受 TRAIN_PATTERNS 限制
+                return sanitizeJson(rpcTrack(a.track && typeof a.track === 'object' ? (a.track as Record<string, unknown>) : (a as Record<string, unknown>))) as never
               }
               return { ok: true, state: rpcControl({ action: a.action }).state } as never
             },
@@ -1964,12 +2088,32 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   // M3（issue#7）：exec.agent 由 agent-loop 注入（tools 执行身份），读发起者用于通知路由
   const preExecHandler = async (exec: { name?: string; arguments?: Record<string, unknown>; agent?: unknown }, next: () => Promise<{ kind: string }>) => {
     try {
-      if (enabled && exec && (exec.name === 'bash' || exec.name === 'run_code')) {
+      // #17（2026-08-27，issue#17）：仅 bash（明确 shell 执行）参与实验识别。
+      // run_code 的 code 是 JS/TS 程序体而非命令行——其中含 train*.py 字样的字符串
+      // （写文档/README/示例代码）会被 TRAIN_PATTERNS 误命中并触发 experiment-crash 误报
+      // （实证 run-20260827-185517-001，gpuUtilMax 4%、无进程）。run_code 内嵌套的
+      // tools.bash 调用自带独立 pre-execute（bash），真实训练命令不会因此漏检。
+      if (enabled && exec && exec.name === 'bash') {
         const args = exec.arguments
-        const cmd = args ? (args.command !== undefined ? String(args.command) : exec.name === 'bash' ? null : String(args.code ?? '')) : null
-        const feature = matchTrainFeature(cmd || null)
-        if (feature) {
-          // M3（issue#7）：提取发起 agent（session.id + header；无 agent=旧宿主/外部调用 → 路由回退 roots()）
+        const cmd = args && args.command !== undefined ? String(args.command) : null
+        // #17 增强：显式跟踪规则（lab_ctl track）优先——用户明确声明要监控的命令无条件记为实验
+        // （source=explicit，跳过幽灵 run 豁免，crash 严格判定；不依赖 TRAIN_PATTERNS 保守识别）
+        const trackHit = matchTrackRule(cmd)
+        if (trackHit) {
+          const agent = exec.agent as { id?: string; session?: { id?: string; header?: { parentSession?: string | null; origin?: string; delegationDepth?: number } } } | null | undefined
+          const sessionId = agent && agent.session && agent.session.id ? agent.session.id : (agent && agent.id) || null
+          const header = agent && agent.session && agent.session.header
+          const isSub = !!header && ((header.delegationDepth ?? 0) > 0 || header.origin === 'subagent')
+          const run = machine.start(cmd || '', 'explicit:' + trackHit.label, {
+            agentId: sessionId,
+            agentRole: isSub ? 'subagent' : 'root',
+            parentId: (header && header.parentSession) || null,
+          }, { explicit: true })
+          if (sessionId) touchAgentRun(sessionId, run.runId)
+          console.log('[lab-monitor] 显式跟踪命中:', trackHit.label, '| runId=', run.runId, '| agent=', sessionId || 'none', isSub ? '(subagent)' : '', '| cmd=', String(cmd).slice(0, 80))
+        } else {
+          const feature = matchTrainFeature(cmd)
+          if (!feature) return await next()
           const agent = exec.agent as { id?: string; session?: { id?: string; header?: { parentSession?: string | null; origin?: string; delegationDepth?: number } } } | null | undefined
           const sessionId = agent && agent.session && agent.session.id ? agent.session.id : (agent && agent.id) || null
           const header = agent && agent.session && agent.session.header

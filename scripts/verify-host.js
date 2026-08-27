@@ -258,6 +258,38 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   const wPpid = snap.procs.find((p) => p.pid === 1234)
   assert(wPpid && wPpid.ppid === 1, 'procs[].ppid 合并（CIM 进程树）', wPpid)
 
+  console.log('\n[A2.5] #17：run_code 代码体（含 train*.py 字样）不参与实验识别（源头修复）')
+  const pre0 = C.events['tools/pre-execute'][0]
+  // issue#17 实证场景：Agent 通过 run_code 写论文复现文档，代码体里含示例训练命令
+  await pre0({ name: 'run_code', arguments: { code: '// 复现命令示例\nconst cmd = "python scripts/train.py --config configs/v2_c96_v2_s42.yaml"\nconsole.log(cmd)' } }, async () => ({ kind: 'allow' }))
+  let snap0 = await G('snapshot')({})
+  assert(snap0.experiment === null, 'run_code 代码体含 train*.py → 不建实验（#17）', snap0.experiment)
+  assert(Array.isArray(snap0.ended) && snap0.ended.length === 0, 'run_code 不污染实验历史', snap0.ended && snap0.ended.length)
+
+  console.log('\n[A2.6] #17 增强：lab_ctl track 显式注册 → 非训练命令记为实验（explicit）并监控')
+  const tCtl0 = H.toolDefs.find((t) => t.name === 'lab_ctl')
+  const res0 = C.events['tools/result'][0]
+  const vTrk1 = await tCtl0.execute({ action: 'track', track: { op: 'add', label: '推理实验A', patterns: ['python.*infer_v2'] } })
+  assert(vTrk1 && vTrk1.ok === true && vTrk1.rule && vTrk1.rule.id, 'lab_ctl track add（正则）→ rule 生成', vTrk1 && vTrk1.rule)
+  // 非训练形态命令（infer 不命中 TRAIN_PATTERNS）→ 显式规则命中 → 无条件建 run（explicit）
+  await pre0({ name: 'bash', arguments: { command: 'python infer_v2.py --model resnet50' } }, async () => ({ kind: 'allow' }))
+  let snapT = await G('snapshot')({})
+  assert(snapT.experiment && snapT.experiment.state === 'running', 'track 规则命中非训练命令 → running', snapT.experiment)
+  assert(snapT.experiment.cmdFeature === 'explicit:推理实验A', 'cmdFeature=explicit:<label>', snapT.experiment && snapT.experiment.cmdFeature)
+  assert(snapT.experiment.source === 'explicit', 'experiment.source=explicit', snapT.experiment && snapT.experiment.source)
+  // 正常闭环：pid 关联 → 配对 result + 进程消失 → done
+  FAKE.psLines = ['9001 1 20.0 8000 python infer_v2.py --model resnet50', '8888 1 0.5 300000 node server.js']
+  await tick(3)
+  res0({ name: 'bash', arguments: { command: 'python infer_v2.py --model resnet50' } }, { isError: false, content: [] })
+  FAKE.psLines = ['8888 1 0.5 300000 node server.js', '7777 1 0.2 200000 /usr/lib/firefox/firefox']
+  await tick(3)
+  snapT = await G('snapshot')({})
+  assert(snapT.experiment === null, '显式 run 配对 result → done（experiment=null）', snapT.experiment)
+  assert(snapT.ended && snapT.ended.some((e) => e.state === 'done' && e.source === 'explicit' && e.cmd.indexOf('infer_v2') !== -1),
+    'ended 透出 source=explicit（done）', snapT.ended && snapT.ended.map((e) => e.source))
+  const vTrkRm = await tCtl0.execute({ action: 'track', track: { op: 'remove', id: vTrk1.rule.id } })
+  assert(vTrkRm.ok === true && vTrkRm.state === 'track-removed', 'lab_ctl track remove', vTrkRm)
+
   console.log('\n[B] 生命周期：pre-execute → running → pid 关联 → done（T1-1/T1-2）')
   const pre = C.events['tools/pre-execute'][0]
   await pre({ name: 'bash', arguments: { command: 'python train_demo.py --epochs 10' } }, async () => ({ kind: 'allow' }))
@@ -312,6 +344,38 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
   // 2026-08-22（P1）：crashed 归档进 ended[]（与 [B] done 并存，state 区分）
   assert(snap.ended && snap.ended.filter((e) => e.state === 'crashed' && e.cmd.indexOf('train_demo') !== -1).length >= 1,
     'P1 ended：crashed 实验已归档（state=crashed）', snap.ended && snap.ended.map((e) => e.state))
+
+  console.log('\n[B2.5] #17：幽灵 run 豁免——命中但从未关联进程 + 无资源活动 → aborted 不告警（crash 门控）')
+  const crashBefore = (snap.alerts || []).filter((a) => a.rule === 'experiment-crash').length
+  FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 2, 19200, 24576, 80, 350.00' // 低 GPU util（<10%，无活动证据）
+  await pre({ name: 'bash', arguments: { command: 'python train_ghost.py --epochs 1' } }, async () => ({ kind: 'allow' }))
+  FAKE.psLines = ['8888 1 0.5 300000 node server.js', '7777 1 0.2 200000 /usr/lib/firefox/firefox'] // 无 python 进程
+  await tick(3) // ps 周期 1：无候选（streak 1）
+  await tick(3) // ps 周期 2：→ 幽灵豁免归档 aborted
+  snap = await G('snapshot')({})
+  assert(snap.experiment === null, '幽灵 run 结束（experiment=null）', snap.experiment)
+  assert(snap.ended && snap.ended.some((e) => e.state === 'aborted' && e.cmd.indexOf('train_ghost') !== -1),
+    '幽灵 run 归档 aborted（非 crashed）', snap.ended && snap.ended.map((e) => e.state))
+  assert((snap.alerts || []).filter((a) => a.rule === 'experiment-crash').length === crashBefore,
+    '幽灵 run 不新增 experiment-crash 告警（#17 门控）', snap.alerts)
+  FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 92, 19200, 24576, 80, 350.00' // 恢复高 util
+
+  console.log('\n[B2.6] #17 增强：显式 run 跳过幽灵豁免 → 无进程仍 crashed（用户明确声明要监控）')
+  const tCtlB = H.toolDefs.find((t) => t.name === 'lab_ctl')
+  const vTrkE = await tCtlB.execute({ action: 'track', track: { op: 'add', label: '显式实验', patterns: ['train_ghost_explicit'] } })
+  assert(vTrkE.ok === true, 'lab_ctl track add（显式实验）', vTrkE.ok)
+  FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 2, 19200, 24576, 80, 350.00' // 低 GPU util（幽灵豁免条件满足，但显式 run 跳过）
+  await pre({ name: 'bash', arguments: { command: 'python train_ghost_explicit.py --epochs 1' } }, async () => ({ kind: 'allow' }))
+  FAKE.psLines = ['8888 1 0.5 300000 node server.js'] // 无 python 进程
+  await tick(3)
+  await tick(3)
+  snap = await G('snapshot')({})
+  assert(snap.experiment === null, '显式 run 结束（experiment=null）', snap.experiment)
+  assert(snap.ended && snap.ended.some((e) => e.state === 'crashed' && e.cmd.indexOf('train_ghost_explicit') !== -1),
+    '显式 run 无进程 → crashed（跳过幽灵豁免，严格判定）', snap.ended && snap.ended.map((e) => e.state))
+  assert((snap.alerts || []).some((a) => a.rule === 'experiment-crash'), '显式 run crashed → 触发 experiment-crash 告警', snap.alerts)
+  await tCtlB.execute({ action: 'track', track: { op: 'remove', id: vTrkE.rule.id } })
+  FAKE.gpuCsv = '0, NVIDIA GeForce RTX 5060 Ti, 92, 19200, 24576, 80, 350.00' // 恢复高 util
 
   console.log('\n[B3] 多轨并行（A2：并行跟踪上限 4 + 各自独立判定）')
   // 实验 A start → pid 关联 101

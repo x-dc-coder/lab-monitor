@@ -76,6 +76,8 @@ export interface RunRecord {
   agentId?: string | null
   agentRole?: 'root' | 'subagent'
   parentId?: string | null
+  /** #17（2026-08-27 增强）：显式注册实验（lab_ctl track 规则命中）——跳过幽灵 run 豁免，crash 严格判定 */
+  explicit?: boolean
   graceTicks: number
   alerting: boolean
   procGone?: boolean
@@ -107,6 +109,8 @@ export interface ExperimentSnapshot {
   agentId?: string | null
   agentRole?: 'root' | 'subagent'
   parentId?: string | null
+  /** #17 增强：显式注册实验（lab_ctl track）标记，UI/Agent 可区分来源 */
+  source?: 'explicit' | 'auto'
 }
 
 /** 已结束实验记录（对外协议：experiment 历史复盘；state-machine history 摘要投影，倒序=最新在前） */
@@ -124,6 +128,19 @@ export interface EndedRunSnapshot {
   fingerprint?: string
   /** M3（issue#7）：发起 agent（通知路由用） */
   agentId?: string | null
+  /** #17 增强：显式注册实验（lab_ctl track）标记 */
+  source?: 'explicit' | 'auto'
+}
+
+/** #17 增强（2026-08-27）：显式跟踪规则（lab_ctl track）——命中 cmdline 的命令无条件记为实验并监控 */
+export interface TrackRule {
+  id: string
+  /** 规则名（如 "训练实验A"、"推理服务"） */
+  label: string
+  /** cmdline 正则列表（任一命中即建 run；与 tag 同形态，脚本天然覆盖） */
+  patterns: string[]
+  /** 展示色（可选，16 进制如 #3964fe） */
+  color?: string
 }
 
 /** M2（issue#6）：实验类型 8 类枚举（unknown=未识别，保守默认不猜） */

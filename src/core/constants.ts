@@ -1,7 +1,7 @@
 /**
  * 核心常量（指标/训练关键词/采样参数）—— 迁移自 host/index.js §1
  */
-import type { ExpType, NotifyLevel } from './types.js'
+import type { ExpType, NotifyLevel, RunRecord } from './types.js'
 
 /** 采集周期（核心层固定 2s；UI 轮询见 pollMs） */
 export const SAMPLE_MS = 2000
@@ -17,6 +17,12 @@ export const RING_EXPAND_MS = 2 * 60 * 60 * 1000
 export const ALERT_MAX = 20
 /** pid 连续消失 ≥2 个 ps 周期（10~15s）→ crashed */
 export const CRASH_PS_GAP = 2
+/** #17（2026-08-27，issue#17）：幽灵 run 豁免阈值——疑似工具代码体误判的 run（从未关联进程 + 短时长 + 无资源活动）归档 aborted 不告警 */
+export const GHOST_RUN_ABORT_SEC = 30
+/** 幽灵 run GPU util 峰值阈值 %（真实训练即使启动即崩 GPU util 也会瞬时冲高；<10% 视为无活动证据） */
+export const GHOST_GPU_UTIL_MAX = 10
+/** 幽灵 run 组 CPU 峰值阈值 % */
+export const GHOST_CPU_PCT_MAX = 5
 /** 配对 result 后进程仍活的宽限 ps 周期 → done */
 export const DONE_GRACE_TICKS = 2
 /** 2026-08-20（A2 多轨）：并行实验跟踪上限（超出时归档最旧 running 为 aborted） */
@@ -184,4 +190,27 @@ export function makeTagId(): string {
   const mm = ('0' + d.getMinutes()).slice(-2)
   const ss = ('0' + d.getSeconds()).slice(-2)
   return 'tag-' + y + mo + dd + '-' + hh + mm + ss + '-' + ('000' + TAG_ID_COUNTER).slice(-3)
+}
+
+/**
+ * #17（2026-08-27，issue#17）：幽灵 run 豁免判定。
+ * 背景：pre-execute 曾对 run_code 代码体做 TRAIN_PATTERNS 匹配，代码/文档/注释中的示例命令
+ * （如 `python scripts/train.py --config ...`）被误记为实验；该类 run 无真实进程、无资源活动，
+ * 进程消失判定会误报 experiment-crash（critical/wake 噪音，实证 run-20260827-185517-001，
+ * gpuUtilMax 4%、durationSec 11、无进程）。此判定为 crash 门控的第二道防线（源头修复见
+ * src/index.ts pre-execute——仅 bash 参与识别）。
+ * 条件（全部满足才算幽灵 run，保守防误伤真实实验）：
+ *   - 从未关联到任何进程（pid 空 且 procGroup 空/无成员）
+ *   - 运行时长 < GHOST_RUN_ABORT_SEC（30s）
+ *   - 无显著资源活动证据：GPU util 峰值 < 10% 且组 CPU 峰值 < 5%（采样缺失视为无活动证据）
+ */
+export function isGhostRun(run: Pick<RunRecord, 'pid' | 'procGroup' | 'startTs' | 'sampleStats'>, now?: number): boolean {
+  if (run.pid !== null && run.pid !== undefined) return false
+  if (run.procGroup && run.procGroup.size > 0) return false
+  if (((now ?? Date.now()) - run.startTs) / 1000 >= GHOST_RUN_ABORT_SEC) return false
+  const s = run.sampleStats
+  if (!s) return true // 从未有任何采样（无 GPU/CPU 数据）→ 无活动证据
+  if (typeof s.utilMax === 'number' && s.utilMax >= GHOST_GPU_UTIL_MAX) return false
+  if (typeof s.groupCpuMax === 'number' && s.groupCpuMax >= GHOST_CPU_PCT_MAX) return false
+  return true
 }

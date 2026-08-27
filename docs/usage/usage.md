@@ -42,6 +42,7 @@ Agent 侧可通过三个工具按需查询与操控。
 | `tag` | `tag: { op: 'add'\|'remove'\|'list', label, patterns?/pid?, kind?, color?, id? }` | 标签分组：`add` 支持正表达式规则（`patterns`）或 pid 快速打标（自动提取 cmdline 生成规则，重启后仍命中）；`remove` 按 id；`list` 列出全部 |
 | `set-notify` | `alertNotify?('off'\|'notice'\|'wake'), escalateAfterSec?, notifyThrottleMs?` | 设置告警通知策略（M1/issue#5）：档位（off=不推送仅工具可见 / notice=推送不唤醒，默认 / wake=critical 唤醒 Agent）；warn 持续秒数升 critical；聚合窗口 ms。即时生效 + 持久化 |
 | `history-manage` | `op: 'list'\|'delete'\|'clear', runId?, keep?` | 实验历史管理（#10/2026-08-24）：`delete` 按 runId 删单条；`clear` 清空（`keep` 保留最近 N 条）；删后显式持久化（settings 同步，重启不丢失） |
+| `track` | `track: { op: 'add'\|'remove'\|'list', label, patterns?/pid?, id? }` | **#17 增强（2026-08-27）**：显式注册实验跟踪规则——命中 cmdline 的命令在 bash 执行时**无条件记为实验并监控**（不受 TRAIN_PATTERNS 保守识别限制，如 `python infer.py`/`vllm serve`）；`source=explicit` 跳过幽灵 run 豁免（crash 严格判定）；持久化，重启不丢失 |
 
 示例：
 
@@ -106,10 +107,14 @@ lab_ctl history-manage op=clear keep=5
 ## 4. 实验跟踪语义（多轨）
 
 - **识别**：`tools/pre-execute` 钩子命中训练类命令（python/训练脚本等）→ 建 run；`tools/result` 配对回收。
+  - **#17（2026-08-27）**：仅 `bash` 工具参与识别——`run_code` 等工具的代码体/文本内容不参与
+    `TRAIN_PATTERNS` 匹配（Agent 写文档/README 时代码里的示例命令 `python train*.py` 不再误记为实验）。
 - **类型识别（M2）**：start 时三层识别（配置规则 `experimentTypes` > 自动正则 8 类 > fingerprint 历史时长 p90 ≥1h → long > unknown 不猜）；
   类型随快照/历史透出（面板徽标、通知矩阵输入）。
 - **多轨**：并行实验各自独立跟踪（runId 归属，pid 重关联），上限 4——满 4 时新 start 将最旧归档为 `aborted`。
 - **结束判定**：配对 result + 进程消失 → `done`；进程消失 ≥2 个 ps 周期（10s）→ `crashed`（触发 experiment-crash 告警）。
+  - **幽灵 run 豁免（#17）**：从未关联进程 + 时长 <30s + 无资源活动证据（GPU 峰值 <10% 且组 CPU 峰值 <5%）的
+    run 归档 `aborted`（进历史可复盘，不触发告警）——防工具代码体/文档文本误判的 crash 误报。
 - **复盘**：每次结束即生成摘要（GPU 峰值/均值、显存峰值、组 CPU/内存峰值、时长）存入 `ended[]`，面板"实验历史"可查。
 
 ## 5. watchlist 与标签
@@ -144,3 +149,4 @@ lab_ctl history-manage op=clear keep=5
 | V2.7（2026-08-24） | 进程展示增强：采样自曝过滤（tasklist/nvidia-smi + 伴随 conhost）+ 组内 cmd 聚合 + 家族归类三级折叠（PROC_FAMILIES ~90 条）+ 系统组正则补全 + procTopN 上限 1000 |
 | V2.8（2026-08-24） | #10 实验历史管理（rpcHistoryManage + lab_ctl history-manage + 设置页管理块）；M2 实验类型识别（三层识别 + 数据面 type/fingerprint + 配置三键 + 通知矩阵接线 + 类型徽标） |
 | V2.9（2026-08-24） | M3 通知链路闭环（#7）：发起者路由决策树 + subagentPolicy 权限（guard/lab_status_ro）+ 消息链兜底（异常结算/未领取升根）；修复 makeRunId 重启重复 + off 档误投递 |
+| V2.10（2026-08-27） | #17 修复：run_code 代码体（含 train*.py 字样）不再误判为实验（pre-execute 仅 bash 参与识别）+ 幽灵 run crash 门控（从未关联进程 + <30s + 无资源活动 → aborted 不告警）+ **lab_ctl track 显式注册实验跟踪**（非训练命令也可指定为实验监控，explicit 跳过幽灵豁免）；回归测试 verify-host [A2.5]/[A2.6]/[B2.5]/[B2.6] |

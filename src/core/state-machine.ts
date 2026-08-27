@@ -2,7 +2,7 @@
  * state-machine（实验生命周期：idle/running/done/crashed/alerting/aborted）—— §4
  * 迁移自 host/index.js §4，逻辑等价（含 v1.4.3 / v1.4.5 会话内验收实证修正）
  */
-import { CRASH_PS_GAP, DONE_GRACE_TICKS, MAX_HISTORY, MAX_PARALLEL_RUNS, RING_MAX_MS, cmdFingerprint, makeRunId, normalizeCmdForMatch } from './constants.js'
+import { CRASH_PS_GAP, DONE_GRACE_TICKS, MAX_HISTORY, MAX_PARALLEL_RUNS, RING_MAX_MS, cmdFingerprint, isGhostRun, makeRunId, normalizeCmdForMatch } from './constants.js'
 import { classifyExpType, type ExpTypeRule } from './exp-type.js'
 import type { Ring } from './ring.js'
 import type { Alert, EndedRunSnapshot, ExperimentSnapshot, ExpType, RunRecord } from './types.js'
@@ -26,7 +26,7 @@ interface StateMachineDeps {
 }
 
 export interface StateMachine {
-  start(cmdStr: string, feature: string, agent?: { agentId?: string | null; agentRole?: 'root' | 'subagent'; parentId?: string | null }): RunRecord
+  start(cmdStr: string, feature: string, agent?: { agentId?: string | null; agentRole?: 'root' | 'subagent'; parentId?: string | null }, opts?: { explicit?: boolean }): RunRecord
   associatePid(pid: number): void
   associateProc(pid: number): void
   markResult(paired: boolean, runId?: string | null): void
@@ -187,7 +187,7 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
   // 2026-08-20（A2 多轨）：并行跟踪上限 MAX_PARALLEL_RUNS——超出时归档最旧 running 为 aborted；
   // 不再「新 start 即归档旧 run」（v1 单跟踪语义，P1 验收 7 已更新）。
   // M3（issue#7）：agent 可选参——发起实验的 agent（agentId/agentRole/parentId），通知路由用
-  function start(cmdStr: string, feature: string, agent?: { agentId?: string | null; agentRole?: 'root' | 'subagent'; parentId?: string | null }): RunRecord {
+  function start(cmdStr: string, feature: string, agent?: { agentId?: string | null; agentRole?: 'root' | 'subagent'; parentId?: string | null }, opts?: { explicit?: boolean }): RunRecord {
     const running = all()
     if (running.length >= MAX_PARALLEL_RUNS) {
       const oldest = running.reduce((a, b) => (a.startTs <= b.startTs ? a : b))
@@ -219,6 +219,8 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       agentId: agent?.agentId ?? null,
       agentRole: agent?.agentRole,
       parentId: agent?.parentId ?? null,
+      // #17 增强：显式注册实验（lab_ctl track）——跳过幽灵 run 豁免，crash 严格判定
+      explicit: opts?.explicit === true,
       graceTicks: 0,
       alerting: false,
       procGone: false,
@@ -313,7 +315,18 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       return
     }
     run.pidMissingStreak += 1
-    if (run.pidMissingStreak >= CRASH_PS_GAP) conclude(run, 'crashed') // 进程组消失 ≥2 ps 周期
+    if (run.pidMissingStreak >= CRASH_PS_GAP) {
+      // #17（2026-08-27，issue#17）：幽灵 run 豁免——从未关联进程 + 短时长 + 无资源活动证据
+      // 的 run 疑似工具代码体误判（非真实实验）→ 归档 aborted（进历史可复盘）不触发 experiment-crash 告警。
+      // 真实训练必然有进程/资源活动，即使启动即崩 GPU util 也会瞬时冲高，不会被此门控误伤。
+      // 显式注册实验（lab_ctl track，run.explicit）跳过豁免——用户明确声明要监控，crash 严格判定。
+      if (!run.explicit && isGhostRun(run)) {
+        console.warn('[lab-monitor] 幽灵 run 豁免（无进程/资源活动证据，疑似误判）→ aborted: runId=' + run.runId + ' cmd=' + String(run.cmd).slice(0, 80))
+        archive(run, 'aborted')
+        return
+      }
+      conclude(run, 'crashed') // 进程组消失 ≥2 ps 周期
+    }
   }
 
   // 配对 result 后进程仍活 → 宽限 2 个 ps 周期后再判 done（异常残留）
@@ -345,6 +358,8 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       agentId: run.agentId,
       agentRole: run.agentRole,
       parentId: run.parentId,
+      // #17 增强：显式注册实验标记透出（UI/Agent 可区分来源）
+      source: run.explicit ? 'explicit' : 'auto',
     }
   }
 
@@ -364,6 +379,8 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       fingerprint: run.fingerprint,
       // M3（issue#7）：发起 agent 透出（通知路由用）
       agentId: run.agentId,
+      // #17 增强：显式注册实验标记透出（历史复盘可区分来源）
+      source: run.explicit ? 'explicit' : 'auto',
     }
   }
 
@@ -392,6 +409,8 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
         // M2（issue#6）：历史恢复保留类型（旧数据无 type → 不猜，留 unknown 语义由上层展示）
         type: s.type,
         agentId: typeof s.agentId === 'string' ? s.agentId : null,
+        // #17 增强：历史恢复保留显式注册标记
+        explicit: s.source === 'explicit',
         graceTicks: 0,
         alerting: false,
         pidMissingStreak: 0,

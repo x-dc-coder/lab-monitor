@@ -27,6 +27,7 @@ lab_ctl watch keywords=["llama-server","vllm"]
 lab_ctl tag tag={op:"add", label:"py实验", patterns:["python.*train"], kind:"experiment"}
 lab_ctl set-notify alertNotify=wake escalateAfterSec=900
 lab_ctl history-manage op=clear keep=5
+lab_ctl track track={op:"add", label:"推理实验A", patterns:["python.*infer"]}   # #17 增强：显式指定命令作为实验监控
 lab_ctl clear-alerts rule=experiment-crash
 ```
 
@@ -38,6 +39,10 @@ lab_ctl clear-alerts rule=experiment-crash
 - `deepspeed` + 脚本文件
 - `python -m torch.distributed|accelerate|deepspeed`
 - `python -c` 内联代码含训练特征：`torch.distributed|nn.Module|backward|epochs?|train(?!ing)`（`import zipfile` 等工具脚本不触发）
+- **#17（2026-08-27）**：仅 `bash` 工具参与匹配——`run_code` 等工具的代码体/文本内容不参与
+  `TRAIN_PATTERNS`（代码里的示例命令 `python train*.py` 不再误记为实验；run_code 内嵌套
+  `tools.bash` 自带独立 pre-execute，真实训练不漏检）。兜底门控：从未关联进程 + 时长 <30s +
+  无资源活动证据的 run 归档 `aborted`（不触发 experiment-crash 告警）
 
 实验类型（M2 三层识别）：配置规则 > 自动正则（smoke/regression/full/gpu-calc/long/gpu-train）> fingerprint 历史时长
 （≥1h → long）> unknown 不猜。`lab_status` 快照的 `experiment.type` / `ended[].type` 可见。

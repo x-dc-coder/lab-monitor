@@ -395,6 +395,24 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 
 > 注意：V2.7-V2.9 **host 半改动均需 DSH 重启生效**（client 半刷新页面即可）。
 
+### V2.10 #17 误判修复 + 显式实验跟踪（2026-08-27）
+
+> 触发：issue #17——`run_code` 工具代码体（含 `python train*.py` 字样）被 pre-execute 误判为实验，
+> 进程消失触发 experiment-crash 误报（critical/wake 噪音，实证 run-20260827-185517-001）。
+
+1. **源头修复**：pre-execute 仅 `bash`（明确 shell 执行）参与 `TRAIN_PATTERNS` 匹配——`run_code`/write/edit
+   等工具的代码体/文本内容不再参与（代码里的示例命令不再误记为实验；run_code 内嵌套 `tools.bash` 自带独立
+   pre-execute，真实训练不漏检）。
+2. **幽灵 run crash 门控**（`isGhostRun`）：从未关联进程 + 时长 <30s + 无资源活动证据（GPU 峰值 <10% 且组 CPU
+   峰值 <5%）的 run 归档 `aborted`（进历史可复盘，不触发 experiment-crash 告警）——防工具代码体/文档文本误判的
+   第二道防线。
+3. **显式注册实验跟踪（`lab_ctl track`）**：用户可显式指定命令作为实验监控——`track add`（pattern 正则或 pid
+   快速注册）命中 cmdline 的命令无条件建 run（`source=explicit`，`cmdFeature=explicit:<label>`），不受
+   TRAIN_PATTERNS 保守识别限制（如 `python infer.py`/`vllm serve`）；显式 run **跳过幽灵豁免**（crash 严格判定）；
+   规则持久化（settings `trackRules`），HTTP 面 `/lab-monitor/api/track` 等效路由。
+4. **验证**：verify-host 新增 [A2.5]（run_code 不误判）/[A2.6]（track 显式跟踪闭环）/ [B2.5]（幽灵 run 豁免）/
+   [B2.6]（显式 run 严格 crash）四段回归 + verify.sh 7 组全绿；契约 protocol.md 升 1.5（source 字段 + track 路由）。
+
 ## 未完成项清单（2026-08-20 对照 PLAN v1.4.5 + 04-milestones）
 
 > 对照依据：PLAN §0 三层组合 / §1 目录树 / §6 风险表 / §4 验收清单；04-milestones 勾选状态。

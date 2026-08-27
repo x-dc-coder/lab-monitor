@@ -4,7 +4,7 @@
 
 ## 1. 版本与变更规则
 
-- 契约版本：`lab-protocol/1.2`（v1.4：+platform/sources，指标命名规范化；**1.2：进程级跟踪（2026-08-20）**——`procs[].ppid/gpuUtilPct`、`experiment.procGroup/groupStats`、`snapshot.system`、`alerts[].evidence`、`history[].groupCpu/groupMem`；**纯增量追加字段，老 client 照常工作**；**1.3（2026-08-20，A2 多轨+标签）：新增 `experiments[]`（全部并行实验，`experiment` 保留为主实验）、`tags[]`（标签分组聚合）——继续纯增量追加**；**1.4（2026-08-22，P1 复盘+设置面）：新增 `ended[]`（已结束实验历史投影，上限 20）、`thresholds`（当前生效阈值，client 轮询周期由 `pollMs` 驱动）、`enabled`（监控引擎启停状态）——继续纯增量追加**）；
+- 契约版本：`lab-protocol/1.2`（v1.4：+platform/sources，指标命名规范化；**1.2：进程级跟踪（2026-08-20）**——`procs[].ppid/gpuUtilPct`、`experiment.procGroup/groupStats`、`snapshot.system`、`alerts[].evidence`、`history[].groupCpu/groupMem`；**纯增量追加字段，老 client 照常工作**；**1.3（2026-08-20，A2 多轨+标签）：新增 `experiments[]`（全部并行实验，`experiment` 保留为主实验）、`tags[]`（标签分组聚合）——继续纯增量追加**；**1.4（2026-08-22，P1 复盘+设置面）：新增 `ended[]`（已结束实验历史投影，上限 20）、`thresholds`（当前生效阈值，client 轮询周期由 `pollMs` 驱动）、`enabled`（监控引擎启停状态）——继续纯增量追加**；**1.5（2026-08-27，#17）：新增 `experiment.source`/`ended[].source`（显式注册来源标记，`explicit`/`auto`）+ `lab_ctl track` 动作与 `/lab-monitor/api/track` 路由（显式注册实验跟踪规则）——继续纯增量追加**）；
 - JSON schema 追加字段向后兼容；**删除/改型字段 = 破坏性变更**，须先更新本文件与计划，再通知 D-A/D-B1；
 - 所有载荷为**纯 JSON**（host.call 只驮 JSON；函数/undefined/类实例会被 codec 拒收，t5 结论②）。
 
@@ -165,6 +165,24 @@
                           "byTag": { "推理服务": { "memWarn": 95 } } } }
 ```
 写后即时生效 + settings 持久化（`settings.yaml` → `lab-monitor.thresholdOverrides`）。
+
+### 4.3 #17 显式注册实验跟踪（2026-08-27）
+
+> 背景：issue #17——`run_code` 代码体（含 `train*.py` 字样）曾被误判为实验并触发 experiment-crash 误报。
+> 修复：pre-execute 仅 `bash` 工具参与识别 + 幽灵 run crash 门控；同时新增**显式注册**能力（用户明确指定命令作为实验监控）。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `experiment.source` / `ended[].source` | `'explicit' \| 'auto'` | #17 增强：实验来源标记——`explicit`=lab_ctl track 显式注册命中（跳过幽灵 run 豁免，crash 严格判定）；`auto`=TRAIN_PATTERNS 自动识别（或历史恢复/旧数据缺失） |
+
+**`lab_ctl track`**（显式注册实验跟踪规则，add/remove/list；settings `trackRules` 键持久化，重启不丢失）：
+- `track: { op: 'add', label, patterns?/pid?, color? }` —— pattern 为 cmdline 正则（任一命中即无条件建 run，
+  `cmdFeature: 'explicit:<label>'`，`source: 'explicit'`）；pid 快速注册自动转义生成 pattern。
+- `track: { op: 'remove', id }` / `track: { op: 'list' }`（返回规则 + 当前命中进程预览）。
+- HTTP 等效路由：`POST /lab-monitor/api/track`（body `{ track: {...} }`）。
+
+**语义**：显式规则命中优先于 TRAIN_PATTERNS；命中的 bash 执行记为实验（含 pid 关联/crash 检测/告警归属/历史归档），
+正常结束配对 result → done；进程消失无 result → crashed（显式 run 不豁免）。
 
 ## 5. 出口层消费约束
 

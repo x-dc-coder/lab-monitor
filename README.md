@@ -157,7 +157,7 @@ scripts/verify.sh --e2e      # 追加 P1/P2 端到端（真实 python 进程 ~2.
 1. **KV 缓存友好**：prompt 注入**默认关闭**（`promptInjection: false`）。v1.4.5 每模型步重渲染 labstatus 导致 KV 前缀缓存骤降（90%→50% 实证）；V2 用 `lab_status` 工具按需查询，工具结果不进 system prompt 前缀。
 2. **client 数据面**：`host.call` RPC → **webServer HTTP `/lab-monitor/api/*`**。
 3. **工具注册**：`harness.defineTool` → 官方 `ctx.tools.register(defineTool(...))`（lab_status/lab_advice/lab_ctl）。
-4. **依赖**：peerDeps 声明 `@deepseek-ai/cordis ^4.0.1` + dsh-* 包；client 半产出 ModuleLoader bundle（`exports["./client"]`）。
+4. **依赖**：peerDeps 声明 `@deepseek-ai/cordis ^4.0.2` + dsh-* 包（对齐 DSH 0.1.2-rc.1 系列 SDK）；client 半产出 ModuleLoader bundle（`exports["./client"]`）。
 
 ### 目录（V2）
 

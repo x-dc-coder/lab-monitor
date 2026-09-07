@@ -27,7 +27,7 @@ export default defineConfig([
     target: 'es2024',
     dts: false,
     clean: false,
-    external: [/^react/, /^@deepseek-ai\//, /^cordis/, /^schemastery/],
+    deps: { neverBundle: [/^react/, /^@deepseek-ai\//, /^cordis/, /^schemastery/] },
     outputOptions: {
       entryFileNames: 'client.js',
       banner: `window.__ModuleLoader__.load({ id: "lab-monitor", factory: (require) => {`,

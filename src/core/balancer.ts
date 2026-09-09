@@ -227,6 +227,10 @@ const RULES: Rule[] = [
       const g = w.gpu && w.gpu.length ? w.gpu[0] : null
       if (!g || g.utilPct === null || g.utilPct >= 30) return { ok: false }
       if (!w.experimentActive) return { ok: false } // 无实验：整机 CPU 满载不是数据管线瓶颈（防他人负载误报）
+      // #18 关联防护：纯 CPU 作业（如求解器/数据处理）GPU 0% 为预期行为，不属于 GPU 训练数据管线瓶颈
+      if (w.experimentType && !w.experimentType.includes('gpu') && w.experimentType !== 'full' && w.experimentType !== 'long') {
+        return { ok: false }
+      }
       const gs = w.group
       if (gs && gs.cpuPct !== null) {
         if (gs.cpuPct < 90) return { ok: false }

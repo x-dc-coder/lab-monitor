@@ -11,6 +11,8 @@
 // ============================================================================
 'use strict'
 import { apply, name, inject } from '../lib/types/index.js'
+import { cmdFingerprint } from '../lib/types/core/constants.js'
+import { findAliveProc } from '../lib/types/core/state-machine.js'
 
 let failures = 0
 function assert(cond, name, extra) {
@@ -73,17 +75,19 @@ function makeCtx() {
       const user = this.documents[ns] !== undefined ? this.documents[ns] : undefined
       // schema 是 callable（schemastery Schema 实例）：schema(mergeLayers(base, section))
       const reg = { schema, user, resolved: schema(user) }
+      const updateFn = (patch) => {
+        reg.user = { ...(reg.user || {}), ...patch }
+        reg.resolved = schema(reg.user)
+        this.documents[ns] = { ...reg.user }
+        if (reg.watchCb) reg.watchCb(reg.resolved, undefined)
+        return reg.resolved
+      }
+      reg.update = updateFn
       this.namespaces[ns] = reg
       return {
         get: () => reg.resolved,
         watch: (cb) => { reg.watchCb = cb; return () => { reg.watchCb = null } },
-        update: (patch) => {
-          reg.user = { ...(reg.user || {}), ...patch }
-          reg.resolved = schema(reg.user)
-          this.documents[ns] = { ...reg.user }
-          if (reg.watchCb) reg.watchCb(reg.resolved, undefined)
-          return reg.resolved
-        },
+        update: updateFn,
       }
     },
   }
@@ -408,6 +412,57 @@ assert(Array.isArray(C.events['tools/result']) && C.events['tools/result'].lengt
     '路由测试 run crashed（agentId=sess-main）', snap.ended && snap.ended.map((e) => e.state))
   assert(deliveries.length >= 1, '通知精确投递到发起 session（agentDir 缺失不广播，绑定 agentId）', deliveries)
   assert(deliveredRoots.length === 0, '未广播到 root-A/root-B', deliveredRoots)
+  FAKE.agentsRoots = undefined
+  FAKE.agentsGet = undefined
+
+  console.log('\n[B2.8] #18 修复：发起 session 离线且 broadcast=false 时，严格禁止广播到无关根会话（Words-Production 复现）')
+  const deliveredRootsB28 = []
+  FAKE.agentsRoots = () => [{ id: 'words-production', status: 'idle' }]
+  FAKE.agentsGet = (id) => {
+    if (id === 'words-production') return { followup: (m) => deliveredRootsB28.push('words-production'), steer: (m) => deliveredRootsB28.push('words-production') }
+    return undefined // 发起 session 离线
+  }
+  await tCtlB.execute({ action: 'clear-alerts' })
+  await tick(31)
+  await pre({ name: 'bash', arguments: { command: 'python train_offline.py --epochs 1' }, agent: { session: { id: 'sess-offline', header: {} } } }, async () => ({ kind: 'allow' }))
+  FAKE.psLines = ['8888 1 0.5 300000 node server.js']
+  await tick(3)
+  await tick(3)
+  assert(deliveredRootsB28.length === 0, '发起者离线且 broadcast=false，未向无关根会话 words-production 广播', deliveredRootsB28)
+  FAKE.agentsRoots = undefined
+  FAKE.agentsGet = undefined
+
+  console.log('\n[B2.9] #18 修复：裸解释器探测命令指纹（bin:前缀）不模糊匹配常驻服务（Vision-MCP 防误绑）')
+  const fpPip = cmdFingerprint('.venv/bin/python --version && .venv/bin/python -m pip list | grep -iE ortools')
+  assert(fpPip.startsWith('pym:pip'), '包含 -m pip 提取模块名指纹 pym:pip', fpPip)
+  const fpBare = cmdFingerprint('.venv/bin/python --version')
+  assert(fpBare.startsWith('bin:'), '无模块/脚本的裸解释器提取 bin: 前缀指纹', fpBare)
+  const fakePsProcs = [
+    { pid: 3350, cmd: '/home/dc/projects/Vision-MCP/.venv/bin/python -m vision_mcp' },
+    { pid: 8888, cmd: 'node server.js' }
+  ]
+  const matched = findAliveProc({ fingerprint: fpBare, pid: null }, fakePsProcs)
+  assert(matched === null, '裸解释器指纹 bin: 不模糊匹配常驻服务进程 Vision-MCP', matched)
+
+  console.log('\n[B2.10] #18 修复：配置 alertTargets 指定 sessionId 时严格靶向投递，绝不广播无关 roots')
+  const deliveriesB210 = []
+  const deliveredRootsB210 = []
+  FAKE.agentsRoots = () => [{ id: 'words-production', status: 'idle' }, { id: 'sess-target', status: 'idle' }]
+  FAKE.agentsGet = (id) => {
+    if (id === 'sess-target') return { followup: (m) => deliveriesB210.push('sess-target'), steer: (m) => deliveriesB210.push('sess-target') }
+    if (id === 'words-production') return { followup: (m) => deliveredRootsB210.push('words-production'), steer: (m) => deliveredRootsB210.push('words-production') }
+    return undefined
+  }
+  C.settingsMock.namespaces['lab-monitor'].update({ alertTargets: ['sess-target'] })
+  await tCtlB.execute({ action: 'clear-alerts' })
+  await tick(31)
+  await pre({ name: 'bash', arguments: { command: 'python train_targeted.py --epochs 1' }, agent: { session: { id: 'sess-other', header: {} } } }, async () => ({ kind: 'allow' }))
+  FAKE.psLines = ['8888 1 0.5 300000 node server.js']
+  await tick(3)
+  await tick(3)
+  assert(deliveriesB210.length >= 1, '精确投递到 alertTargets 指定的会话 sess-target', deliveriesB210)
+  assert(deliveredRootsB210.length === 0, '未向未指定的根会话 words-production 广播', deliveredRootsB210)
+  C.settingsMock.namespaces['lab-monitor'].update({ alertTargets: [] })
   FAKE.agentsRoots = undefined
   FAKE.agentsGet = undefined
 

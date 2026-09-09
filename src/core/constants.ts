@@ -144,8 +144,15 @@ export function cmdFingerprint(cmdStr: string | null | undefined): string {
     const tail = norm.slice(norm.indexOf('-c')).replace(/["']/g, '').replace(/\s+/g, ' ')
     return 'pyc:' + tail.slice(0, 48)
   }
+  const mm = norm.match(/(?:^|\s)(?:[^\s]*[\\/])?(?:python[0-9.]*|uv(?:\s+run)?)(?:\.exe)?\s+-m\s+([a-zA-Z0-9_.]+)/i)
+  if (mm) return 'pym:' + mm[1]
   if (/torchrun|deepspeed/.test(norm)) return norm.split(/\s+/).slice(0, 6).join(' ').slice(0, 80)
   const tok = norm.split(/\s+/)[0] || ''
+  // #18 修复：裸解释器路径（如 .venv/bin/python、python）无具体脚本/模块时不应作为匹配指纹，
+  // 加 bin: 前缀避免在 findAliveProc 中误绑系统常驻服务（如 Vision-MCP）
+  if (/(?:^|[\\/])(python[0-9.]*|uv|node|bash|sh)(?:\.exe)?$/i.test(tok)) {
+    return 'bin:' + tok.slice(0, 40)
+  }
   return tok.slice(0, 40) || String(cmdStr).slice(0, 40)
 }
 

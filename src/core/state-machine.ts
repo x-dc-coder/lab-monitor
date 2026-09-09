@@ -83,8 +83,9 @@ export function findAliveProc(run: RunRecord, procs: PsProc[]): PsProc | null {
     if (p.cmd && p.cmd.indexOf('<defunct>') !== -1) continue // R3：僵尸进程不算存活（防 pid 漂移）
     if (run.pid && p.pid === run.pid) return p
     if (p.cmd && fp) {
+      if (fp.startsWith('bin:')) continue // #18 裸解释器无具体脚本/模块，不参与模糊匹配防误绑常驻服务（如 Vision-MCP）
       const c = normalizeCmdForMatch(p.cmd)
-      const mfp = fp.indexOf('pyc:') === 0 ? fp.slice(4) : fp
+      const mfp = fp.startsWith('pyc:') ? fp.slice(4) : fp.startsWith('pym:') ? fp.slice(4) : fp
       if (c.indexOf(mfp) !== -1) return p
     }
   }
@@ -95,9 +96,9 @@ export function findAliveProc(run: RunRecord, procs: PsProc[]): PsProc | null {
 function memberMatches(run: RunRecord, p: PsProc): boolean {
   if (p.cmd && p.cmd.indexOf('<defunct>') !== -1) return false
   if (run.pid && p.pid === run.pid) return true
-  if (!p.cmd || !run.fingerprint) return false
+  if (!p.cmd || !run.fingerprint || run.fingerprint.startsWith('bin:')) return false
   const c = normalizeCmdForMatch(p.cmd)
-  const mfp = run.fingerprint.indexOf('pyc:') === 0 ? run.fingerprint.slice(4) : run.fingerprint
+  const mfp = run.fingerprint.startsWith('pyc:') ? run.fingerprint.slice(4) : run.fingerprint.startsWith('pym:') ? run.fingerprint.slice(4) : run.fingerprint
   return c.indexOf(mfp) !== -1
 }
 

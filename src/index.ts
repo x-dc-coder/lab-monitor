@@ -612,12 +612,16 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           /* 回写失败不阻塞投递 */
         }
       }
-      // ── M3（issue#7，docs/research/22 §4.2）：目标路由决策树 ──
-      //   告警 runId → RunRecord.agentId（发起者）：
-      //     · 发起者在线（root 或 subagent）：目标=发起者（按矩阵档位）；
-      //       子代理发起 → 根祖先链并行 notice 知情（crashed → 根 wake 接管，子代理降 notice 不激进唤醒）
-      //     · 发起者 absent/disposed 或目录缺失 → 立即升根 roots()（设计 §4.2 absent 行）
-      //   无实验上下文（runId=null / runId 查不到）→ roots()（M1 行为）
+      // ── M3（issue#7，docs/research/22 §4.2）+ #18 修复：目标路由决策树 ──
+      //   1. 若配置了显式接收目标 alertTargets（如用户配置唤醒指定的 sessionId）：
+      //      严格只投递给 alertTargets 中存活的 agent，绝不广播全网 roots，防止跨会话打扰；
+      //   2. 默认路由：告警 runId → RunRecord.agentId（发起者）：
+      //      · 发起者在线（root 或 subagent）：目标=发起者（按矩阵档位）；
+      //        子代理发起 → 根祖先链并行 notice 知情（crashed → 根 wake 接管，子代理降 notice 不激进唤醒）
+      //      · 发起者 absent/disposed 或目录缺失：若 agentsSvc.get(agentId) 存在则精准投递；
+      //        若不可达，仅当显式开启 broadcast=true 时才升根广播 roots()，默认（broadcast=false）跳过，
+      //        绝不向无关根会话广播（#18 彻底根绝无关会话唤醒/打扰）；
+      //      · 无实验上下文（runId=null / runId 查不到）：仅当 broadcast=true 时兜底 roots()。
       const targets: { id: string; status: string; level: 'off' | 'notice' | 'wake' }[] = []
       const seenTargets = new Set<string>()
       const addTarget = (id: string, status: string, level: 'off' | 'notice' | 'wake') => {
@@ -625,49 +629,66 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         seenTargets.add(id)
         targets.push({ id, status, level })
       }
-      for (const { a, eff } of batchEff) {
-        if (a.origin === 'other' || eff === 'off') continue
-        const run = runOf(a.runId)
-        const runLevel = levelOf(a, eff)
-        const crashed = !!run && run.state === 'crashed'
-        if (run && run.agentId) {
-          const entry = agentDir.get(run.agentId)
-          if (entry && !entry.disposed) {
-            if (entry.role === 'subagent') {
-              // 子代理发起：发起者按矩阵档位（crashed 降 notice，实验已死不激进唤醒）+ 根祖先链知情
-              addTarget(run.agentId, entry.status, crashed ? 'notice' : runLevel)
-              for (const rootId of rootAncestors(run.agentId)) {
-                const re = agentDir.get(rootId)
-                addTarget(rootId, re ? re.status : 'idle', crashed ? 'wake' : 'notice')
+
+      if (Array.isArray(cfg.alertTargets) && cfg.alertTargets.length > 0) {
+        // #18 修复：用户配置了指定 sessionId 列表（alertTargets），严格靶向投递，不向未指定会话广播
+        for (const tid of cfg.alertTargets) {
+          const direct = agentsSvc && typeof (agentsSvc as unknown as { get?: unknown }).get === 'function'
+            ? (agentsSvc as unknown as { get(id: string): unknown }).get(tid)
+            : undefined
+          const entry = agentDir.get(tid)
+          if (direct || (entry && !entry.disposed)) {
+            const st = (direct as { status?: string })?.status || entry?.status || 'idle'
+            addTarget(tid, st, rootLevel)
+          }
+        }
+      } else {
+        for (const { a, eff } of batchEff) {
+          if (a.origin === 'other' || eff === 'off') continue
+          const run = runOf(a.runId)
+          const runLevel = levelOf(a, eff)
+          const crashed = !!run && run.state === 'crashed'
+          if (run && run.agentId) {
+            const entry = agentDir.get(run.agentId)
+            if (entry && !entry.disposed) {
+              if (entry.role === 'subagent') {
+                // 子代理发起：发起者按矩阵档位（crashed 降 notice，实验已死不激进唤醒）+ 根祖先链知情
+                addTarget(run.agentId, entry.status, crashed ? 'notice' : runLevel)
+                for (const rootId of rootAncestors(run.agentId)) {
+                  const re = agentDir.get(rootId)
+                  addTarget(rootId, re ? re.status : 'idle', crashed ? 'wake' : 'notice')
+                }
+              } else {
+                // root 发起：目标=发起者自身（crashed → 强制 wake 接管检查/重跑决策）
+                addTarget(run.agentId, entry.status, crashed ? 'wake' : runLevel)
               }
             } else {
-              // root 发起：目标=发起者自身（crashed → 强制 wake 接管检查/重跑决策）
-              addTarget(run.agentId, entry.status, crashed ? 'wake' : runLevel)
+              // 发起者 absent/disposed 或 agentDir 缺条目（宿主会话未登记/冷启动）——
+              // 目录缺失 ≠ 目标不可达——先尝试 agentsSvc.get(run.agentId) 精确投递发起会话
+              const direct = agentsSvc && typeof (agentsSvc as unknown as { get?: unknown }).get === 'function'
+                ? (agentsSvc as unknown as { get(id: string): unknown }).get(run.agentId)
+                : undefined
+              if (direct) {
+                const st = (direct as { status?: string }).status || (entry && !entry.disposed ? entry.status : 'idle')
+                addTarget(run.agentId, st, crashed ? 'wake' : runLevel)
+              } else if (cfg.broadcast === true) {
+                // #18 修复：仅当显式开启广播（broadcast=true）且发起者真不可达时才升根广播 roots()；
+                // 默认 broadcast=false 绝不广播无关根会话，彻底防止跨会话打扰
+                for (const r of rootsList()) addTarget(r.id, r.status, crashed ? 'wake' : runLevel)
+              } else {
+                console.log(`[lab-monitor] 发起会话 ${run.agentId} 不在线且 broadcast=false，跳过向无关根会话广播`)
+              }
             }
-          } else {
-            // 发起者 absent/disposed 或 agentDir 缺条目（宿主会话未登记/冷启动）——
-            // 2026-08-27 修复（#17 衍生，issue#17 复现现场：误判 crash 告警广播唤醒多个 root 会话）：
-            // 目录缺失 ≠ 目标不可达——agentsSvc.get(agentId) 为实时视图，能拿到 agent 对象即目标存在，
-            // 应精确投递发起会话（等效绑定 sessionId），仅当目标真不可达才升根广播 roots()。
-            const direct = agentsSvc && typeof (agentsSvc as unknown as { get?: unknown }).get === 'function'
-              ? (agentsSvc as unknown as { get(id: string): unknown }).get(run.agentId)
-              : undefined
-            if (direct) {
-              const st = (direct as { status?: string }).status || (entry && !entry.disposed ? entry.status : 'idle')
-              addTarget(run.agentId, st, crashed ? 'wake' : runLevel)
-            } else {
-              for (const r of rootsList()) addTarget(r.id, r.status, crashed ? 'wake' : runLevel)
-            }
+          } else if (cfg.broadcast === true && (a.runId || !targets.length)) {
+            // runId 查不到或无实验上下文：仅开启广播时兜底 roots()
+            for (const r of rootsList()) addTarget(r.id, r.status, runLevel)
           }
-        } else if (a.runId || !targets.length) {
-          // runId 查不到（冷恢复/历史清理）或无实验上下文 → roots()（与 M1 一致的兜底）
-          for (const r of rootsList()) addTarget(r.id, r.status, runLevel)
         }
-      }
-      if (!targets.length) {
-        for (const r of rootsList()) addTarget(r.id, r.status, rootLevel)
-        if (agentsSvc && !rootsList().length) {
-          console.log('[lab-monitor] 通知跳过：无可用目标 agent（agents 服务存在但 roots 为空）')
+        if (!targets.length && cfg.broadcast === true) {
+          for (const r of rootsList()) addTarget(r.id, r.status, rootLevel)
+          if (agentsSvc && !rootsList().length) {
+            console.log('[lab-monitor] 通知跳过：无可用目标 agent（agents 服务存在但 roots 为空）')
+          }
         }
       }
       // 投递（budget 断言：同目标 ≤2；M3：主通道 1 条 + 兜底仅链断裂时 1 条）
@@ -821,7 +842,12 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         level: 'critical', rule: 'subagent-abnormal-end',
         msg: `子代理 ${sid} 异常结算（${p.stopReason}），其发起实验 ${pendingRuns.map((x) => x.runId).join('/')} 仍在运行，需人工接管（检查日志/重跑决策）`,
       }])
-      for (const r of rootsList()) {
+      // #18 修复：子代理异常结算优先精准升到该子代理的具体根祖先，而非广播所有无关 roots
+      const ancestors = rootAncestors(sid)
+      const targetRoots: { id: string }[] = ancestors.length > 0
+        ? ancestors.map((id) => ({ id }))
+        : (cfg.broadcast === true ? rootsList() : [])
+      for (const r of targetRoots) {
         const key = 'root:' + r.id
         const used = notifyBudget.get(key) || 0
         if (used >= 2) continue

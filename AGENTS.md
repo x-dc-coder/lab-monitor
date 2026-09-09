@@ -89,6 +89,7 @@ bash scripts/verify.sh  # 七组：typecheck/构建/目录/契约/verify-host/mo
 - 改 client 半后必须重跑 verify.sh（回归红线 B5）。
 - 运行时验证（host 改动需用户重启 DSH 生效）：`curl -s http://127.0.0.1:3080/lab-monitor/api/snapshot`
   （HTTP 数据面，localhost only）。
+- 真实会话端到端测试方案（SOP）参见 `docs/research/28-issue18-real-session-test.md`（含 CPU 纯计算防误报、裸解释器防误绑常驻服务、离线跨会话防广播、alertTargets 靶向投递 5 组场景）。
 
 ## 7. HTTP 数据面
 

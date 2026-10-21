@@ -107,6 +107,20 @@ function makeCtx() {
         sandboxPolicy: { mode: 'danger-full-access' },
       }
     },
+    execute(spec) {
+      const self = this
+      return {
+        status: 'running',
+        exitCode: null,
+        async result() {
+          return self.run(spec)
+        },
+        readOutput() {
+          return { delta: '', lossy: false }
+        },
+        kill() { return true },
+      }
+    },
     async run(request) {
       const cmd = request.command || ''
       if (cmd.includes('pmon')) return fakeShellResult(FAKE.pmon + '\r')

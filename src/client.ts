@@ -90,6 +90,9 @@ interface SnapView {
   }
   /** #14 监控目标模式（auto/windows/linux；WSL 下可切换监控 Windows/Linux） */
   backendMode?: 'auto' | 'windows' | 'linux' | 'windows-native'
+  /** #21 多设备监控当前设备与设备列表 */
+  currentDevice?: string
+  devices?: { id: string; label?: string; host: string }[]
   /** 2026-08-22（P1 设置面）：监控引擎启停状态 */
   enabled?: boolean
   /** M1（issue#5）：当前生效通知策略（设置页展示） */
@@ -116,7 +119,8 @@ interface SnapView {
 /** 2026-08-22（P1 实验历史）：已结束实验摘要（与 host EndedRunSnapshot 对齐） */
 interface EndedView {
   runId: string
-  state: 'done' | 'crashed' | 'aborted'
+  deviceId?: string
+  state: 'done' | 'crashed' | 'aborted' | 'switched_away'
   cmd: string | null
   cmdFeature: string | null
   startTs: number
@@ -133,9 +137,19 @@ interface EndedView {
     groupMemPeakMiB?: number | null
     otherMemPeakMiB?: number | null
   } | null
+  /** SwanLab 同步状态 */
+  swanlab?: {
+    status?: 'pending' | 'syncing' | 'synced' | 'failed' | string
+    runId?: string
+    runUrl?: string
+    syncTs?: number
+    attemptTs?: number
+    error?: string
+  }
 }
 interface ExperimentView {
   runId: string
+  deviceId?: string
   state: string
   cmd?: string | null
   pid?: number | null
@@ -195,7 +209,9 @@ async function apiCall<T>(method: string, body?: Record<string, unknown>): Promi
   try {
     const res = await fetch(API_BASE + '/' + method, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // P0（V1 CSRF 修复）：同源 POST 浏览器会带 Origin（回环放行）；
+      // 该头为无 Origin/Referer 边缘情形兜底，跨站无法伪造（预检不通过则不发送）
+      headers: { 'Content-Type': 'application/json', 'X-Lab-Monitor': '1' },
       body: JSON.stringify(body || {}),
     })
     if (!res.ok) throw new Error('HTTP ' + res.status)
@@ -308,7 +324,7 @@ function expBlock(s: SnapView | null, onDetail: (d: DetailData) => void): React.
   const rows: React.ReactElement[] = []
   const seen = new Set<string>()
   // 主实验优先展示（标注「主」），并行实验依次列出
-  const ordered: { runId: string; state: string; cmd?: string | null; pid?: number | null; startTs?: number }[] = []
+  const ordered: { runId: string; state: string; cmd?: string | null; pid?: number | null; startTs?: number; deviceId?: string }[] = []
   if (main) ordered.push(main)
   for (const e of all) {
     if (e.runId === (main && main.runId)) continue
@@ -337,6 +353,12 @@ function expBlock(s: SnapView | null, onDetail: (d: DetailData) => void): React.
           (isMain ? '实验 ' : '  ') + (e.runId || '-')),
         React.createElement('span', { style: { fontSize: 11, color: C.label2 } },
           '[' + (e.state || '-') + ']'),
+        e.deviceId && e.deviceId !== 'local'
+          ? React.createElement('span', {
+              style: { fontSize: 10, padding: '0 4px', borderRadius: 3, background: C.border, color: '#3964fe', fontWeight: 600 },
+              title: '归属设备'
+            }, e.deviceId)
+          : null,
         mins !== null
           ? React.createElement('span', { style: { fontSize: 11, color: C.label2 } }, mins + 'min')
           : null,
@@ -360,6 +382,33 @@ function expBlock(s: SnapView | null, onDetail: (d: DetailData) => void): React.
   return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } }, ...rows)
 }
 
+function swanlabBadge(info?: EndedView['swanlab']): React.ReactElement | null {
+  if (!info || !info.status) return null
+  if (info.status === 'synced') {
+    return React.createElement('span', {
+      onClick: info.runUrl ? (ev: React.MouseEvent) => { ev.stopPropagation(); window.open(info.runUrl, '_blank') } : undefined,
+      style: { fontSize: 10, padding: '0 4px', borderRadius: 3, border: '1px solid ' + C.success, color: C.success, cursor: info.runUrl ? 'pointer' : 'default' },
+      title: info.runUrl ? `SwanLab: 已同步 (${info.runUrl})` : 'SwanLab: 已同步',
+    }, info.runUrl ? 'SwanLab ✓ ↗' : 'SwanLab ✓')
+  }
+  if (info.status === 'syncing') {
+    return React.createElement('span', {
+      style: { fontSize: 10, padding: '0 4px', borderRadius: 3, border: '1px solid ' + C.brand, color: C.brand },
+      title: 'SwanLab: 同步中...',
+    }, 'SwanLab ⟳')
+  }
+  if (info.status === 'failed') {
+    return React.createElement('span', {
+      style: { fontSize: 10, padding: '0 4px', borderRadius: 3, border: '1px solid ' + C.error, color: C.error },
+      title: `SwanLab 同步失败: ${info.error || '未知错误'}`,
+    }, 'SwanLab ✗')
+  }
+  return React.createElement('span', {
+    style: { fontSize: 10, padding: '0 4px', borderRadius: 3, border: '1px solid ' + C.label2, color: C.label2 },
+    title: 'SwanLab: 待同步',
+  }, 'SwanLab 待同步')
+}
+
 /**
  * 2026-08-22（P1 实验历史）：已结束实验复盘列表（done/crashed/aborted）——折叠展示，
  * 每行 runId + 状态徽标 + 时长 + GPU 峰值摘要（util 峰值/均值、显存峰值、组 CPU 峰值）。
@@ -367,13 +416,40 @@ function expBlock(s: SnapView | null, onDetail: (d: DetailData) => void): React.
  */
 function EndedBlock(props: { ended: EndedView[]; onDetail: (d: DetailData) => void }): React.ReactElement | null {
   const [open, setOpen] = React.useState(false)
+  const [syncingRunId, setSyncingRunId] = React.useState<string | null>(null)
+  const [syncError, setSyncError] = React.useState<Record<string, string>>({})
   const ended = props.ended || []
   if (!ended.length) return null
+
+  const handleSync = async (runId: string, ev: React.MouseEvent) => {
+    ev.stopPropagation()
+    setSyncingRunId(runId)
+    try {
+      const res = await apiCall<{ ok?: boolean; error?: string; status?: string }>('swanlabSync', { runId, force: true })
+      if (!res || (res as Record<string, unknown>).error) {
+        const msg = typeof (res as Record<string, unknown>).error === 'string' ? (res as Record<string, unknown>).error as string : '同步失败'
+        setSyncError((prev) => ({ ...prev, [runId]: msg }))
+      } else {
+        setSyncError((prev) => {
+          const next = { ...prev }
+          delete next[runId]
+          return next
+        })
+      }
+    } finally {
+      setSyncingRunId(null)
+    }
+  }
+
   const rows = ended.map((e) => {
     const s = e.summary
     const mins = e.endTs ? Math.max(0, Math.round((e.endTs - e.startTs) / 60000)) : null
     const dur = s && typeof s.durationSec === 'number' ? (s.durationSec < 60 ? s.durationSec + 's' : Math.round(s.durationSec / 60) + 'min') : (mins !== null ? mins + 'min' : '-')
     const color = e.state === 'done' ? C.success : e.state === 'crashed' ? C.error : C.label2
+    const isSyncing = syncingRunId === e.runId || e.swanlab?.status === 'syncing'
+    const errText = syncError[e.runId] || (e.swanlab?.status === 'failed' ? e.swanlab.error : null)
+    const btnText = isSyncing ? '同步中' : e.swanlab?.status === 'synced' ? '重同步' : e.swanlab?.status === 'failed' ? '重试' : '同步'
+
     // 指标 stat：小标签在上 + 主值在下（栅格单元），替代原先挤一行的「GPU峰值/均值/显存峰值/组CPU峰值」
     const stat = (label: string, val: number | string | null | undefined, valColor?: string) => (val === null || val === undefined)
       ? null
@@ -387,14 +463,37 @@ function EndedBlock(props: { ended: EndedView[]; onDetail: (d: DetailData) => vo
       title: '点击查看完整命令',
       style: { display: 'flex', flexDirection: 'column', gap: 4, padding: '6px 8px', background: C.layer1, border: '1px solid ' + C.border, borderRadius: 8, cursor: 'pointer' },
     },
-      // 标题行：状态点 + runId + 状态徽标 + 类型徽标（M2）+ 时长
+      // 标题行：状态点 + runId + 状态徽标 + 类型徽标（M2）+ SwanLab 徽标 + 设备 + 时长 + 同步按钮
       React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', fontSize: 11 } },
         React.createElement('span', { style: { width: 8, height: 8, borderRadius: 4, background: color, flexShrink: 0 } }),
         React.createElement('span', { style: { fontWeight: 600, fontSize: 11 } }, e.runId),
         React.createElement('span', { style: { fontSize: 10, padding: '0 4px', borderRadius: 3, border: '1px solid ' + color, color: color } },
           e.state === 'done' ? '完成' : e.state === 'crashed' ? '崩溃' : '中止'),
         expTypeBadge(e.type),
+        swanlabBadge(e.swanlab),
+        e.deviceId && e.deviceId !== 'local'
+          ? React.createElement('span', {
+              style: { fontSize: 10, padding: '0 4px', borderRadius: 3, background: C.border, color: '#3964fe', fontWeight: 600 },
+              title: '归属设备'
+            }, e.deviceId)
+          : null,
         React.createElement('span', { style: { color: C.label2 } }, dur),
+        React.createElement('button', {
+          onClick: (ev: React.MouseEvent) => handleSync(e.runId, ev),
+          disabled: isSyncing,
+          title: errText ? `同步错误: ${errText}` : (e.swanlab?.status === 'synced' ? '重新同步到 SwanLab' : '同步到 SwanLab'),
+          style: {
+            marginLeft: 'auto',
+            background: 'transparent',
+            border: '1px solid ' + (errText ? C.error : isSyncing ? C.brand : C.border),
+            borderRadius: 3,
+            fontSize: 10,
+            padding: '1px 6px',
+            color: errText ? C.error : isSyncing ? C.brand : C.label,
+            cursor: isSyncing ? 'not-allowed' : 'pointer',
+            opacity: isSyncing ? 0.6 : 1,
+          },
+        }, btnText),
       ),
       // 指标栅格：2 列自适应（auto-fit），每字段「标签/值」上下排
       React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(96px, 1fr))', gap: '4px 10px' } },
@@ -403,6 +502,13 @@ function EndedBlock(props: { ended: EndedView[]; onDetail: (d: DetailData) => vo
         stat('显存峰值', s && typeof s.memPeak === 'number' ? fmtGiB(s.memPeak) + 'G' : null),
         stat('组CPU峰值', s && typeof s.groupCpuMax === 'number' ? Math.round(s.groupCpuMax) + '%' : null, s && typeof s.groupCpuMax === 'number' ? utilColor(s.groupCpuMax) : undefined),
       ),
+      // 同步错误提示
+      errText
+        ? React.createElement('div', {
+            style: { fontSize: 10, color: C.error, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+            title: String(errText),
+          }, '同步错误: ' + String(errText))
+        : null,
       // cmd 全宽行（点击查看完整命令）
       e.cmd
         ? React.createElement('div', { style: { fontSize: 11, color: C.label2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 320 } }, e.cmd)
@@ -439,6 +545,10 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
   const [backendMode, setBackendMode] = React.useState<string>(s && s.backendMode ? s.backendMode : 'auto')
   const [bmMsg, setBmMsg] = React.useState<string | null>(null)
   const [bmBusy, setBmBusy] = React.useState(false)
+  // #21 监控设备切换
+  const [deviceTarget, setDeviceTarget] = React.useState<string>(s && s.currentDevice ? s.currentDevice : 'local')
+  const [devMsg, setDevMsg] = React.useState<string | null>(null)
+  const [devBusy, setDevBusy] = React.useState(false)
   // #13-3 差异化阈值：分层覆盖 JSON 编辑（byExpType / byTag）
   const ov0 = s && s.thresholdOverrides
   const [ovJson, setOvJson] = React.useState<string>(JSON.stringify(ov0 && Object.keys(ov0).length ? ov0 : {
@@ -457,8 +567,9 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
     if (ov0 && Object.keys(ov0).length) setOvJson(JSON.stringify(ov0, null, 2))
     // #14：外部改 backendMode → 快照变化 → 下拉跟随
     if (s && s.backendMode) setBackendMode(s.backendMode)
+    if (s && s.currentDevice) setDeviceTarget(s.currentDevice)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ovKey, s && s.backendMode])
+  }, [ovKey, s && s.backendMode, s && s.currentDevice])
 
   // 2026-08-22：外部（lab_ctl / settings.yaml）改阈值 → 快照 thresholds 变化 → 本地表单跟随
   React.useEffect(() => {
@@ -532,6 +643,21 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
       })
       .catch(() => setOvMsg('调用失败'))
       .finally(() => setOvBusy(false))
+  }
+
+  // #21 监控设备切换
+  const setDeviceNow = () => {
+    setDevBusy(true); setDevMsg(null)
+    apiCall<{ ok?: boolean; state?: string; device?: string; error?: string }>('device', { target: deviceTarget })
+      .then((r) => {
+        if (r && (r as { ok?: boolean }).ok) {
+          setDevMsg('已切换：' + ((r as { device?: string }).device || deviceTarget))
+        } else {
+          setDevMsg((r as { error?: string } | undefined)?.error || '切换失败')
+        }
+      })
+      .catch(() => setDevMsg('调用失败'))
+      .finally(() => setDevBusy(false))
   }
 
   // #14 监控目标模式切换（control backend-mode；生效需重启 DSH）
@@ -625,6 +751,21 @@ function ControlPanel(props: { snap: SnapView | null }): React.ReactElement {
       field('权重GPU', wGpu, setWGpu, 'GPU 利用率权重（0..20）'),
       field('权重CPU', wCpu, setWCpu, 'CPU 利用率权重（0..20）'),
       field('权重内存', wMem, setWMem, '内存占用权重（0..20）'),
+    ),
+    // #21 监控设备：下拉 + 切换（本地 / 远程设备）
+    React.createElement('div', { key: 'dev-switch', style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+      React.createElement('label', { style: { fontSize: 11, color: C.label2 } }, '监控设备'),
+      React.createElement('select', {
+        value: deviceTarget,
+        onChange: (e: React.ChangeEvent<HTMLSelectElement>) => setDeviceTarget(e.target.value),
+        style: { ...inputStyle, width: 150, textAlign: 'left', cursor: 'pointer' },
+        title: '切换当前监控设备（本地 / 远程服务器）',
+      },
+        React.createElement('option', { value: 'local' }, 'local（本机）'),
+        ...(s && Array.isArray(s.devices) ? s.devices.map((d) => React.createElement('option', { key: d.id, value: d.id }, (d.label || d.id) + ' (' + d.host + ')')) : [])
+      ),
+      React.createElement('button', { onClick: setDeviceNow, disabled: devBusy, style: btnStyle }, '切换'),
+      devMsg ? React.createElement('span', { style: { fontSize: 10.5, color: C.brand } }, devMsg) : null,
     ),
     // #14 监控目标模式：下拉 + 保存（WSL 下切换 Windows/Linux 监控目标）
     React.createElement('div', { key: 'bm', style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
@@ -1875,6 +2016,20 @@ function MonitorPanel(props: { visible?: boolean; store?: unknown }) {
         ? React.createElement('span', { style: { fontSize: 11, color: C.label2, padding: '1px 7px', borderRadius: 10, background: C.border } },
             s.platform + (s.sources && s.sources.gpu ? '·' + s.sources.gpu : ''))
         : null,
+      s && s.currentDevice
+        ? React.createElement('span', {
+            style: {
+              fontSize: 11,
+              color: s.currentDevice === 'local' ? C.label2 : '#3964fe',
+              padding: '1px 7px',
+              borderRadius: 10,
+              background: C.border,
+              fontWeight: s.currentDevice === 'local' ? 'normal' : 700,
+            },
+            title: '当前监控设备（可于设置页切换）'
+          },
+            '设备: ' + s.currentDevice)
+        : null,
     ),
     // ── 历史曲线（GPU 利用率，SVG 自绘零依赖）──────────────────────────────
     hist && hist.length > 1
@@ -2013,13 +2168,7 @@ function registerSidebarAdapter(ctx: CtxLike, disposeViewRef: () => (() => void)
             return React.createElement(MonitorPanel, { visible: props.visible, store: props.store })
           }
           dispose3 = (bs as { registerTab(desc: unknown): () => void }).registerTab(desc)
-          // 默认打开：让 monitor 成为 better-sidebar 默认 tab（single:true 自带 dedupeKey，不会重复建/聚焦已开）
-          try {
-            const open = (bs as { openTab?: (seed: { type: string }) => void }).openTab
-            if (open) open({ type: SIDEBAR_TAB_ID })
-          } catch (e) {
-            console.warn('[lab-monitor] 自动打开 GPU 监控 tab 失败（不影响注册）:', e)
-          }
+          // 移除自动强制 openTab：避免每次页面刷新/初始化时强行展开侧边栏（Bug 修复）
           // ③ 注册成功 → 注销 ②（互斥降级矩阵生效）
           const dv = disposeViewRef()
           if (dv) {

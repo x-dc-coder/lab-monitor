@@ -147,7 +147,9 @@
 - 事件格式：`event: <name>\ndata: <json>\n\n`（`<name>` = lab/ 后缀，如 `experiment-start`；data 含 `{ts, runId, ...}` 与 §4 对齐）
 - 心跳：15s `: ping` 保活；连接 close 自动清理
 - 回放：新连接先推最近 20 条事件缓冲（订阅者连上即有上下文）
-- 鉴权：当前 localhost only（known-issues #6）；开放端口转发需先加鉴权（backlog）
+- 鉴权：SSE 暂仍 localhost only 无鉴权（known-issues #6；来源校验与连接上限待修——安全清单 V3）。
+  注意：JSON API 的 **POST 写通道**自 2026-09-16（P0）起强制来源校验——`Origin`/`Referer` 须命中
+  回环白名单，或携带 `X-Lab-Monitor: 1` 头；GET 只读不受限。详见 AGENTS.md §7。
 
 ## 4.2 快照数据模型扩展（#13，2026-08-24）
 
@@ -183,6 +185,21 @@
 
 **语义**：显式规则命中优先于 TRAIN_PATTERNS；命中的 bash 执行记为实验（含 pid 关联/crash 检测/告警归属/历史归档），
 正常结束配对 result → done；进程消失无 result → crashed（显式 run 不豁免）。
+
+### 4.4 #21 多设备远程监控（2026-09-17）
+
+> 关联：#21（多设备监控与远程切换）/ #22（LinuxBackend 补齐整卡 GPU）。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `snapshot.currentDevice` | `string` | 当前监控目标设备 ID（`local` 或远程设备 ID 如 `gpu220`） |
+| `snapshot.devices` | `Array<{id, label, host}>` | 已配置的设备列表摘要 |
+| `state: 'switched_away'` | `string` | 设备切换时旧设备在途实验的平稳归档状态（不触发 experiment-crash 告警） |
+
+**设备控制与切换**：
+- 工具命令：`lab_ctl switch-device device="gpu220"` 或 `lab_ctl switch-device device="local"`。
+- HTTP 数据面：`POST /lab-monitor/api/device`（body: `{"target":"gpu220"}`）或 `POST /lab-monitor/api/control`（body: `{"action":"switch-device","device":"gpu220"}`）。
+- 配置持久化：`settings.yaml` 段支持 `devices` 数组与 `currentDevice` 记录。
 
 ## 5. 出口层消费约束
 

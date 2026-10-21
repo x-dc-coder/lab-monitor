@@ -173,6 +173,46 @@
 4. **回归**：verify.sh --e2e 全绿（verify-host 含 3 新断言 / mock-test / verify-sampler / e2e）。
 5. **UI 微调（同批遗留提交）**：GPU 卡进度条 height 6→8 / borderRadius 3→4（视觉增强）。
 
+## P0 安全修复完成记录（2026-09-16，HTTP 数据面 CSRF 加固）
+
+> 触发：网络审查发现 HTTP 数据面无来源校验，任意网页可跨站 POST（`text/plain` 简单请求绕过 CORS 预检）
+> 静默执行写操作（pause/clear-alerts/historyManage clear/tag 注入持久化正则等）；经 Gemini-3.8 独立复核，
+> V1~V5 + B1~B4 共 9 项发现全部属实，并额外确认 AF1（请求体无上限 → OOM）与 AF2（control 丢参数 → clear-alerts 误全清）。
+
+1. **V1（CSRF，严重）修复**：`httpHandler` 对 POST 强制来源校验——`Origin`（优先）/`Referer`（兜底）
+   命中回环白名单（`127.0.0.1`/`localhost`/`*.localhost`/`::1`，任意端口），或非浏览器客户端显式携带
+   `X-Lab-Monitor: 1`（跨站 fetch 附加自定义头必触发 CORS 预检，本接口不响应预检 → 请求不发送）；
+   不满足返回 403。GET 只读通道（转发器轮询、`curl snapshot`）不受影响。
+2. **AF1（OOM DoS）修复**：请求体上限 1MiB，超限返回 413 并 `req.destroy()` 断流（原先 `body += chunk` 无上限）。
+3. **客户端配套**：`client.ts` `apiCall` 自带 `X-Lab-Monitor: 1` 头兜底无 Origin/Referer 的边缘情形。
+4. **验证**：typecheck + build 通过；verify.sh 七组全绿；隔离验证 8/8（跨站 Origin→403、跨站 Referer→403、
+   无头→403、回环 Origin→200、自证头→200、GET 快照→200、1.2MiB body→413+断连）。
+5. **文档同步**：AGENTS.md §7 访问策略（= 全局 `~/.dsh/lab-monitor-AGENTS.md` 速查源）、
+   `docs/usage/usage.md` §7、`docs/reference/protocol.md` §4.1 鉴权说明、`.gitignore` 补 `lib.bak*/`（B3）。
+6. **生效方式**：host 改动需用户手动重启 DSH（进程红线：Agent 不自行重启）。
+7. **待修清单（优先级）**：P1 — B1/AF2（control 路由 body 透传 + `rpcControl` 补 backend-mode 分支）、
+   V2（正则 ReDoS：长度/嵌套量词限制 + 执行超时，切断 V1×V2 组合链）；P2 — V3（SSE 来源校验 + 连接上限）、
+   B2（日志命令行脱敏）；P3 — V4（promptLine 原始 cmd 清理）、V5（外发 cmd 脱敏）。
+
+## #22 与 #21 实施完成记录（2026-09-17，LinuxBackend 整卡 GPU 采集与多设备远程监控）
+
+> 关联：#14（WSL 监控目标切换遗留通道闭环）/ #22（LinuxBackend 补齐整卡 GPU）/ #21（SshRunner 远程设备切换）
+
+1. **#22（LinuxBackend 补齐整卡 GPU）**：
+   - 移植 7 列 `--query-gpu` 解析器（index, name, utilPct, memUsedMiB, memTotalMiB, tempC, powerW），输出规范化 `GpuSample[]`。
+   - 快照挂载 `snapshot().gpu`，sources 标注 `sources.gpu = 'linux-smi'`；无驱动/命令不可用时优雅降级为 `degraded.gpu`，不破坏主通道。
+   - 快慢通道解耦：整卡 query 快通道（50ms 级）入 2s tick，pmon 慢通道优化为 `-c 1` 采样 + 5s TTL 缓存，并在无 GPU 时直接跳过。
+   - 单测验证：`scripts/verify-linux-gpu.js` 18 项断言全绿，入 `verify.sh [5f]`。
+2. **#14 闭环**：
+   - WSL 下 `backendMode=linux` 实测成功识别 GPU（RTX 5060 Ti）与 Linux 进程，进程表与训练实验同 PID 空间，全通道正常。
+3. **#21（多设备监控与 SshRunner 远程切换）**：
+   - `SshRunner implements Runner`：基于 SSH ControlMaster 长连接复用（首连 445ms，复用 11ms，AC-5 达成）；Base64 命令体打包；连接失效自愈与 close 资源清理。
+   - 消除 sampleTick 闭包 runner 旁路：5s ps 周期与 2s 快照统一收敛至当前生效的 `backendState.runner`，彻底解决本地/远端进程表撕裂。
+   - 切换生命周期保护：`machine.switchAwayAll('switched_away')` 平稳归档在途实验，不触发 `experiment-crash` 告警（AC-3 达成）。
+   - 运行时设备动态切换：`lab_ctl switch-device device="gpu220" / "local"`，HTTP API `POST /lab-monitor/api/device`，设置持久化联动。
+   - 真实设备联调：对现网 `gpu220`（RTX 3090 24G，Ubuntu 20.04）实测成功获取整卡指标与远端进程表，采样耗时 151ms（≤800ms，AC-1、AC-2、AC-5 达成）。
+   - 自动化测试：`scripts/verify-multi-device.js` 16 项断言全绿，入 `verify.sh [5g]`。
+
 ## V2 阶段未完成项（2026-08-20 对照 PLAN + 本清单）
 
 > 分类：A = 计划明确要求但代码未实现；B = 验收遗留（需真实环境/GUI）；C = 可选增强。

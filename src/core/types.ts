@@ -56,6 +56,39 @@ export interface SamplePoint {
   degraded?: { gpu?: string; reason?: string } | null
 }
 
+/** SwanLab 同步状态（4 态闭环：待同步 / 同步中 / 已同步 / 失败） */
+export type SwanLabStatus = 'pending' | 'syncing' | 'synced' | 'failed'
+
+/** SwanLab 单次同步信息 */
+export interface SwanLabRunInfo {
+  status: SwanLabStatus
+  runId?: string
+  runUrl?: string
+  syncTs?: number
+  attemptTs?: number
+  error?: string
+}
+
+/** SwanLab 自动同步门控条件 */
+export interface SwanLabSyncConditions {
+  allowedStates?: ('done' | 'crashed' | 'aborted' | 'switched_away')[]
+  minDurationSec?: number
+  includeTypes?: ExpType[]
+  requireTags?: string[]
+}
+
+/** SwanLab 配置契约 */
+export interface SwanLabConfig {
+  enabled?: boolean
+  apiKey?: string
+  project?: string
+  workspace?: string
+  logDir?: string
+  triggerMode?: 'manual' | 'auto' | 'scheduled'
+  scheduleIntervalMs?: number
+  conditions?: SwanLabSyncConditions
+}
+
 /** 实验记录（state-machine） */
 export interface RunRecord {
   runId: string
@@ -66,10 +99,12 @@ export interface RunRecord {
   procGroup: Set<number> | null
   startTs: number
   endTs: number | null
-  state: 'running' | 'done' | 'crashed' | 'aborted'
+  state: 'running' | 'done' | 'crashed' | 'aborted' | 'switched_away'
   endReason: string | null
   resultSeen: boolean
   fingerprint: string
+  /** #21 多设备监控：实验归属设备（'local' 或远程设备 id 如 'gpu220'） */
+  deviceId?: string
   /** M2（issue#6）：实验类型（8 类枚举；start 时识别，unknown=未命中不猜） */
   type?: ExpType
   /** M3（issue#7）：发起实验的 agent（pre-execute 读 exec.agent；无=旧宿主/外部，路由回退 roots()） */
@@ -87,6 +122,8 @@ export interface RunRecord {
   groupStats: GroupStats | null
   sampleStats: { utilSum: number; utilN: number; utilMax: number; memPeakMiB: number; groupCpuMax?: number | null; groupMemPeakMiB?: number | null; otherMemPeakMiB?: number | null } | null
   summary?: { gpuUtilMax: number | null; gpuUtilAvg: number | null; memPeak: number | null; durationSec: number; dataPartial: boolean; groupCpuMax?: number | null; groupMemPeakMiB?: number | null; otherMemPeakMiB?: number | null }
+  /** SwanLab 同步状态（4 态：pending/syncing/synced/failed） */
+  swanlab?: SwanLabRunInfo
 }
 
 /** 实验状态快照（对外协议 1.2：+procGroup/+groupStats；M2：+type 实验类型） */
@@ -111,12 +148,16 @@ export interface ExperimentSnapshot {
   parentId?: string | null
   /** #17 增强：显式注册实验（lab_ctl track）标记，UI/Agent 可区分来源 */
   source?: 'explicit' | 'auto'
+  /** #21 多设备监控：实验归属设备 */
+  deviceId?: string
+  /** SwanLab 同步状态 */
+  swanlab?: SwanLabRunInfo
 }
 
 /** 已结束实验记录（对外协议：experiment 历史复盘；state-machine history 摘要投影，倒序=最新在前） */
 export interface EndedRunSnapshot {
   runId: string
-  state: 'done' | 'crashed' | 'aborted'
+  state: 'done' | 'crashed' | 'aborted' | 'switched_away'
   cmd: string | null
   cmdFeature: string | null
   startTs: number
@@ -130,6 +171,10 @@ export interface EndedRunSnapshot {
   agentId?: string | null
   /** #17 增强：显式注册实验（lab_ctl track）标记 */
   source?: 'explicit' | 'auto'
+  /** #21 多设备监控：实验归属设备 */
+  deviceId?: string
+  /** SwanLab 同步状态（持久化闭环） */
+  swanlab?: SwanLabRunInfo
 }
 
 /** #17 增强（2026-08-27）：显式跟踪规则（lab_ctl track）——命中 cmdline 的命令无条件记为实验并监控 */
@@ -159,6 +204,8 @@ export interface Alert {
   evidence?: { procs: ProcStat[] }
   ts: number
   runId: string | null
+  /** #21 多设备监控：告警发生所在设备 */
+  deviceId?: string
   // ── M1（issue#5 严格分级，docs/research/22 §1.2；全部可选防破坏，旧数据零感知）──
   /** 严重度 1-5（rule 权重表静态映射：crash=5、oom=4、thermal=4、io=3、imbalance=2、other=2）——M1 必填 */
   severity?: 1 | 2 | 3 | 4 | 5
@@ -233,6 +280,10 @@ export interface MonitorSnapshot {
   }
   /** #14 监控目标模式（auto/windows/linux/windows-native，配置页下拉显示） */
   backendMode?: 'auto' | 'windows' | 'linux' | 'windows-native'
+  /** #21 多设备监控：当前监控设备 id（'local' 或远程设备 id，如 'gpu220'） */
+  currentDevice?: string
+  /** #21 多设备监控：已注册设备列表简要信息 */
+  devices?: { id: string; label?: string; host: string }[]
   /** 2026-08-22（P1 设置面）：监控引擎启停状态（start/pause/resume 的真实反映——UI 控制区显示） */
   enabled?: boolean
   /** M1（issue#5）：当前生效通知策略（client 设置页展示 + lab_status 可见） */
@@ -254,4 +305,12 @@ export interface MonitorSnapshot {
   callCount: number
   ui: { betterSidebarVisible: boolean }
   degraded?: { gpu?: string; reason?: string }
+  /** SwanLab 插件状态透出（仅 apiKeyConfigured: boolean，严禁透出原始 apiKey） */
+  swanlab?: {
+    enabled?: boolean
+    apiKeyConfigured: boolean
+    project?: string
+    workspace?: string
+    triggerMode?: 'manual' | 'auto' | 'scheduled'
+  }
 }

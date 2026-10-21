@@ -60,10 +60,14 @@ export async function collectSnapshot(backend: SamplerBackend): Promise<Awaited<
   return backend.snapshot()
 }
 
+export { LinuxBackend } from './backend-linux.js'
+export { WindowsBackend } from './backend-windows.js'
+export { WindowsNativeBackend } from './backend-windows-native.js'
+export { SshRunner, type SshConfig } from './runner-ssh.js'
+
 /** probe 封装：后端可用性（上层启动时调用，失败只降级对应通道） */
 export function probeBackend(backend: SamplerBackend): Promise<{ ok: boolean; reason?: string; detail?: Record<string, unknown> }> {
   return backend.probe()
 }
 
 // 导出后端类（外部测试/独立工具引用）
-export { LinuxBackend, WindowsBackend, WindowsNativeBackend }

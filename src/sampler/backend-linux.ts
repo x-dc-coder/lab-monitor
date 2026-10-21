@@ -4,9 +4,10 @@
  *   CPU: /proc/stat 两次采样差分（psutil 算法：首帧丢弃、负值截 0）
  *   内存: /proc/meminfo（MemTotal/MemAvailable，kB→MiB）
  *   进程: ps -eo pid,ppid,pcpu,rss,args（低频 5s 由上层控制；rss kB→MiB 补 memMiB，ppid 进程树骨架）
- *   GPU 每进程: nvidia-smi pmon -c 3 -s u（辅助证据；无驱动/失败 → 静默空）
+ *   GPU 整卡: nvidia-smi --query-gpu（#22 补齐：util/memUsed/memTotal/temp/power；无驱动/失败 → 降级）
+ *   GPU 每进程: nvidia-smi pmon -c 3 -s u（辅助证据；慢通道 TTL 5s，无驱动/失败 → 静默空）
  */
-import type { ProcSample, ProbeResult, Runner, SamplerBackend, Snapshot } from './backend-interface.js'
+import type { GpuSample, ProcSample, ProbeResult, Runner, SamplerBackend, Snapshot } from './backend-interface.js'
 
 interface CpuTimes {
   idle: number
@@ -19,17 +20,41 @@ export class LinuxBackend implements SamplerBackend {
   cacheTtlMs = 1000
   lastCpuTimes: CpuTimes | null = null
   private runner: Runner
+  private gpuQueryCache: { at: number; val: { ok: boolean; gpus: GpuSample[]; reason?: string } } | null = null
+  private pmonCache: { at: number; val: Map<number, number> } | null = null
 
   constructor(runner: Runner) {
     this.runner = runner
   }
 
-  /** ① 探测：/proc 可读即可用（绝不抛错） */
+  private cacheGet<T>(entry: { at: number; val: T } | null, ttlMs: number): T | undefined {
+    if (!entry) return undefined
+    if (Date.now() - entry.at > ttlMs) return undefined
+    return entry.val
+  }
+
+  /** ① 探测：/proc 可读即可用（绝不抛错；探测 GPU 可用性） */
   async probe(): Promise<ProbeResult> {
     try {
       const r = await this.runner.exec('cat /proc/version 2>/dev/null | head -1')
       if (r.code !== 0) return { ok: false, reason: 'cannot read /proc/version: ' + (r.stderr || '') }
-      return { ok: true, detail: { kernel: (r.stdout || '').trim().slice(0, 80) } }
+      const detail: Record<string, unknown> = { kernel: (r.stdout || '').trim().slice(0, 80) }
+      try {
+        const gr = await this.runner.exec('nvidia-smi --query-gpu=driver_version,count --format=csv,noheader 2>/dev/null')
+        if (gr.code === 0 && gr.stdout.trim()) {
+          const parts = gr.stdout.trim().split('\n')[0].split(',')
+          detail.gpu = {
+            available: true,
+            driver: parts[0]?.trim() || null,
+            count: parts.length > 1 ? parseInt(parts[1].trim(), 10) : 1,
+          }
+        } else {
+          detail.gpu = { available: false }
+        }
+      } catch (e) {
+        detail.gpu = { available: false }
+      }
+      return { ok: true, detail }
     } catch (e) {
       return { ok: false, reason: 'probe exception: ' + (e as Error).message }
     }
@@ -75,39 +100,124 @@ export class LinuxBackend implements SamplerBackend {
   }
 
   /**
-   * 每进程 GPU 利用率（pmon，辅助证据——A1）
-   * `nvidia-smi pmon -c 3 -s u` 多帧窗口：跳过 # 行，列 pid/type/sm/...；`-` 视 0；同 pid 取 max。
+   * 解析 nvidia-smi CSV noheader 行（7 列，实测）：
+   *   "0, NVIDIA GeForce RTX 3090, 7 %, 1867 MiB, 24576 MiB, 43, 20.77 W\r"
+   *   → { id, name, utilPct, memUsedMiB, memTotalMiB, tempC, powerW }
+   */
+  private parseSmiLine(line: string): GpuSample | null {
+    const f = line.replace(/\r$/, '').split(',').map((s) => s.trim())
+    if (f.length < 7) return null
+    const num = (s: string): number => {
+      const n = parseFloat(String(s).split(' ')[0])
+      return Number.isFinite(n) ? n : 0
+    }
+    return {
+      id: String(parseInt(f[0], 10)),
+      name: f[1],
+      utilPct: num(f[2]),
+      memUsedMiB: num(f[3]),
+      memTotalMiB: num(f[4]),
+      tempC: num(f[5]),
+      powerW: num(f[6]),
+    }
+  }
+
+  /**
+   * GPU 快照（query，TTL 500ms 缓存）：
+   * 7 列通用参数：index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw
+   */
+  private async queryGpu(): Promise<{ ok: boolean; gpus: GpuSample[]; reason?: string }> {
+    const cached = this.cacheGet(this.gpuQueryCache, 500)
+    if (cached !== undefined) return cached
+    try {
+      const r = await this.runner.exec(
+        'nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader 2>/dev/null'
+      )
+      if (r.code !== 0) {
+        const res = { ok: false, gpus: [], reason: 'nvidia-smi query 失败 code=' + r.code }
+        this.gpuQueryCache = { at: Date.now(), val: res }
+        return res
+      }
+      const gpus: GpuSample[] = []
+      for (const line of (r.stdout || '').split('\n')) {
+        if (!line.trim()) continue
+        const g = this.parseSmiLine(line)
+        if (g) gpus.push(g)
+      }
+      const res = { ok: gpus.length > 0, gpus, reason: gpus.length === 0 ? '无可用 GPU 设备' : undefined }
+      this.gpuQueryCache = { at: Date.now(), val: res }
+      return res
+    } catch (e) {
+      const res = { ok: false, gpus: [], reason: (e as Error).message }
+      this.gpuQueryCache = { at: Date.now(), val: res }
+      return res
+    }
+  }
+
+  /**
+   * 每进程 GPU 利用率（pmon，辅助证据——慢通道 TTL 5s）
+   * nvidia-smi pmon -c 3 -s u 多帧窗口：跳过 # 行，列 pid/type/sm/...；`-` 视 0；同 pid 取 max。
    * 无 nvidia 驱动/失败 → 空 Map（gpuUtilPct 不填充，整卡通道不受影响）。
    */
-  private async queryPmon(): Promise<Map<number, number>> {
+  private async queryPmon(hasGpu = true): Promise<Map<number, number>> {
+    if (!hasGpu) return new Map()
+    const cached = this.cacheGet(this.pmonCache, 5000)
+    if (cached !== undefined) return cached
     const byPid = new Map<number, number>()
     try {
-      const r = await this.runner.exec('nvidia-smi pmon -c 3 -s u 2>/dev/null')
-      if (r.code !== 0) return byPid
-      for (const line of (r.stdout || '').split('\n')) {
-        const t = line.trim()
-        if (!t || t.startsWith('#')) continue
-        const f = t.split(/\s+/)
-        if (f.length < 6) continue
-        const pid = parseInt(f[0], 10)
-        const sm = f[2] === '-' || f[2] === undefined ? 0 : parseFloat(f[2])
-        if (!Number.isFinite(pid) || !Number.isFinite(sm)) continue
-        const prev = byPid.get(pid)
-        if (prev === undefined || sm > prev) byPid.set(pid, sm)
+      // #21 快慢解耦：-c 1 极速采样（~50-80ms，避免 -c 3 的 2.1s 阻塞），TTL 5s 缓存
+      const r = await this.runner.exec('nvidia-smi pmon -c 1 -s u 2>/dev/null')
+      if (r.code === 0) {
+        let colIdx: Record<string, number> | null = null
+        for (const line of (r.stdout || '').split('\n')) {
+          const t = line.trim()
+          if (!t) continue
+          if (t.startsWith('#')) {
+            const names = t.replace(/^#+\s*/, '').split(/\s+/)
+            if (names.includes('pid') && names.includes('sm')) {
+              colIdx = {}
+              for (let i = 0; i < names.length; i++) colIdx[names[i]] = i
+            }
+            continue
+          }
+          if (!colIdx || colIdx.pid === undefined || colIdx.sm === undefined) {
+            const f = t.split(/\s+/)
+            if (f.length >= 6) {
+              const pid = parseInt(f[0], 10)
+              const smRaw = f[2]
+              const sm = smRaw === '-' || smRaw === '' || smRaw === undefined ? 0 : parseFloat(smRaw)
+              if (Number.isFinite(pid) && Number.isFinite(sm)) {
+                const prev = byPid.get(pid)
+                if (prev === undefined || sm > prev) byPid.set(pid, sm)
+              }
+            }
+            continue
+          }
+          const f = t.split(/\s+/)
+          if (f.length <= Math.max(colIdx.pid, colIdx.sm)) continue
+          const pid = parseInt(f[colIdx.pid], 10)
+          const smRaw = f[colIdx.sm]
+          const sm = smRaw === '-' || smRaw === '' || smRaw === undefined ? 0 : parseFloat(smRaw)
+          if (!Number.isFinite(pid) || !Number.isFinite(sm)) continue
+          const prev = byPid.get(pid)
+          if (prev === undefined || sm > prev) byPid.set(pid, sm)
+        }
       }
     } catch (e) {
       /* pmon 不可用 → 空 */
     }
+    this.pmonCache = { at: Date.now(), val: byPid }
     return byPid
   }
 
-  /** ② 快照：全量规范化输出（协议 docs/03-protocol.md §2.1；1.2：procs +ppid/+gpuUtilPct） */
+  /** ② 快照：全量规范化输出（协议 docs/03-protocol.md §2.1；1.2：procs +ppid/+gpuUtilPct；#22 补齐整卡 GPU） */
   async snapshot(): Promise<Snapshot> {
     const ts = Date.now()
-    const [mem, stat, psOut] = await Promise.all([
+    const [mem, stat, psOut, gpuRes] = await Promise.all([
       this.readMeminfo(),
       this.readStat(),
       this.runner.exec('ps -eo pid=,ppid=,pcpu=,rss=,etimes=,args= --no-headers 2>/dev/null | head -100'),
+      this.queryGpu(),
     ])
     const cpu = { percent: null as number | null, cores: null as number | null }
     if (stat) cpu.percent = this.cpuPercent(stat)
@@ -130,8 +240,18 @@ export class LinuxBackend implements SamplerBackend {
       }
     }
     const sources: Snapshot['sources'] = { cpu: 'procfs', mem: 'procfs', procs: 'ps' }
+    let degraded: Snapshot['degraded'] | undefined = undefined
+
+    let gpu: GpuSample[] | undefined = undefined
+    if (gpuRes.ok && gpuRes.gpus.length > 0) {
+      sources.gpu = 'linux-smi'
+      gpu = gpuRes.gpus
+    } else {
+      degraded = { gpu: gpuRes.reason || 'nvidia-smi unavailable' }
+    }
+
     // 合并器（A1）：pmon 按 pid 归并；失败静默（sources 不标 +pmon）
-    const pmon = await this.queryPmon()
+    const pmon = await this.queryPmon(gpuRes.ok)
     if (pmon.size > 0) {
       sources.procs = 'ps+pmon'
       for (let i = 0; i < procs.length; i++) {
@@ -146,9 +266,11 @@ export class LinuxBackend implements SamplerBackend {
       ts,
       platform: 'linux',
       sources,
+      gpu,
       cpu,
       mem: mem || { totalMiB: null, availableMiB: null },
       procs,
+      degraded,
     }
   }
 
@@ -157,8 +279,10 @@ export class LinuxBackend implements SamplerBackend {
     return null
   }
 
-  /** ④ 关闭：清差分基线（无子进程） */
+  /** ④ 关闭：清差分基线与缓存（无子进程） */
   async close(): Promise<void> {
     this.lastCpuTimes = null
+    this.gpuQueryCache = null
+    this.pmonCache = null
   }
 }

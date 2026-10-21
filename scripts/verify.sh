@@ -66,6 +66,15 @@ if timeout 30 node scripts/verify-proc-detail.js >/dev/null 2>&1; then ok "verif
 echo "== [5e] 监控目标切换验证（verify-backend-mode.js，#14 createBackend 四态分发） =="
 if timeout 30 node scripts/verify-backend-mode.js >/dev/null 2>&1; then ok "verify-backend-mode ALL PASS"; else bad "verify-backend-mode 失败"; fi
 
+echo "== [5f] Linux GPU 采集与降级验证（verify-linux-gpu.js，#22 补齐整卡 GPU） =="
+if timeout 30 node scripts/verify-linux-gpu.js >/dev/null 2>&1; then ok "verify-linux-gpu ALL PASS"; else bad "verify-linux-gpu 失败"; fi
+
+echo "== [5g] 多设备监控与远程切换验证（verify-multi-device.js，#21 SshRunner + 切换） =="
+if timeout 30 node scripts/verify-multi-device.js >/dev/null 2>&1; then ok "verify-multi-device ALL PASS"; else bad "verify-multi-device 失败"; fi
+
+echo "== [5h] SwanLab 同步方案全链路验证（verify-swanlab-sync.js，门控+脱敏+持久化+Mock） =="
+if timeout 30 node scripts/verify-swanlab-sync.js >/dev/null 2>&1; then ok "verify-swanlab-sync ALL PASS"; else bad "verify-swanlab-sync 失败"; fi
+
 if [ "$RUN_SAMPLER" -eq 1 ]; then
   echo "== [6] 真实采样实证（verify-sampler.js，GPU/interop 实测） =="
   if timeout 150 node scripts/verify-sampler.js >/dev/null 2>&1; then ok "verify-sampler 通过"; else bad "verify-sampler 失败"; fi

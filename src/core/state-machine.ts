@@ -5,7 +5,7 @@
 import { CRASH_PS_GAP, DONE_GRACE_TICKS, MAX_HISTORY, MAX_PARALLEL_RUNS, RING_MAX_MS, cmdFingerprint, isGhostRun, makeRunId, normalizeCmdForMatch } from './constants.js'
 import { classifyExpType, type ExpTypeRule } from './exp-type.js'
 import type { Ring } from './ring.js'
-import type { Alert, EndedRunSnapshot, ExperimentSnapshot, ExpType, RunRecord } from './types.js'
+import type { Alert, EndedRunSnapshot, ExperimentSnapshot, ExpType, RunRecord, SwanLabRunInfo, SwanLabStatus } from './types.js'
 
 interface PsProc {
   pid: number
@@ -26,7 +26,7 @@ interface StateMachineDeps {
 }
 
 export interface StateMachine {
-  start(cmdStr: string, feature: string, agent?: { agentId?: string | null; agentRole?: 'root' | 'subagent'; parentId?: string | null }, opts?: { explicit?: boolean }): RunRecord
+  start(cmdStr: string, feature: string, agent?: { agentId?: string | null; agentRole?: 'root' | 'subagent'; parentId?: string | null }, opts?: { explicit?: boolean; deviceId?: string }): RunRecord
   associatePid(pid: number): void
   associateProc(pid: number): void
   markResult(paired: boolean, runId?: string | null): void
@@ -35,10 +35,14 @@ export interface StateMachine {
   setAlerting(on: boolean, runId?: string | null): void
   snapshot(): { main: ExperimentSnapshot | null; all: ExperimentSnapshot[]; ended: EndedRunSnapshot[] }
   restoreEnded(snapshots: EndedRunSnapshot[]): void
+  /** SwanLab 同步状态推进（4 态：pending/syncing/synced/failed） */
+  markSwanLabSynced(runId: string, info: Partial<SwanLabRunInfo> & { status?: SwanLabStatus }): boolean
   /** 2026-08-24（#10 实验历史管理）：按 runId 删除单条已结束记录 */
   removeRun(runId: string): boolean
   /** 2026-08-24（#10 实验历史管理）：清空已结束记录，保留最近 N 条（默认 0），返回被移除的 */
   clearHistory(keep?: number): RunRecord[]
+  /** #21 多设备切换：平稳归档全部在途实验（避免触发 experiment-crash） */
+  switchAwayAll(reason?: string): RunRecord[]
   cur(): RunRecord | null
   all(): RunRecord[]
   history: RunRecord[]
@@ -146,7 +150,7 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
   function archive(run: RunRecord, endReason: string): void {
     run.endTs = Date.now()
     run.endReason = endReason
-    run.state = endReason === 'aborted' ? 'aborted' : endReason === 'done' ? 'done' : 'crashed'
+    run.state = endReason === 'aborted' ? 'aborted' : endReason === 'switched_away' ? 'switched_away' : endReason === 'done' ? 'done' : 'crashed'
     run.summary = run.summary || buildSummary(run)
     state.runs.delete(run.runId)
     state.history.unshift(run)
@@ -188,20 +192,25 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
   // 2026-08-20（A2 多轨）：并行跟踪上限 MAX_PARALLEL_RUNS——超出时归档最旧 running 为 aborted；
   // 不再「新 start 即归档旧 run」（v1 单跟踪语义，P1 验收 7 已更新）。
   // M3（issue#7）：agent 可选参——发起实验的 agent（agentId/agentRole/parentId），通知路由用
-  function start(cmdStr: string, feature: string, agent?: { agentId?: string | null; agentRole?: 'root' | 'subagent'; parentId?: string | null }, opts?: { explicit?: boolean }): RunRecord {
+  function start(cmdStr: string, feature: string, agent?: { agentId?: string | null; agentRole?: 'root' | 'subagent'; parentId?: string | null }, opts?: { explicit?: boolean; deviceId?: string }): RunRecord {
     const running = all()
     if (running.length >= MAX_PARALLEL_RUNS) {
       const oldest = running.reduce((a, b) => (a.startTs <= b.startTs ? a : b))
       archive(oldest, 'aborted') // 上限触发：最旧 running 归档 aborted
     }
-    // M2（issue#6）：实验类型三层识别（config→auto→learn→unknown；学习层样本 = history 同 fingerprint 时长）
+    const devId = opts?.deviceId || 'local'
+    // M2（issue#6）：实验类型三层识别（config→auto→learn→unknown；按 deviceId 隔离历史样本学习）
     const typeInfo = deps.expType
       ? classifyExpType(cmdStr, {
           ...deps.expType(),
-          history: state.history.map((r) => ({
-            fingerprint: r.fingerprint,
-            durationSec: (r.summary && typeof r.summary.durationSec === 'number') ? r.summary.durationSec : 0,
-          })),
+          history: (() => {
+            const devHist = state.history.filter((r) => (r.deviceId || 'local') === devId)
+            const targetHist = devHist.length ? devHist : state.history
+            return targetHist.map((r) => ({
+              fingerprint: r.fingerprint,
+              durationSec: (r.summary && typeof r.summary.durationSec === 'number') ? r.summary.durationSec : 0,
+            }))
+          })(),
         })
       : { type: 'unknown' as ExpType, layer: 'unknown' as const }
     const run: RunRecord = {
@@ -216,6 +225,7 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       endReason: null,
       resultSeen: false,
       fingerprint: cmdFingerprint(cmdStr),
+      deviceId: devId,
       type: typeInfo.type,
       agentId: agent?.agentId ?? null,
       agentRole: agent?.agentRole,
@@ -361,13 +371,15 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       parentId: run.parentId,
       // #17 增强：显式注册实验标记透出（UI/Agent 可区分来源）
       source: run.explicit ? 'explicit' : 'auto',
+      deviceId: run.deviceId || 'local',
+      swanlab: run.swanlab ? { ...run.swanlab } : undefined,
     }
   }
 
   function toEndedSnapshot(run: RunRecord): EndedRunSnapshot {
     return {
       runId: run.runId,
-      state: run.state === 'done' ? 'done' : run.state === 'aborted' ? 'aborted' : 'crashed',
+      state: run.state === 'done' ? 'done' : run.state === 'aborted' ? 'aborted' : run.state === 'switched_away' ? 'switched_away' : 'crashed',
       cmd: run.cmd,
       cmdFeature: run.cmdFeature,
       startTs: run.startTs,
@@ -382,6 +394,8 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
       agentId: run.agentId,
       // #17 增强：显式注册实验标记透出（历史复盘可区分来源）
       source: run.explicit ? 'explicit' : 'auto',
+      deviceId: run.deviceId || 'local',
+      swanlab: run.swanlab ? { ...run.swanlab } : undefined,
     }
   }
 
@@ -403,7 +417,7 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
         procGroup: null,
         startTs: typeof s.startTs === 'number' ? s.startTs : 0,
         endTs: typeof s.endTs === 'number' ? s.endTs : null,
-        state: s.state === 'done' ? 'done' : s.state === 'aborted' ? 'aborted' : 'crashed',
+        state: s.state === 'done' ? 'done' : s.state === 'aborted' ? 'aborted' : s.state === 'switched_away' ? 'switched_away' : 'crashed',
         endReason: s.state || null,
         resultSeen: s.state === 'done',
         fingerprint: typeof s.fingerprint === 'string' ? s.fingerprint : '',
@@ -412,14 +426,30 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
         agentId: typeof s.agentId === 'string' ? s.agentId : null,
         // #17 增强：历史恢复保留显式注册标记
         explicit: s.source === 'explicit',
+        deviceId: s.deviceId || 'local',
         graceTicks: 0,
         alerting: false,
         pidMissingStreak: 0,
         groupStats: null,
         sampleStats: null,
         summary: s.summary && typeof s.summary === 'object' ? s.summary : undefined,
+        swanlab: s.swanlab && typeof s.swanlab === 'object' ? { ...s.swanlab } : undefined,
       })
     }
+  }
+
+  // SwanLab 同步状态推进（4 态：pending/syncing/synced/failed）
+  function markSwanLabSynced(runId: string, info: Partial<SwanLabRunInfo> & { status?: SwanLabStatus }): boolean {
+    const run = state.runs.get(runId) || state.history.find((r) => r.runId === runId)
+    if (!run) return false
+    const curStatus = (run.swanlab && run.swanlab.status) || 'pending'
+    const nextStatus = info.status || curStatus
+    run.swanlab = {
+      ...run.swanlab,
+      ...info,
+      status: nextStatus,
+    }
+    return true
   }
 
   // 2026-08-24（#10 实验历史管理）：按 runId 删除单条已结束记录（不存在返回 false）
@@ -439,6 +469,14 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     return removed
   }
 
+  function switchAwayAll(reason = 'switched_away'): RunRecord[] {
+    const list = Array.from(state.runs.values())
+    for (const r of list) {
+      archive(r, reason)
+    }
+    return list
+  }
+
   function snapshot(): { main: ExperimentSnapshot | null; all: ExperimentSnapshot[]; ended: EndedRunSnapshot[] } {
     const runs = all()
     // 2026-08-22（P1 实验历史）：已结束实验（done/crashed/aborted）历史投影——倒序（最新在前），
@@ -454,5 +492,5 @@ export function createStateMachine(deps: StateMachineDeps): StateMachine {
     }
   }
 
-  return { start, associatePid, associateProc, markResult, tick, tickGrace, setAlerting, snapshot, restoreEnded, removeRun, clearHistory, cur, all, history: state.history }
+  return { start, associatePid, associateProc, markResult, tick, tickGrace, setAlerting, snapshot, restoreEnded, markSwanLabSynced, removeRun, clearHistory, switchAwayAll, cur, all, history: state.history }
 }

@@ -16,9 +16,10 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { randomUUID } from 'node:crypto'
 import Schema from '@deepseek-ai/schemastery'
 
-import { createBackend, collectSnapshot, probeBackend, type BackendMode } from './sampler/index.js'
+import { createBackend, collectSnapshot, probeBackend, SshRunner, LinuxBackend, type BackendMode } from './sampler/index.js'
 import type { ProcSample, Runner, SamplerBackend, Snapshot } from './sampler/backend-interface.js'
 import { createRing } from './core/ring.js'
 import { createStateMachine, parsePs } from './core/state-machine.js'
@@ -36,8 +37,10 @@ import {
   normalizeCmdForMatch,
 } from './core/constants.js'
 import type { ThresholdOverrides, Thresholds } from './core/constants.js'
-import type { ExpType } from './core/types.js'
+import type { ExpType, SwanLabConfig } from './core/types.js'
 import type { MonitorSnapshot, SamplePoint } from './core/types.js'
+import { syncAllEligibleRuns, syncRunToSwanLab } from './sync/swanlab.js'
+export { matchSyncConditions, sanitizeCmd, syncAllEligibleRuns, syncRunToSwanLab } from './sync/swanlab.js'
 
 // ── 类型 ─────────────────────────────────────────────────────────────────────
 
@@ -105,7 +108,35 @@ export interface LabMonitorConfig {
    * 安全边界：子代理默认只读——guard 执行期拒绝 lab_ctl，仅 lab_status/lab_advice 可调。
    */
   subagentPolicy: 'readonly' | 'restricted' | 'full'
+  // ── #21 多设备监控（SshRunner 远程设备切换）──
+  /** 远端设备列表配置（默认预设 gpu220） */
+  devices: DeviceConfig[]
+  /** 当前监控目标设备（'local' 或远程设备 id 如 'gpu220'） */
+  currentDevice: string
+  /** SwanLab 按需同步配置 */
+  swanlab?: SwanLabConfig
 }
+
+export interface DeviceConfig {
+  id: string
+  label?: string
+  host: string
+  port?: number
+  user: string
+  keyPath?: string
+  pollMs?: number
+}
+
+export const DEFAULT_DEVICES: DeviceConfig[] = [
+  {
+    id: 'gpu220',
+    label: 'gpu220 (RTX 3090)',
+    host: '10.100.104.22',
+    port: 22,
+    user: 'daichuang',
+    keyPath: '/home/dc/.ssh/dc_gpu220_ed25519',
+  },
+]
 
 /** dsh-settings 命名空间句柄（SettingsScope 子集：get/watch/update） */
 interface SettingsScopeLike {
@@ -133,10 +164,25 @@ function makeRunner(shell: ShellExecutor, ctx: Context): Runner {
     ;(spec as { sandboxPolicy?: { mode: string } }).sandboxPolicy = { mode: 'danger-full-access' }
     return spec
   }
+  function resolveBackgroundSpec(command: string) {
+    const spec = shell.resolve({ command, onExpiry: 'none' } as any)
+    ;(spec as { sandboxPolicy?: { mode: string } }).sandboxPolicy = { mode: 'danger-full-access' }
+    return spec
+  }
   return {
     async exec(cmdStr: string) {
       try {
-        const r = await shell.run(resolveSpec(cmdStr))
+        const spec = resolveSpec(cmdStr)
+        let r: any
+        // 0.2.1-rc.2 起 execute(spec): Promise<ShellExecution>；await 同时兼容 0.2.0-rc.1 的同步 handle
+        if (typeof (shell as any).execute === 'function') {
+          const execution = await (shell as any).execute(spec)
+          r = await execution.result()
+        } else if (typeof (shell as any).run === 'function') {
+          r = await (shell as any).run(spec)
+        } else {
+          throw new Error('shell service has neither execute nor run method')
+        }
         return {
           code: r.exitCode === null || r.exitCode === undefined ? -1 : r.exitCode,
           stdout: (r.stdout && r.stdout.text) || '',
@@ -153,7 +199,21 @@ function makeRunner(shell: ShellExecutor, ctx: Context): Runner {
       return this.exec(cmdLine(file, args) + ' | iconv -f ' + shq(enc) + ' -t UTF-8')
     },
     spawnArgs(file: string, args: string[]) {
-      const proc = shell.start(resolveSpec(cmdLine(file, args)))
+      const cmd = cmdLine(file, args)
+      // 0.2.1-rc.2 起 execute() 返回 Promise<ShellProcess>；spawnArgs 接口保持同步，
+      // 用句柄盒承接（旧宿主同步 handle 经 Promise.resolve 原样通过），就绪前 readOutput 为空
+      let proc: any = null
+      Promise.resolve(
+        typeof (shell as any).execute === 'function'
+          ? (shell as any).execute(resolveBackgroundSpec(cmd))
+          : (shell as any).start(resolveSpec(cmd)),
+      )
+        .then((h: any) => {
+          proc = h
+        })
+        .catch(() => {
+          proc = null
+        })
       return {
         pid: null, // shell 服务不暴露 OS pid；孤儿清理靠 kill()（D2-1）
         readOutput() {
@@ -165,7 +225,8 @@ function makeRunner(shell: ShellExecutor, ctx: Context): Runner {
           }
         },
         done() {
-          return proc.exitCode !== null
+          if (!proc) return false
+          return proc.status ? proc.status !== 'running' : proc.exitCode !== null
         },
         kill() {
           try {
@@ -336,6 +397,24 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     expTypeLearning: config.expTypeLearning !== false,
     // M3（issue#7 子代理权限）：默认 readonly（安全边界）——子代理只读查询，禁 lab_ctl 控制
     subagentPolicy: (config.subagentPolicy as 'readonly' | 'restricted' | 'full' | undefined) || 'readonly',
+    // ── #21 多设备监控（SshRunner 远程设备切换）──
+    devices: Array.isArray(config.devices) && config.devices.length > 0 ? config.devices.slice() : DEFAULT_DEVICES.slice(),
+    currentDevice: typeof config.currentDevice === 'string' ? config.currentDevice : 'local',
+    swanlab: {
+      enabled: config.swanlab?.enabled ?? false,
+      apiKey: typeof config.swanlab?.apiKey === 'string' ? config.swanlab.apiKey : '',
+      project: typeof config.swanlab?.project === 'string' && config.swanlab.project ? config.swanlab.project : 'lab-monitor',
+      workspace: typeof config.swanlab?.workspace === 'string' ? config.swanlab.workspace : '',
+      logDir: typeof config.swanlab?.logDir === 'string' ? config.swanlab.logDir : '',
+      triggerMode: (config.swanlab?.triggerMode === 'auto' || config.swanlab?.triggerMode === 'scheduled') ? config.swanlab.triggerMode : 'manual',
+      scheduleIntervalMs: typeof config.swanlab?.scheduleIntervalMs === 'number' && config.swanlab.scheduleIntervalMs > 0 ? config.swanlab.scheduleIntervalMs : 60000,
+      conditions: {
+        allowedStates: Array.isArray(config.swanlab?.conditions?.allowedStates) ? config.swanlab!.conditions!.allowedStates!.slice() : ['done', 'crashed'],
+        minDurationSec: typeof config.swanlab?.conditions?.minDurationSec === 'number' ? config.swanlab!.conditions!.minDurationSec : 10,
+        includeTypes: Array.isArray(config.swanlab?.conditions?.includeTypes) ? config.swanlab!.conditions!.includeTypes!.slice() : [],
+        requireTags: Array.isArray(config.swanlab?.conditions?.requireTags) ? config.swanlab!.conditions!.requireTags!.slice() : [],
+      },
+    },
   }
 
   // ── 运行时 watchlist（2026-08-20：用户配置静态基线 ∪ lab_ctl watch 动态注册）──
@@ -369,10 +448,13 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   const backendState: {
     backend: SamplerBackend | null
     platform: string
+    runner: Runner | null
+    sshRunner: SshRunner | null
+    currentDevice: string
     lastSnap: RawSnapshot | null
     stopped: boolean
     psAt: number
-  } = { backend: null, platform: 'unknown', lastSnap: null, stopped: false, psAt: 0 }
+  } = { backend: null, platform: 'unknown', runner: null, sshRunner: null, currentDevice: 'local', lastSnap: null, stopped: false, psAt: 0 }
   // 最近一次 5s 周期聚合（Phase B3；snapshot RPC 在两次周期之间时取最近值，5s 粒度近似）
   let lastGroupStats: GroupStats | null = null
   let lastSystemStats: SystemStats | null = null
@@ -517,6 +599,10 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       .map((a) => `[${a.level}:${a.rule}] ${a.msg}` + (a.actions && a.actions.length ? '\n建议: ' + a.actions.join(' / ') : ''))
       .join('\n\n')
     return {
+      // 0.1.5 会话迁移器要求 agent/inbox/spliced 的 inserted 必须是完整 UserMessage
+      //（id + role 必填）；缺失会让整个会话无法迁移——postmortem 见 RULES 2026-09-10
+      id: randomUUID(),
+      role: 'user',
       content: [{ type: 'text', text: `⚠️ [Lab Monitor 异常告警]\n${text}` }],
       source: { kind: 'plugin', plugin: 'lab-monitor', form: 'notice', summary: `Lab Monitor: ${alerts.length} 条告警` },
     }
@@ -905,7 +991,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         backendState.psAt = Date.now()
         // 1.2：5 列增强表（pid ppid pcpu rss args）——状态机组集合与聚合输入同源
         // （WSL：Linux pid 空间；backend procs 表是 Windows tasklist pid，不可做组差集）
-        const psOut = await runner.exec('ps -eo pid=,ppid=,pcpu=,rss=,args= --no-headers 2>/dev/null')
+        const activeRunner = backendState.runner || runner
+        const psOut = await activeRunner.exec('ps -eo pid=,ppid=,pcpu=,rss=,args= --no-headers 2>/dev/null')
         const procs = parsePs(psOut)
         machine.tick(procs)
         const curRun = machine.cur()
@@ -989,10 +1076,89 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   }
   ctx.interval(sampleTick, cfg.sampleMs)
 
+  // ── #21 多设备监控切换 ──
+  async function switchDevice(targetDeviceId: string): Promise<{ ok: boolean; device: string; platform?: string; error?: string }> {
+    const t0 = Date.now()
+    console.log('[lab-monitor] 切换监控设备 -> ' + targetDeviceId)
+    let devConfig: DeviceConfig | null = null
+    if (targetDeviceId !== 'local') {
+      devConfig = cfg.devices.find((d) => d.id === targetDeviceId) || null
+      if (!devConfig) {
+        return { ok: false, device: cfg.currentDevice, error: '未找到设备配置: ' + targetDeviceId }
+      }
+    }
+
+    // 1. 平稳归档旧设备在途实验为 switched_away（避免误报 experiment-crash 告警，AC-3）
+    const switchedRuns = machine.switchAwayAll('switched_away')
+    if (switchedRuns.length) {
+      console.log('[lab-monitor] 平稳归档 ' + switchedRuns.length + ' 个在途实验为 switched_away')
+    }
+
+    // 2. 关闭旧后端与 SSH 资源
+    try {
+      if (backendState.backend) await backendState.backend.close()
+      if (backendState.sshRunner) {
+        await backendState.sshRunner.close()
+        backendState.sshRunner = null
+      }
+    } catch (e) {
+      console.warn('[lab-monitor] 关闭旧后端出错:', e)
+    }
+
+    // 3. 重置差分基线与聚合缓存
+    backendState.lastSnap = null
+    backendState.psAt = 0
+    lastGroupStats = null
+    lastSystemStats = null
+    recentWindow.length = 0
+
+    // 4. 创建并启动新设备采样
+    if (targetDeviceId === 'local' || !devConfig) {
+      backendState.runner = runner
+      backendState.currentDevice = 'local'
+      try {
+        const res = await createBackend(runner, cfg.backendMode)
+        backendState.backend = res.backend
+        backendState.platform = res.platform
+        cfg.currentDevice = 'local'
+        persistState()
+        const ms = Date.now() - t0
+        console.log('[lab-monitor] 切换到本地设备成功 (耗时 ' + ms + 'ms)')
+        return { ok: true, device: 'local', platform: res.platform }
+      } catch (e) {
+        return { ok: false, device: 'local', error: (e as Error).message }
+      }
+    } else {
+      const ssh = new SshRunner(devConfig, runner)
+      const remoteBackend = new LinuxBackend(ssh)
+      const probe = await remoteBackend.probe()
+      if (!probe.ok) {
+        console.warn('[lab-monitor] 远程设备 ' + targetDeviceId + ' probe 失败:', probe.reason)
+      }
+      backendState.sshRunner = ssh
+      backendState.runner = ssh
+      backendState.backend = remoteBackend
+      backendState.platform = 'linux'
+      backendState.currentDevice = targetDeviceId
+      cfg.currentDevice = targetDeviceId
+      persistState()
+      const ms = Date.now() - t0
+      console.log('[lab-monitor] 切换到远程设备 ' + targetDeviceId + ' 成功 (耗时 ' + ms + 'ms)')
+      return { ok: true, device: targetDeviceId, platform: 'linux' }
+    }
+  }
+
   // 后台初始化：探测 + 建后端 + dmon 流
   let streamTask: Promise<void> | null = null
   async function startBackend() {
     try {
+      if (cfg.currentDevice && cfg.currentDevice !== 'local') {
+        const sw = await switchDevice(cfg.currentDevice)
+        if (sw.ok) return
+        console.warn('[lab-monitor] 启动时切换到配置设备失败，回退本地:', sw.error)
+      }
+      backendState.runner = runner
+      backendState.currentDevice = 'local'
       const res = await createBackend(runner, cfg.backendMode)
       backendState.backend = res.backend
       backendState.platform = res.platform
@@ -1031,6 +1197,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           } catch (e) {
             /* ignore */
           }
+        }
+        if (backendState.sshRunner) {
+          try { backendState.sshRunner.close().catch(() => {}) } catch (e) {}
         }
         if (backendState.backend) {
           try {
@@ -1186,6 +1355,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       thresholdOverrides: thresholds.getOverrides(),
       // #14 监控目标模式透出（配置页下拉显示当前值）
       backendMode: cfg.backendMode,
+      // #21 多设备监控当前设备与设备列表
+      currentDevice: backendState.currentDevice || 'local',
+      devices: (cfg.devices || []).map((d) => ({ id: d.id, label: d.label, host: d.host })),
       enabled,
       // M1（issue#5）：通知策略当前生效值透出（client 设置页展示 + Agent lab_status 可见）
       notify: {
@@ -1202,6 +1374,13 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       },
       callCount,
       ui: { betterSidebarVisible: uiVisible() },
+      swanlab: {
+        enabled: cfg.swanlab?.enabled ?? false,
+        apiKeyConfigured: !!(cfg.swanlab?.apiKey && cfg.swanlab.apiKey.trim().length > 0),
+        project: cfg.swanlab?.project,
+        workspace: cfg.swanlab?.workspace,
+        triggerMode: cfg.swanlab?.triggerMode || 'manual',
+      },
     }
     if (base.degraded) snap.degraded = base.degraded
     // 2026-08-22（P2 实验历史）：history 变化惰性持久化（新归档 ≤1 轮询周期落盘；正常零写入）
@@ -1288,7 +1467,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           // 2026-08-22（P2 实验历史）：已结束实验记录持久化（ended 投影，重启恢复）
           history: Schema.array(Schema.object({
             runId: Schema.string(),
-            state: Schema.union([Schema.const('done'), Schema.const('crashed'), Schema.const('aborted')]),
+            state: Schema.union([Schema.const('done'), Schema.const('crashed'), Schema.const('aborted'), Schema.const('switched_away')]),
             cmd: Schema.any(),
             cmdFeature: Schema.any(),
             startTs: Schema.number(),
@@ -1299,6 +1478,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             fingerprint: Schema.any(),
             // #17 衍生（2026-08-27）：发起 agent 持久化（重启恢复后路由仍绑定发起会话）
             agentId: Schema.any(),
+            deviceId: Schema.any(),
+            swanlab: Schema.any(),
           })).default([]),
           // ── M1（issue#5 告警通知，docs/research/22 §6.1）──
           alertNotify: Schema.union([Schema.const('off'), Schema.const('notice'), Schema.const('wake')]).default('notice'),
@@ -1318,6 +1499,19 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           expTypeLearning: Schema.boolean().default(true),
           // M3（issue#7 子代理权限）
           subagentPolicy: Schema.union([Schema.const('readonly'), Schema.const('restricted'), Schema.const('full')]).default('readonly'),
+          // #21 多设备监控持久化
+          devices: Schema.array(Schema.object({
+            id: Schema.string(),
+            label: Schema.any(),
+            host: Schema.string(),
+            port: Schema.any(),
+            user: Schema.string(),
+            keyPath: Schema.any(),
+            pollMs: Schema.any(),
+          })).default([]),
+          currentDevice: Schema.string().default('local'),
+          // SwanLab 配置持久化
+          swanlab: Schema.any().default({}),
         })
         settingsScope = settingsSvc.register('lab-monitor', persistSchema, { applies: 'live' })
         // 读回持久化基线（重启后 lab_ctl 改的阈值 / watch 动态注册 / 标签不再丢失）
@@ -1330,6 +1524,15 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         // #14 监控目标模式恢复（settings.yaml backendMode 或持久化值）
         if (stored && (stored.backendMode === 'windows' || stored.backendMode === 'linux' || stored.backendMode === 'windows-native')) {
           cfg.backendMode = stored.backendMode
+        }
+        // #21 多设备配置与当前设备恢复
+        if (stored && Array.isArray((stored as any).devices) && (stored as any).devices.length > 0) {
+          cfg.devices = (stored as any).devices
+        } else {
+          cfg.devices = DEFAULT_DEVICES.slice()
+        }
+        if (stored && typeof (stored as any).currentDevice === 'string') {
+          cfg.currentDevice = (stored as any).currentDevice
         }
         if (stored && Array.isArray(stored.watchProcs)) {
           cfg.watchProcs = stored.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
@@ -1363,6 +1566,18 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         if (stored && typeof stored.expTypeLearning === 'boolean') cfg.expTypeLearning = stored.expTypeLearning
         // M3（issue#7）：子代理权限策略读回（默认 readonly 保守）
         if (stored && (stored.subagentPolicy === 'readonly' || stored.subagentPolicy === 'restricted' || stored.subagentPolicy === 'full')) cfg.subagentPolicy = stored.subagentPolicy
+        // SwanLab 配置读回
+        if (stored && (stored as Record<string, unknown>).swanlab && typeof (stored as Record<string, unknown>).swanlab === 'object') {
+          const sw = (stored as Record<string, unknown>).swanlab as Partial<SwanLabConfig>
+          cfg.swanlab = {
+            ...cfg.swanlab,
+            ...sw,
+            conditions: {
+              ...cfg.swanlab?.conditions,
+              ...(sw.conditions || {}),
+            },
+          }
+        }
         // 2026-08-22（P2 实验历史）：恢复已结束实验记录（settings 持久化 → 状态机 history）
         if (stored && Array.isArray(stored.history) && typeof machine.restoreEnded === 'function') {
           machine.restoreEnded(stored.history as never)
@@ -1382,6 +1597,12 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             if (v && (v.backendMode === 'auto' || v.backendMode === 'windows' || v.backendMode === 'linux')) {
               cfg.backendMode = v.backendMode
             }
+            if (v && Array.isArray((v as any).devices) && (v as any).devices.length > 0) {
+              cfg.devices = (v as any).devices
+            }
+            if (v && typeof (v as any).currentDevice === 'string' && (v as any).currentDevice !== cfg.currentDevice) {
+              void switchDevice((v as any).currentDevice)
+            }
             if (v && Array.isArray(v.watchProcs)) {
               cfg.watchProcs = v.watchProcs.filter((k): k is string => typeof k === 'string' && k.length > 0)
             }
@@ -1398,6 +1619,19 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             if (v && typeof v.notifyThrottleMs === 'number' && v.notifyThrottleMs > 0) cfg.notifyThrottleMs = v.notifyThrottleMs
             if (v && typeof v.escalateAfterSec === 'number') cfg.escalateAfterSec = v.escalateAfterSec
             if (v && typeof v.broadcast === 'boolean') cfg.broadcast = v.broadcast
+            // SwanLab 配置热更新
+            if (v && (v as Record<string, unknown>).swanlab && typeof (v as Record<string, unknown>).swanlab === 'object') {
+              const sw = (v as Record<string, unknown>).swanlab as Partial<SwanLabConfig>
+              cfg.swanlab = {
+                ...cfg.swanlab,
+                ...sw,
+                conditions: {
+                  ...cfg.swanlab?.conditions,
+                  ...(sw.conditions || {}),
+                },
+              }
+              setupScheduledSync()
+            }
           })
         }
         console.log('[lab-monitor] 阈值/watchlist/标签持久化已启用（settings 命名空间 lab-monitor）')
@@ -1428,6 +1662,9 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         thresholdOverrides: thresholds.getOverrides(),
         // #14 监控目标模式持久化
         backendMode: cfg.backendMode,
+        // #21 多设备配置与当前监控设备持久化
+        devices: cfg.devices && cfg.devices.length > 0 ? cfg.devices : DEFAULT_DEVICES,
+        currentDevice: cfg.currentDevice,
         watchProcs: watchSet(),
         tags: tagSet(),
         // #17 增强：显式跟踪规则持久化
@@ -1435,7 +1672,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         // 2026-08-22（P2）：ended 投影持久化（倒序投影与 snapshot() 一致；重启 restoreEnded 恢复）
         history: (machine.history || []).map((r) => ({
           runId: r.runId,
-          state: r.state === 'done' ? 'done' : r.state === 'aborted' ? 'aborted' : 'crashed',
+          deviceId: r.deviceId || 'local',
+          state: r.state === 'done' ? 'done' : r.state === 'aborted' ? 'aborted' : r.state === 'switched_away' ? 'switched_away' : 'crashed',
           cmd: r.cmd,
           cmdFeature: r.cmdFeature,
           startTs: r.startTs,
@@ -1447,6 +1685,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           // #17 衍生（2026-08-27）：发起 agent 持久化——重启后恢复的历史 run 仍绑定发起会话，
           // 通知路由不因 agentId=null 退回 roots() 广播（原缺省导致误判 crash 告警广播唤醒全部 root）
           agentId: r.agentId ?? null,
+          swanlab: r.swanlab ? { ...r.swanlab } : undefined,
         })),
         // M1（issue#5）：通知配置持久化
         alertNotify: cfg.alertNotify,
@@ -1461,6 +1700,8 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         expTypeLearning: cfg.expTypeLearning,
         // M3（issue#7）：子代理权限策略持久化
         subagentPolicy: cfg.subagentPolicy,
+        // SwanLab 配置持久化
+        swanlab: cfg.swanlab,
       })
       lastPersistedEndKey = endKey
     } catch (e) {
@@ -1562,8 +1803,12 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     persistState() // 2026-08-20：P2 2' —— 阈值写回 settings 持久化（重启不丢失）
     return { ok: true, applied: thresholds.get() }
   }
-  function rpcControl(args?: { action?: string; mode?: string; runId?: string | null; rule?: string | null; alertNotify?: string; escalateAfterSec?: number; notifyThrottleMs?: number; thresholds?: Partial<Record<string, number>>; thresholdOverrides?: ThresholdOverrides }) {
+  function rpcControl(args?: { action?: string; mode?: string; device?: string; target?: string; runId?: string | null; rule?: string | null; alertNotify?: string; escalateAfterSec?: number; notifyThrottleMs?: number; thresholds?: Partial<Record<string, number>>; thresholdOverrides?: ThresholdOverrides }): Record<string, unknown> | Promise<Record<string, unknown>> {
     const action = args && args.action
+    if (action === 'switch-device' || action === 'device') {
+      const target = (args && (args.target || args.device)) || 'local'
+      return switchDevice(String(target)).then((res) => ({ state: 'device-switched', ...res }))
+    }
     if (action === 'start') { enabled = true; emitLab('lab/status-flip', { enabled: true }) }
     else if (action === 'pause') { enabled = false; emitLab('lab/status-flip', { enabled: false }) }
     else if (action === 'resume') { enabled = true; emitLab('lab/status-flip', { enabled: true }) }
@@ -1707,13 +1952,45 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     return { ok: true, state: 'list', remaining: machine.history.length }
   }
 
+  async function rpcSwanLabSync(a: { runId?: string | null; all?: boolean; force?: boolean; config?: Partial<SwanLabConfig> }) {
+    const swanlabCfg: SwanLabConfig = {
+      ...cfg.swanlab,
+      ...(a.config || {}),
+    }
+
+    if (a.runId) {
+      const target = machine.all().find((r) => r.runId === a.runId) || machine.history.find((r) => r.runId === a.runId)
+      if (!target) {
+        return { ok: false, error: 'Run not found: ' + a.runId }
+      }
+      const res = await syncRunToSwanLab(target, {
+        config: swanlabCfg,
+        stateMachine: machine,
+        ring,
+        persistState,
+        force: a.force ?? true,
+      })
+      return res
+    } else {
+      const runs = machine.history
+      const res = await syncAllEligibleRuns(runs, {
+        config: swanlabCfg,
+        stateMachine: machine,
+        ring,
+        persistState,
+        force: a.force ?? false,
+      })
+      return { ok: true, ...res }
+    }
+  }
+
   // ── webServer HTTP 路由（替代动态版 harness.handle RPC）───────────────
   const API_BASE = '/lab-monitor/api'
   const apiHandlers: Record<string, (body: Record<string, unknown>) => unknown> = {
     snapshot: (body) => rpcSnapshot({ thresholds: body.thresholds as Partial<Record<string, number>> | undefined }),
     history: (body) => rpcHistory({ sinceMs: body.sinceMs as number | undefined, bucketMs: body.bucketMs as number | undefined }),
     setThresholds: (body) => rpcSetThresholds(body as Record<string, number>),
-    control: (body) => rpcControl({ action: body.action as string | undefined }),
+    control: (body) => rpcControl(body as never),
     advice: () => rpcAdvice(),
     // 2026-08-20（标签管理 UI）：浏览器端 lab_ctl tag 等效路由（add/remove/list）
     tag: (body) => rpcTag((body.tag || {}) as Record<string, unknown>),
@@ -1734,6 +2011,37 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     }),
     // #17 增强（2026-08-27）：浏览器端 lab_ctl track 等效路由（add/remove/list）
     track: (body) => rpcTrack((body.track || {}) as Record<string, unknown>),
+    device: async (body) => switchDevice(((body.target || body.device || 'local') as string)),
+    // SwanLab 同步 HTTP 接口
+    swanlabSync: async (body) => rpcSwanLabSync(body as never),
+  }
+
+  // ── P0（V1 CSRF 修复，2026-09-16）：HTTP 数据面写操作来源校验 + 请求体上限 ──
+  // 威胁模型：3080 仅绑 127.0.0.1（外网不可达），但用户浏览器运行在本机——任意
+  // 网页都能向 http://127.0.0.1:3080 发起跨站请求（CSRF）。浏览器对跨站 POST 强制
+  // 携带 Origin（页面不可伪造/剥离），Referer 兜底；二者皆无则为非浏览器客户端
+  // （curl/node 脚本），须显式携带 X-Lab-Monitor 头自证——跨站 fetch 无法在 不触发
+  // CORS 预检的前提下附加自定义头，而本接口不响应预检 → 实际请求永不发送。
+  // 读通道（GET 且无 body，如 forward-monitor 轮询）不经此校验。
+  const MAX_BODY_BYTES = 1 << 20 // 1 MiB（AF1：原先 body 无上限拼接 → OOM）
+  function isLocalOriginUrl(urlStr: string): boolean {
+    try {
+      const u = new URL(urlStr)
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
+      const h = u.hostname
+      return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]' || h.endsWith('.localhost')
+    } catch (e) {
+      return false // 非法 URL 一律拒绝
+    }
+  }
+  /** POST 来源校验：通过返回 null；拒绝返回原因字符串 */
+  function checkWriteSource(req: IncomingMessage): string | null {
+    const origin = req.headers.origin
+    const referer = req.headers.referer
+    if (origin) return isLocalOriginUrl(String(origin)) ? null : 'origin not allowed: ' + origin
+    if (referer) return isLocalOriginUrl(String(referer)) ? null : 'referer not allowed'
+    if (req.headers['x-lab-monitor'] === '1') return null
+    return 'missing Origin/Referer 或 X-Lab-Monitor 头'
   }
 
   function httpHandler(req: IncomingMessage, res: ServerResponse) {
@@ -1748,21 +2056,72 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
       res.writeHead(404, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: false, error: '未知方法: ' + method }))
       return
     }
+    // 单响应出口：任何路径只写一次响应，避免 destroy 触发的 error 处理器覆盖已发响应
+    let responded = false
+    function finish(code: number, payload: unknown): void {
+      if (responded) return
+      responded = true
+      res.writeHead(code, { 'Content-Type': 'application/json' }).end(JSON.stringify(payload))
+    }
+    // 强制 swanlabSync 仅允许 POST 方法（防 GET-CSRF）
+    if (method === 'swanlabSync' && req.method !== 'POST') {
+      finish(405, { ok: false, error: 'POST required for swanlabSync' })
+      return
+    }
+    // 仅 POST 为写通道（GET 无 body = 只读，转发器 GET 轮询不受影响）
+    if (req.method === 'POST') {
+      const deny = checkWriteSource(req)
+      if (deny) {
+        console.warn('[lab-monitor] 拒绝跨站写请求:', deny)
+        finish(403, { ok: false, error: 'forbidden: ' + deny })
+        return
+      }
+      // Content-Length 预检：声明体超限则完全不读取，直接拒绝并断开
+      const cl = Number(req.headers['content-length'])
+      if (Number.isFinite(cl) && cl > MAX_BODY_BYTES) {
+        finish(413, { ok: false, error: 'payload too large (>' + MAX_BODY_BYTES + 'B)' })
+        try { req.destroy() } catch (e) { /* 已断开 */ }
+        return
+      }
+    }
     let body = ''
+    let tooLarge = false
     req.on('data', (chunk: Buffer) => {
+      if (tooLarge || responded) return
       body += chunk.toString()
+      if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
+        tooLarge = true
+        finish(413, { ok: false, error: 'payload too large (>' + MAX_BODY_BYTES + 'B)' })
+        try { req.destroy() } catch (e) { /* 已断开 */ }
+      }
     })
     req.on('end', () => {
+      if (tooLarge || responded) return
       try {
         const parsed: Record<string, unknown> = body ? JSON.parse(body) : {}
+        // swanlabSync 强参数校验：禁止空参调用（直接 400，防盲触发）
+        if (method === 'swanlabSync') {
+          if (!body || !body.trim() || Object.keys(parsed).length === 0) {
+            finish(400, { ok: false, error: 'missing parameters for swanlabSync' })
+            return
+          }
+        }
         const result = handler(parsed)
-        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(result))
+        if (result && typeof (result as Promise<unknown>).then === 'function') {
+          ;(result as Promise<unknown>)
+            .then((r) => finish(200, r))
+            .catch((e) => finish(400, { ok: false, error: (e as Error).message }))
+        } else {
+          finish(200, result)
+        }
       } catch (e) {
-        res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: false, error: (e as Error).message }))
+        finish(400, { ok: false, error: (e as Error).message })
       }
     })
     req.on('error', () => {
-      res.writeHead(400).end()
+      // 已响应（含 413 主动拒绝）或已判定超限时不再覆盖响应
+      if (responded || tooLarge) return
+      finish(400, { ok: false, error: 'request error' })
     })
   }
 
@@ -1851,9 +2210,13 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
         toolsService.register(
           defineTool({
             name: 'lab_ctl',
-            description: '控制 Lab Monitor 监控/告警引擎（start/pause/resume/set-threshold/watch/tag/clear-alerts/history-manage）。护栏：只控制监控引擎，绝不触碰实验进程。',
+            description: '控制 Lab Monitor 监控/告警引擎（start/pause/resume/set-threshold/watch/tag/clear-alerts/history-manage/sync-swanlab）。护栏：只控制监控引擎，绝不触碰实验进程。',
             parameters: {
-              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch', 'tag', 'clear-alerts', 'set-notify', 'history-manage', 'backend-mode', 'track'], description: '操作类型（set-notify=设置告警通知策略；history-manage=实验历史管理；backend-mode=切换监控目标；track=显式注册实验跟踪规则）' },
+              action: { type: 'string', required: true, enum: ['start', 'pause', 'resume', 'set-threshold', 'watch', 'tag', 'clear-alerts', 'set-notify', 'history-manage', 'backend-mode', 'track', 'switch-device', 'sync-swanlab'], description: '操作类型（set-notify=设置告警通知策略；history-manage=实验历史管理；backend-mode=切换监控目标；track=显式注册实验跟踪规则；switch-device=切换监控设备；sync-swanlab=同步实验到 SwanLab）' },
+              device: {
+                type: 'string',
+                description: 'switch-device 时的监控目标设备 ID（"local" 或远程设备 id 如 "gpu220"）',
+              },
               keywords: {
                 type: 'array',
                 items: { type: 'string' },
@@ -1929,6 +2292,14 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
               keep: {
                 type: 'number',
                 description: 'history-manage clear 时可选：保留最近 N 条（默认 0=全清）',
+              },
+              all: {
+                type: 'boolean',
+                description: 'sync-swanlab 时可选：是否批量同步全部符合门控的已结束实验',
+              },
+              force: {
+                type: 'boolean',
+                description: 'sync-swanlab 时可选：是否强制重新同步（忽略已同步状态或门控条件）',
               },
               // #17 增强（2026-08-27）：track 参数（显式注册实验跟踪规则）
               track: {
@@ -2024,7 +2395,21 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
                 // 命中该命令的 bash 执行将无条件记为实验（explicit）并监控，不受 TRAIN_PATTERNS 限制
                 return sanitizeJson(rpcTrack(a.track && typeof a.track === 'object' ? (a.track as Record<string, unknown>) : (a as Record<string, unknown>))) as never
               }
-              return { ok: true, state: rpcControl({ action: a.action }).state } as never
+              if (a.action === 'switch-device') {
+                const target = String((a as Record<string, unknown>).device || 'local')
+                const res = await switchDevice(target)
+                return sanitizeJson({ state: 'device-switched', ...res }) as never
+              }
+              if (a.action === 'sync-swanlab') {
+                const res = await rpcSwanLabSync({
+                  runId: a.runId ?? null,
+                  all: (a as Record<string, unknown>).all === true,
+                  force: (a as Record<string, unknown>).force === true,
+                })
+                return sanitizeJson(res) as never
+              }
+              const ctrlRes = await rpcControl({ action: a.action })
+              return { ok: true, state: (ctrlRes as any).state } as never
             },
           }),
         ),
@@ -2150,7 +2535,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             agentId: sessionId,
             agentRole: isSub ? 'subagent' : 'root',
             parentId: (header && header.parentSession) || null,
-          }, { explicit: true })
+          }, { explicit: true, deviceId: backendState.currentDevice || 'local' })
           if (sessionId) touchAgentRun(sessionId, run.runId)
           console.log('[lab-monitor] 显式跟踪命中:', trackHit.label, '| runId=', run.runId, '| agent=', sessionId || 'none', isSub ? '(subagent)' : '', '| cmd=', String(cmd).slice(0, 80))
         } else {
@@ -2164,7 +2549,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             agentId: sessionId,
             agentRole: isSub ? 'subagent' : 'root',
             parentId: (header && header.parentSession) || null,
-          })
+          }, { deviceId: backendState.currentDevice || 'local' })
           if (sessionId) touchAgentRun(sessionId, run.runId)
           console.log('[lab-monitor] 实验开始命中:', feature, '| runId=', run.runId, '| agent=', sessionId || 'none', isSub ? '(subagent)' : '', '| cmd=', String(cmd).slice(0, 80))
         }
@@ -2208,6 +2593,55 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     }
   }
   ctx.on('tools/result', resultHandler as never)
+
+  // ── SwanLab 定时与生命周期调度 ──────────────────────────────────────────
+  let scheduledSyncTimer: NodeJS.Timeout | null = null
+  function setupScheduledSync() {
+    if (scheduledSyncTimer) {
+      clearInterval(scheduledSyncTimer)
+      scheduledSyncTimer = null
+    }
+    if (cfg.swanlab?.triggerMode === 'scheduled') {
+      const interval = cfg.swanlab.scheduleIntervalMs || 60000
+      scheduledSyncTimer = setInterval(() => {
+        void syncAllEligibleRuns(machine.history, {
+          config: cfg.swanlab,
+          stateMachine: machine,
+          ring,
+          persistState,
+        })
+      }, interval)
+    }
+  }
+
+  setupScheduledSync()
+
+  if (typeof ctx.on === 'function') {
+    ctx.on('dispose' as never, (() => {
+      if (scheduledSyncTimer) {
+        clearInterval(scheduledSyncTimer)
+        scheduledSyncTimer = null
+      }
+    }) as never)
+  }
+
+  // 自动触发模式（triggerMode === 'auto'）：实验结束时触发同步
+  labListeners.push((ev) => {
+    if (ev.type === 'lab/experiment-end' && ev.runId) {
+      if (cfg.swanlab?.triggerMode === 'auto') {
+        const targetRun = machine.history.find((r) => r.runId === ev.runId)
+        if (targetRun) {
+          void syncRunToSwanLab(targetRun, {
+            config: cfg.swanlab,
+            stateMachine: machine,
+            ring,
+            persistState,
+            force: false,
+          })
+        }
+      }
+    }
+  })
 
   console.log('[lab-monitor] 核心引擎已启动（采样 ' + cfg.sampleMs + 'ms / ps ' + PS_INTERVAL_MS + 'ms）')
 }

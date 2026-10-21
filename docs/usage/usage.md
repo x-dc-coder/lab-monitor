@@ -137,7 +137,13 @@ lab_ctl history-manage op=clear keep=5
 - `POST /lab-monitor/api/snapshot|history|setThresholds|control|advice|tag|watch|historyManage`（webServer 注册时；
   `watch`/`historyManage` 为 V2.7/#10 新增路由）。
 - 与 `lab_status`/`lab_ctl` 同一数据源、同一契约（docs/reference/protocol.md 1.4）；`control` 与 `setThresholds` 与工具通道一致生效并持久化。
-- ⚠️ 该 HTTP 面**无鉴权**——**V2.6 实测**：Tailscale IP（100.64.0.2:13080）访问 `/lab-monitor/api/*` 超时不可达（`--trusted-host` 未暴露该端口），**当前暴露面 = localhost only**；若未来配置端口转发/SSE 开放，需先加鉴权（防御性 backlog）。
+- **访问策略（P0 安全修复，2026-09-16）**：端口仅绑 127.0.0.1（Tailscale 实测不可达），
+  但用户浏览器在本机——任意网页可跨站发请求（CSRF；2026-09-16 实证：跨站 `text/plain` POST
+  可静默暂停监控/清空告警/抹掉历史）。故 **POST 写通道**须通过来源校验：`Origin`/`Referer`
+  命中回环白名单（`127.0.0.1`/`localhost`/`*.localhost`/`::1`），**或**显式携带请求头
+  `X-Lab-Monitor: 1`（脚本/手测须自行加该头）；否则 403。**GET 只读**不校验
+  （`curl .../snapshot`、forward-monitor 轮询零改动）；请求体上限 1MiB（超限 413）。
+  面板已自带该头；SSE `/lab-monitor/events` 暂仍无鉴权（待修，安全清单 V3）。
 
 ## 8. 变更记录
 

@@ -17,7 +17,7 @@ lab-monitor 是 DSH 的科研实验监控插件（V2 正式插件）：采样 GP
 |---|---|---|
 | `lab_status` | 实时快照 | `brief:true` → 一行摘要（`[Lab Monitor] GPU0 6% · …`） |
 | `lab_advice` | 平衡引擎建议 | 无参；无告警时 `advice: []` |
-| `lab_ctl` | 控制/配置 | `action` 枚举：`start/pause/resume/set-threshold/watch/tag/clear-alerts/set-notify/history-manage` |
+| `lab_ctl` | 控制/配置 | `action` 枚举：`start/pause/resume/set-threshold/watch/tag/clear-alerts/set-notify/history-manage/backend-mode/track/switch-device` |
 | `lab_status_ro` | 子代理只读查询 | registerContinuableSetup 注入；子代理不可用 `lab_ctl`（guard，subagentPolicy 默认 readonly） |
 
 `lab_ctl` 常用示例：
@@ -29,6 +29,7 @@ lab_ctl set-notify alertNotify=wake escalateAfterSec=900
 lab_ctl history-manage op=clear keep=5
 lab_ctl track track={op:"add", label:"推理实验A", patterns:["python.*infer"]}   # #17 增强：显式指定命令作为实验监控
 lab_ctl clear-alerts rule=experiment-crash
+lab_ctl switch-device device=gpu220   # #21 增强：切换监控目标到远程设备（如 gpu220 或 local）
 ```
 
 ## 3. 实验识别规则（重要：避免误触发）
@@ -88,13 +89,30 @@ bash scripts/verify.sh  # 七组：typecheck/构建/目录/契约/verify-host/mo
 
 - 改 client 半后必须重跑 verify.sh（回归红线 B5）。
 - 运行时验证（host 改动需用户重启 DSH 生效）：`curl -s http://127.0.0.1:3080/lab-monitor/api/snapshot`
-  （HTTP 数据面，localhost only）。
+  （GET 只读，无需任何头；POST 写接口须带 `X-Lab-Monitor: 1` 头，见 §7）。
 - 真实会话端到端测试方案（SOP）参见 `docs/research/28-issue18-real-session-test.md`（含 CPU 纯计算防误报、裸解释器防误绑常驻服务、离线跨会话防广播、alertTargets 靶向投递 5 组场景）。
 
-## 7. HTTP 数据面
+## 7. HTTP 数据面（访问策略）
 
-`POST /lab-monitor/api/{snapshot|history|setThresholds|control|advice|tag|watch|historyManage}`
-（webServer 注册时；无鉴权，当前 localhost only——Tailscale 实测不可达）。
+路由：`POST|GET /lab-monitor/api/{snapshot|history|setThresholds|control|advice|tag|watch|historyManage|track}`。
+
+**访问策略（P0 安全修复，2026-09-16）**：端口仅绑 127.0.0.1（外网/Tailscale 不可达），
+但用户浏览器运行在本机——任意网页都能跨站发请求（CSRF）。故：
+
+- **POST（写通道）**：须通过来源校验之一——`Origin`（优先）或 `Referer`（兜底）
+  命中回环白名单（`127.0.0.1`/`localhost`/`*.localhost`/`::1`，任意端口）；
+  **或**显式携带请求头 `X-Lab-Monitor: 1`（跨站 fetch 无法在不触发 CORS 预检的前提下
+  附加自定义头，而本接口不响应预检 → 实际请求永不发送）。不满足 → 403。
+- **GET（只读，无 body）**：不校验——`curl -s .../snapshot` 与 forward-monitor 轮询零改动可用。
+- 请求体上限 1MiB，超限 → 413 并断开连接。
+- 面板（client.ts `apiCall`）已自带 `X-Lab-Monitor: 1` 头；**脚本/手测 POST 须自行加该头**：
+
+```bash
+curl -s -X POST -H 'Content-Type: application/json' -H 'X-Lab-Monitor: 1' \
+  -d '{"action":"pause"}' http://127.0.0.1:3080/lab-monitor/api/control
+```
+
+- SSE `GET /lab-monitor/events` 暂仍无鉴权/无连接上限（待修，安全清单 V3）。
 
 ## 8. 文档导航
 

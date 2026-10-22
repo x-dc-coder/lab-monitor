@@ -20,7 +20,7 @@
       "default": "./lib/index.js"
     },
     "./client": {
-      "types": "./lib/types/client/index.d.ts",
+      "types": "./lib/types/client.d.ts",
       "default": "./lib/client.js"
     },
     "./package.json": "./package.json"
@@ -81,8 +81,7 @@
   "scripts": {
     "build": "rm -rf lib && tsc -p tsconfig.build.json && tsdown",
     "typecheck": "tsc --noEmit",
-    "watch": "tsdown --watch",
-    "prepack": "pnpm build"
+    "watch": "tsdown --watch"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",

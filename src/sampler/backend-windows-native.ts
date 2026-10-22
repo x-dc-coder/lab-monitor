@@ -12,6 +12,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import type { ProbeResult, Runner, SamplerBackend, Snapshot } from './backend-interface.js'
 import { WindowsBackend } from './backend-windows.js'
+import { toWinPath } from './windows-paths.js'
 
 /** 原生 Windows 本地执行 runner：直接 spawn 命令（不经 WSL interop） */
 function localWinRunner(): Runner {
@@ -35,7 +36,7 @@ function localWinRunner(): Runner {
     },
     async execArgs(cmd: string, args: string[]) {
       try {
-        const out = execFileSync(cmd, args, { encoding: 'utf8', timeout: 10000 })
+        const out = execFileSync(toWinPath(cmd), args, { encoding: 'utf8', timeout: 10000 })
         return { code: 0, stdout: out, stderr: '' }
       } catch (e) {
         const err = e as { status?: number; stdout?: Buffer; stderr?: Buffer }
@@ -44,7 +45,7 @@ function localWinRunner(): Runner {
     },
     async execArgsEnc(cmd: string, args: string[], fromEncoding?: string) {
       try {
-        const out = spawnSync(cmd, args, { encoding: 'buffer', timeout: 10000 })
+        const out = spawnSync(toWinPath(cmd), args, { encoding: 'buffer', timeout: 10000 })
         const raw = out.stdout || Buffer.alloc(0)
         const text = fromEncoding === 'GBK' ? enc(raw) : raw.toString('utf8')
         return { code: out.status ?? (out.error ? 1 : 0), stdout: text, stderr: (out.stderr || '').toString('utf8') }
@@ -53,9 +54,13 @@ function localWinRunner(): Runner {
       }
     },
     // dmon 长驻流：spawn 子进程，增量读 stdout（对齐 WSL runner 的 spawnArgs 语义）
+    // 2026-10-22 崩溃修复：spawn 失败（ENOENT 等）走异步 error 事件——必须挂监听吞掉，
+    // 否则 Node 以未捕获异常打崩 DSH 宿主；failed 置位让 done() 立即真 → 走 EOF/退避/fallback 通道。
     spawnArgs(file: string, args: string[]) {
       let acc = ''
-      const child = spawn(file, args, { windowsHide: true })
+      let failed = false
+      const child = spawn(toWinPath(file), args, { windowsHide: true })
+      child.on('error', () => { failed = true })
       child.stdout.on('data', (d: Buffer) => { acc += d.toString('utf8') })
       child.stderr.on('data', () => { /* 忽略 stderr */ })
       return {
@@ -66,7 +71,7 @@ function localWinRunner(): Runner {
           return s
         },
         done(): boolean {
-          return child.exitCode !== null || child.signalCode !== null
+          return failed || child.exitCode !== null || child.signalCode !== null
         },
         kill(): void {
           try { child.kill() } catch (e) { /* 已退出 */ }

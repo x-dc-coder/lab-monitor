@@ -8,6 +8,12 @@
 export declare const NVIDIA_SMI = "/mnt/c/Windows/System32/nvidia-smi.exe";
 export declare const POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
 export declare const TASKLIST = "/mnt/c/Windows/System32/tasklist.exe";
+/**
+ * WSL interop 路径 → 原生 Windows 路径（'/mnt/c/x/y' → 'C:\\x\\y'）；非 /mnt/ 前缀原样返回。
+ * 原生 Windows（windows-native 后端）child_process 不识别 /mnt/c 形式——2026-10-22 崩溃复盘：
+ * spawn('/mnt/c/.../nvidia-smi.exe') ENOENT 且未挂 error 监听 → 未捕获异常打崩 DSH 宿主。
+ */
+export declare function toWinPath(p: string): string;
 /** 编码策略（t10 §4） */
 export declare const ENC: {
     readonly SMI: "ascii";

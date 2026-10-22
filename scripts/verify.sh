@@ -75,6 +75,9 @@ if timeout 30 node scripts/verify-multi-device.js >/dev/null 2>&1; then ok "veri
 echo "== [5h] SwanLab 同步方案全链路验证（verify-swanlab-sync.js，门控+脱敏+持久化+Mock） =="
 if timeout 30 node scripts/verify-swanlab-sync.js >/dev/null 2>&1; then ok "verify-swanlab-sync ALL PASS"; else bad "verify-swanlab-sync 失败"; fi
 
+echo "== [5i] 原生 Windows 后端安全验证（verify-win-native.js，路径翻译+spawn 容错+退避收敛） =="
+if timeout 40 node scripts/verify-win-native.js >/dev/null 2>&1; then ok "verify-win-native ALL PASS"; else bad "verify-win-native 失败"; fi
+
 if [ "$RUN_SAMPLER" -eq 1 ]; then
   echo "== [6] 真实采样实证（verify-sampler.js，GPU/interop 实测） =="
   if timeout 150 node scripts/verify-sampler.js >/dev/null 2>&1; then ok "verify-sampler 通过"; else bad "verify-sampler 失败"; fi

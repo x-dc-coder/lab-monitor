@@ -213,6 +213,26 @@
    - 真实设备联调：对现网 `gpu220`（RTX 3090 24G，Ubuntu 20.04）实测成功获取整卡指标与远端进程表，采样耗时 151ms（≤800ms，AC-1、AC-2、AC-5 达成）。
    - 自动化测试：`scripts/verify-multi-device.js` 16 项断言全绿，入 `verify.sh [5g]`。
 
+## P0 崩溃修复记录（2026-10-22，原生 Windows 后端 spawn 容错）
+
+> 触发：用户在 DSH 桌面端（原生 Windows，`process.platform==='win32'`）通过 GitHub 链接安装插件，
+> 启用即宿主整体崩溃——`spawn /mnt/c/Windows/System32/nvidia-smi.exe` ENOENT（errno -4058），
+> 崩溃点 `onErrorNT (node:internal/child_process)`（未捕获的 error 事件）。
+
+1. **根因**：`WindowsNativeBackend` 委托 `WindowsBackend` 复用 WSL interop 路径常量（`/mnt/c/...`），
+   原生 Windows `child_process` 不识别该形式；`localWinRunner().spawnArgs` 的 `spawn()` 未挂
+   `error` 监听 → ENOENT 走异步 error 事件 → Node 以未捕获异常打崩 DSH 宿主。
+2. **修复**：
+   - `windows-paths.ts` 新增 `toWinPath()`（`/mnt/<盘>/x` → `<盘>:\x`，非 /mnt/ 原样）；
+   - `localWinRunner` 的 `execArgs`/`execArgsEnc`/`spawnArgs` 全通道执行前翻译路径；
+   - `spawnArgs` 挂 `error` 监听吞掉事件（防宿主崩溃），`failed` 置位使 `done()` 立即真 →
+     走既有 EOF/退避/fallback 通道优雅降级。
+3. **顺带修复（潜伏 bug）**：`streamIterator` 的 `restarts` 计数器从未自增——spawn 持续失败
+   （无 NVIDIA 卡机器）时「≤3 次/5min 超限 → query-fallback」永不成立，每 ~500ms 无限重试；
+   补 `this.restarts++`，实测 1s/2s/4s 三轮退避后收敛（8.0s）。
+4. **验证**：`scripts/verify-win-native.js`（verify.sh `[5i]`）——toWinPath 六态、probe/snapshot
+   结构化降级、dmon 流失败收敛；全套 verify.sh 14 组全绿。
+
 ## V2 阶段未完成项（2026-08-20 对照 PLAN + 本清单）
 
 > 分类：A = 计划明确要求但代码未实现；B = 验收遗留（需真实环境/GUI）；C = 可选增强。

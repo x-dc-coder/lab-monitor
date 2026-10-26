@@ -9,6 +9,7 @@
 | 我想… | 看这份 |
 |---|---|
 | 知道 lab-monitor 怎么工作（架构） | `architecture/core.md`（引擎/出口/V2/M1-M3） |
+| 看独立 daemon 拆分设计（多 Agent / sink 扩展） | `architecture/standalone-daemon.md`（2026-10-27 已落地独立进程） |
 | 理解告警/通知/路由/权限设计 | `architecture/alert-notify.md` + `research/22-issue5-alert-notify-design.md` |
 | 用工具/面板/配置（人读完整手册） | `usage/usage.md` |
 | Agent 在项目内干活（速查） | `AGENTS.md`（项目根） |
@@ -28,6 +29,7 @@
 | `core.md` | 核心引擎 7 模块（sampler/ring/state-machine/balancer/proc-aggregator/exp-type）+ UI 出口四出口 + V2 形态 + **§12 M1/M2/M3 架构** |
 | `alert-notify.md` | 告警架构：严格分级（severity/urgency/trend/sustainedMs）+ 通知引擎 + 类型矩阵 + agentDir 路由 + 权限 guard + 消息链兜底 |
 | `ui-adapters.md` | 出口注册策略 / 优先级 / 互斥规则 / 能力降级矩阵 |
+| `standalone-daemon.md` | 守护进程化拆分：DSH 薄适配 + HTTP MCP + 两类 sink（实验平台 / 监控站点）。glm-5.3 起草，Atria 审阅，2026-10-26 |
 
 ### 📖 reference/ —— 参考说明（协议/数据/里程碑）
 

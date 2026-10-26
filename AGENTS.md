@@ -68,7 +68,7 @@ lab_ctl switch-device device=gpu220   # #21 增强：切换监控目标到远程
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `thresholds.{utilWarn,memWarn,tempWarn,pollMs,procTopN(5..1000),wGpu,wCpu,wMem}` | 80/80/50/5000/400/1/1/1 | 检测阈值 + 进程排序 |
+| `thresholds.{utilWarn,memWarn,tempWarn,pollMs,procTopN(5..1000),wGpu,wCpu,wMem}` | 90/95/85/5000/30/1/1/1 | 检测阈值 + 进程排序 |
 | `watchProcs` | `[]` | watchlist 关键词 |
 | `tags` | `[]` | 标签规则（`{id,label,patterns,kind,color}`） |
 | `history` | `[]` | 实验历史（含 `type/fingerprint` 投影） |

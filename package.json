@@ -5,6 +5,9 @@
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
+  "bin": {
+    "lab-monitord": "lib/types/daemon/main.js"
+  },
   "license": "MIT",
   "files": [
     "lib",
@@ -22,6 +25,10 @@
     "./client": {
       "types": "./lib/types/client.d.ts",
       "default": "./lib/client.js"
+    },
+    "./daemon": {
+      "types": "./lib/types/daemon/main.d.ts",
+      "default": "./lib/types/daemon/main.js"
     },
     "./package.json": "./package.json"
   },

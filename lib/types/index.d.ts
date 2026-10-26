@@ -19,6 +19,12 @@ import type { ExpType, SwanLabConfig } from './core/types.js';
 export { matchSyncConditions, sanitizeCmd, syncAllEligibleRuns, syncRunToSwanLab } from './sync/swanlab.js';
 /** host 半插件配置（schemastery schema 由外部声明；此处仅运行时默认） */
 export interface LabMonitorConfig {
+    /**
+     * K12（2026-10-27）：运行时模式。'in-process'（默认）= 现有进程内引擎；
+     * 'daemon' = 纯展示代理（不采样、不注册进程内 /lab-monitor/api 路由、绝不 spawn lab-monitord），
+     * webServer /lab-monitor/* 反代到 daemon（daemon.json 定位，回退 http://127.0.0.1:8730）。
+     */
+    runtimeMode: 'in-process' | 'daemon';
     /** 是否注入 labstatus 到 system prompt（默认关——KV 缓存友好；用 lab_status 工具按需查询） */
     promptInjection: boolean;
     /** #14 监控目标模式：auto=按平台（WSL→windows）/ windows / linux（强制切换） */

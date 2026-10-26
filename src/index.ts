@@ -16,6 +16,10 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { request as httpRequest } from 'node:http'
+import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import Schema from '@deepseek-ai/schemastery'
 
@@ -46,6 +50,12 @@ export { matchSyncConditions, sanitizeCmd, syncAllEligibleRuns, syncRunToSwanLab
 
 /** host 半插件配置（schemastery schema 由外部声明；此处仅运行时默认） */
 export interface LabMonitorConfig {
+  /**
+   * K12（2026-10-27）：运行时模式。'in-process'（默认）= 现有进程内引擎；
+   * 'daemon' = 纯展示代理（不采样、不注册进程内 /lab-monitor/api 路由、绝不 spawn lab-monitord），
+   * webServer /lab-monitor/* 反代到 daemon（daemon.json 定位，回退 http://127.0.0.1:8730）。
+   */
+  runtimeMode: 'in-process' | 'daemon'
   /** 是否注入 labstatus 到 system prompt（默认关——KV 缓存友好；用 lab_status 工具按需查询） */
   promptInjection: boolean
   /** #14 监控目标模式：auto=按平台（WSL→windows）/ windows / linux（强制切换） */
@@ -367,8 +377,105 @@ export const name = 'lab-monitor'
 /** 依赖声明：shell/timer/webServer/tools 硬依赖（与官方 better-sidebar 一致，inject 后属性直访）；settings/systemPrompt 可选 */
 export const inject = ['shell', 'timer', 'webServer', 'tools']
 
+// ── K12：DSH 展示代理（daemon 模式专用）────────────────────────────────────
+// 反代 /lab-monitor/* → daemon（daemon.json 定位，回退 http://127.0.0.1:8730）。
+// daemon 不可达 → 503 {ok:false,error:'daemon-unreachable'}，不抛进 cordis；每 30s 再探 /health 恢复代理。
+
+function readDaemonUrl(): string {
+  try {
+    const base = process.env.LAB_MONITOR_STATE_HOME || join(homedir(), '.local', 'state', 'lab-monitor')
+    const dj = JSON.parse(readFileSync(join(base, 'daemon.json'), 'utf8')) as { url?: unknown }
+    if (typeof dj.url === 'string' && dj.url) return dj.url
+  } catch {
+    /* 无/损坏 state 文件 → 回退默认端口 */
+  }
+  return 'http://127.0.0.1:8730'
+}
+
+function setupDaemonProxy(ctx: Context): void {
+  const state: { healthy: boolean } = { healthy: false }
+  function probe(): Promise<boolean> {
+    const url = readDaemonUrl()
+    return new Promise<boolean>((resolve) => {
+      let settled = false
+      const done = (v: boolean): void => {
+        if (settled) return
+        settled = true
+        resolve(v)
+      }
+      const req = httpRequest(url + '/health', { method: 'GET', timeout: 2000 }, (res) => {
+        res.resume()
+        done(res.statusCode === 200)
+      })
+      req.on('timeout', () => {
+        req.destroy()
+        done(false)
+      })
+      req.on('error', () => done(false))
+      req.end()
+    })
+  }
+  async function probeLoop(): Promise<void> {
+    const ok = await probe()
+    if (!ok && state.healthy) {
+      console.warn('[lab-monitor] daemon 不可达（展示代理降级 503）。检查: lab-monitord.sh status —— DSH 不负责拉起 daemon（K12）')
+    }
+    state.healthy = ok
+  }
+  void probeLoop()
+  const probeTimer = setInterval(() => void probeLoop(), 30000)
+  if (typeof probeTimer.unref === 'function') probeTimer.unref()
+  ctx.effect(
+    () => () => clearInterval(probeTimer),
+    'lab-monitor:daemon-proxy-probe',
+  )
+
+  const webServer = ctx.webServer as unknown as {
+    register(route: { kind: 'http'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void> }): () => void
+  }
+  webServer.register({
+    kind: 'http',
+    path: '/lab-monitor',
+    handler: (req: IncomingMessage, res: ServerResponse): void => {
+      if (!state.healthy) {
+        void probe().then((ok) => { state.healthy = ok }) // 不健康时惰性再探，恢复后 30s 内接回
+        res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'daemon-unreachable' }))
+        return
+      }
+      const base = readDaemonUrl()
+      const target = new URL(req.url || '/', base)
+      const headers: Record<string, string | string[] | undefined> = { ...req.headers }
+      // 服务器间转发附 token（GET 只读无影响；POST/SSE 须过 daemon 的 bearer 校验）
+      try {
+        const tokenBase = process.env.LAB_MONITOR_HOME || join(homedir(), '.config', 'lab-monitor')
+        const token = readFileSync(join(tokenBase, 'token'), 'utf8').trim()
+        if (token) headers['authorization'] = 'Bearer ' + token
+      } catch {
+        /* 无 token 文件：GET 只读仍可达 */
+      }
+      const preq = httpRequest(
+        target,
+        { method: req.method, headers: headers as Record<string, string> },
+        (pres) => {
+          res.writeHead(pres.statusCode || 502, pres.headers)
+          pres.pipe(res)
+        },
+      )
+      preq.on('error', () => {
+        if (!res.headersSent) res.writeHead(503, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'daemon-unreachable' }))
+      })
+      req.pipe(preq)
+    },
+  })
+  console.log('[lab-monitor] runtimeMode=daemon：展示代理已注册（/lab-monitor → ' + readDaemonUrl() + '）；不启动采样，不 spawn daemon（K12）')
+}
+
 export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
   const cfg: LabMonitorConfig = {
+    // K12：默认 in-process；daemon 模式只做展示代理（见 setupDaemonProxy）
+    runtimeMode: config.runtimeMode === 'daemon' ? 'daemon' : 'in-process',
     promptInjection: config.promptInjection ?? false,
     // #14 监控目标模式：默认 auto（按平台）
     backendMode: (config.backendMode === 'windows' || config.backendMode === 'linux' || config.backendMode === 'windows-native') ? config.backendMode : 'auto',
@@ -417,7 +524,14 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     },
   }
 
-  // ── 运行时 watchlist（2026-08-20：用户配置静态基线 ∪ lab_ctl watch 动态注册）──
+  // ── K12（2026-10-27 修订，绑定）：daemon 模式 = 纯展示代理 ──
+  // 不采样、不注册进程内 /lab-monitor/api 路由、绝不 spawn lab-monitord（DSH 不负责启动 daemon）。
+  if (cfg.runtimeMode === 'daemon') {
+    setupDaemonProxy(ctx)
+    return
+  }
+
+  // ── 运行时 watchlist（2026-08-20：用户配置静态基线 ∪ lab_ctl watch 动态合并）──
   // 动态注册仅存于本 fiber 生命周期（DSH 重启即还原）；持久化由 settings 段承担
   const runtimeWatch = new Set<string>()
   function watchSet(): string[] {

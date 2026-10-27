@@ -190,7 +190,7 @@ export interface TrackRule {
 
 /** M2（issue#6）：实验类型 8 类枚举（unknown=未识别，保守默认不猜） */
 export type ExpType = 'smoke' | 'regression' | 'full' | 'short' | 'long' | 'gpu-calc' | 'gpu-train' | 'unknown'
-/** M2（issue#6）：通知档位（策略引擎输出，design docs/research/22 §2） */
+/** M2（issue#6）：通知档位（策略引擎输出，design docs/架构设计/告警通知设计.md §2） */
 export type NotifyLevel = 'off' | 'notice' | 'wake'
 
 /** 告警（1.2：+evidence 进程证据；M1 issue#5：+severity/urgency/trend/sustainedMs 等多维扩展字段） */
@@ -206,7 +206,7 @@ export interface Alert {
   runId: string | null
   /** #21 多设备监控：告警发生所在设备 */
   deviceId?: string
-  // ── M1（issue#5 严格分级，docs/research/22 §1.2；全部可选防破坏，旧数据零感知）──
+  // ── M1（issue#5 严格分级，docs/架构设计/告警通知设计.md §1.2；全部可选防破坏，旧数据零感知）──
   /** 严重度 1-5（rule 权重表静态映射：crash=5、oom=4、thermal=4、io=3、imbalance=2、other=2）——M1 必填 */
   severity?: 1 | 2 | 3 | 4 | 5
   /** 紧迫性 1-3（rule 基准 + trend 推导：crash=3、oom/thermal=2、其余=1；rising→+1）——M1 必填 */

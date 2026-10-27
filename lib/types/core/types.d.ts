@@ -198,7 +198,7 @@ export interface TrackRule {
 }
 /** M2（issue#6）：实验类型 8 类枚举（unknown=未识别，保守默认不猜） */
 export type ExpType = 'smoke' | 'regression' | 'full' | 'short' | 'long' | 'gpu-calc' | 'gpu-train' | 'unknown';
-/** M2（issue#6）：通知档位（策略引擎输出，design docs/research/22 §2） */
+/** M2（issue#6）：通知档位（策略引擎输出，design docs/架构设计/告警通知设计.md §2） */
 export type NotifyLevel = 'off' | 'notice' | 'wake';
 /** 告警（1.2：+evidence 进程证据；M1 issue#5：+severity/urgency/trend/sustainedMs 等多维扩展字段） */
 export interface Alert {

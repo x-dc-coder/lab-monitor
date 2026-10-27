@@ -4,7 +4,7 @@
 > 读者：在本仓库内开发/验证/维护 lab-monitor 的 Agent。
 > 若你在**其他工作区**使用 lab-monitor 插件跑实验，工具用法见 `lab_ctl`/`lab_status` 的 schema 描述，
 > 或全局 `~/.dsh/AGENTS.md` 中的 lab-monitor 速查段（如已粘贴）。
-> 详细文档入口：`docs/README.md`（索引）→ `docs/usage/usage.md`（人读完整手册）。
+> 详细文档入口：`docs/README.md`（索引）→ `docs/使用手册/使用指南.md`（人读完整手册）。
 
 ## 1. 项目一句话
 
@@ -90,7 +90,7 @@ bash scripts/verify.sh  # 七组：typecheck/构建/目录/契约/verify-host/mo
 - 改 client 半后必须重跑 verify.sh（回归红线 B5）。
 - 运行时验证（host 改动需用户重启 DSH 生效）：`curl -s http://127.0.0.1:3080/lab-monitor/api/snapshot`
   （GET 只读，无需任何头；POST 写接口须带 `X-Lab-Monitor: 1` 头，见 §7）。
-- 真实会话端到端测试方案（SOP）参见 `docs/research/28-issue18-real-session-test.md`（含 CPU 纯计算防误报、裸解释器防误绑常驻服务、离线跨会话防广播、alertTargets 靶向投递 5 组场景）。
+- 真实会话端到端测试方案（SOP）参见 `docs/研读复盘/2026-09-09-真实会话测试.md`（含 CPU 纯计算防误报、裸解释器防误绑常驻服务、离线跨会话防广播、alertTargets 靶向投递 5 组场景）。
 
 ## 7. HTTP 数据面（访问策略）
 
@@ -117,9 +117,9 @@ curl -s -X POST -H 'Content-Type: application/json' -H 'X-Lab-Monitor: 1' \
 ## 8. 文档导航
 
 - **索引**：`docs/README.md`
-- **架构**：`docs/architecture/core.md`（引擎/出口/V2/M1-M3）、`docs/architecture/alert-notify.md`（告警架构）、
-  `docs/architecture/ui-adapters.md`（UI 出口）
-- **参考**：`docs/reference/data-model.md`、`docs/reference/protocol.md`、`docs/reference/milestones.md`
-- **使用**：`docs/usage/usage.md`（完整手册 + 变更记录）
-- **设计调研**：`docs/research/`（00-24/26/27；关键：`22-issue5-alert-notify-design.md` 综合设计）
-- **历史计划**：`docs/plan/`（PLAN-v1.1/1.3/1.4.5 归档）
+- **架构**：`docs/架构设计/系统架构.md`（引擎/出口/V2/M1-M3）、`docs/架构设计/告警通知.md`（告警架构）、
+  `docs/架构设计/界面适配.md`（UI 出口）
+- **参考**：`docs/架构设计/数据模型.md`、`docs/架构设计/协议契约.md`、`docs/迭代计划/验收里程碑.md`
+- **使用**：`docs/使用手册/使用指南.md`（完整手册 + 变更记录）
+- **设计定稿**：`docs/架构设计/告警通知设计.md`。过程实录在 `docs/研读复盘/`
+- **历史计划**：`docs/历史归档/`（计划 v1.1 / v1.3 / v1.4.5）

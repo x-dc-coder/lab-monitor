@@ -79,10 +79,10 @@
       "expected": "a JSON snapshot with ok:true containing GPU utilization, VRAM, CPU, memory and process entries"
     },
     "evidence": {
-      "install": "docs/WORKSHOP.md",
-      "failureIsolation": "docs/WORKSHOP.md",
+      "install": "docs/使用手册/工坊投稿.md",
+      "failureIsolation": "docs/使用手册/工坊投稿.md",
       "hotReload": null,
-      "remove": "docs/WORKSHOP.md"
+      "remove": "docs/使用手册/工坊投稿.md"
     }
   },
   "scripts": {

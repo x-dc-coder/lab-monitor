@@ -1,6 +1,6 @@
 # Lab Monitor（科研实验监控助手）
 
-> 依据：实施计划 v1.4.5（`docs/plan/PLAN-v1.4.5.md`，唯一事实来源；本文档及 docs/01~05 与其完全一致，修订需同步计划）
+> 依据：实施计划 v1.4.5（`docs/历史归档/2026-08-24-计划v1-4-5.md`，唯一事实来源；本文档及 docs/01~05 与其完全一致，修订需同步计划）
 
 ## 一句话定位
 
@@ -42,7 +42,7 @@
 └───────────────────────────────────────────────────────────────────────────┘   └──────┘  └──────┘
 ```
 
-（计划 §2 原图；详见 `docs/architecture/core.md`）
+（计划 §2 原图；详见 `docs/架构设计/系统架构.md`）
 
 ## 目录结构
 
@@ -51,7 +51,7 @@
 ├── README.md                        # 本文件：总览、架构图、快速开始
 ├── agent-preset/                    # v2「实验指挥」Agent 预设（★v2 启用，MVP 不实现——T3-3）
 │   └── lab-commander/               #   ✅ 2026-08-22：**不做预设**（用户决策），改为「使用文档」形式
-│                                   #     （`docs/usage/usage.md`：lab_status/lab_advice/lab_ctl 用法手册；
+│                                   #     （`docs/使用手册/使用指南.md`：lab_status/lab_advice/lab_ctl 用法手册；
 │                                   #      面板 UI / 阈值 / 标签 / 多轨语义；prompt 注入增强待讨论）
 │       ├── persona.md / RULES.md / tools.md
 ├── scripts/
@@ -81,7 +81,7 @@
 
 | 维度 | MVP（动态插件，本会话内验证） | v2（正式插件，生产化） |
 |---|---|---|
-| 加载方式 | `cordis_define` 动态插件（会话级，**单文件函数体**：plugin/host/index.js 与 plugin/client/index.js 读出即为 code.host/code.client，经 dev-run.sh 组装 + node --check；**P0 前先跑最小样例验证装载可行**——T1-3；v1.4.5 源码已归档 `docs/archive/v1.4.5-plugin/`） | 正式插件：npm 包（bundle 双半 + cordis.patch.yml）或本机 profile 预设行（`cordis:group` + `isolate: true` 包服务），跨会话共享；host 拆多文件、client 出口拆 adapters/ |
+| 加载方式 | `cordis_define` 动态插件（会话级，**单文件函数体**：plugin/host/index.js 与 plugin/client/index.js 读出即为 code.host/code.client，经 dev-run.sh 组装 + node --check；**P0 前先跑最小样例验证装载可行**——T1-3；v1.4.5 源码已归档 `docs/历史归档/v1-4-5插件源码/`） | 正式插件：npm 包（bundle 双半 + cordis.patch.yml）或本机 profile 预设行（`cordis:group` + `isolate: true` 包服务），跨会话共享；host 拆多文件、client 出口拆 adapters/ |
 | 生命周期 | 进程重启即失效 → 重启后重新 define（源码即文件，零丢失） | 随 DSH 组合行常驻 |
 | Agent 预设 | 不启用 | agent-preset/lab-commander 挂载为指挥层 |
 | UI 出口 | **核心层无 UI 也完整运行**；MVP 出口 = conversation.view 原生兜底（默认），better-sidebar 适配器为最后增量 | 出口可插拔：conversation.view（默认）+ better-sidebar（可选）+ webServer 自托管面板（可选） |
@@ -91,7 +91,7 @@
 
 ## 依赖声明事实来源（T3-2）
 
-**MVP 以源码内对象 `inject` 为事实来源，`package.json` 仅 v2 启用**。MVP 阶段插件依赖声明写在 client/host 源码返回对象上（client 半只 `inject: ['timer']`，betterSidebar 一律 `ctx.get()` 判空可选消费——见 `docs/architecture/core.md` 依赖声明纪律）。
+**MVP 以源码内对象 `inject` 为事实来源，`package.json` 仅 v2 启用**。MVP 阶段插件依赖声明写在 client/host 源码返回对象上（client 半只 `inject: ['timer']`，betterSidebar 一律 `ctx.get()` 判空可选消费——见 `docs/架构设计/系统架构.md` 依赖声明纪律）。
 
 ## 文档索引
 
@@ -99,26 +99,26 @@
 
 | 分类 | 文档 | 内容 |
 |---|---|---|
-| 📐 架构 | `docs/architecture/core.md` | 核心引擎 7 模块 + UI 出口四出口 + V2 + M1/M2/M3 架构（§12） |
-| 📐 架构 | `docs/architecture/alert-notify.md` | 告警通知架构（分级/引擎/类型矩阵/路由/权限/消息链） |
-| 📐 架构 | `docs/architecture/ui-adapters.md` | 出口注册策略 / 优先级 / 互斥规则 / 能力降级矩阵 |
-| 📖 参考 | `docs/reference/data-model.md` | 数据模型 + 状态机转移表 + RunRecord/Alert 字段 |
-| 📖 参考 | `docs/reference/protocol.md` | RPC/工具/事件契约（冻结版） |
-| 📖 参考 | `docs/reference/milestones.md` | P0/P1/P2 验收清单 |
-| 📗 使用 | `docs/usage/usage.md` | **使用手册**：工具用法 + 面板 UI + 配置 + 变更记录（V2.4-V2.9） |
+| 📐 架构 | `docs/架构设计/系统架构.md` | 核心引擎 7 模块 + UI 出口四出口 + V2 + M1/M2/M3 架构（§12） |
+| 📐 架构 | `docs/架构设计/告警通知.md` | 告警通知架构（分级/引擎/类型矩阵/路由/权限/消息链） |
+| 📐 架构 | `docs/架构设计/界面适配.md` | 出口注册策略 / 优先级 / 互斥规则 / 能力降级矩阵 |
+| 📖 参考 | `docs/架构设计/数据模型.md` | 数据模型 + 状态机转移表 + RunRecord/Alert 字段 |
+| 📖 参考 | `docs/架构设计/协议契约.md` | RPC/工具/事件契约（冻结版） |
+| 📖 参考 | `docs/迭代计划/验收里程碑.md` | P0/P1/P2 验收清单 |
+| 📗 使用 | `docs/使用手册/使用指南.md` | **使用手册**：工具用法 + 面板 UI + 配置 + 变更记录（V2.4-V2.9） |
 | 📗 使用 | `AGENTS.md` | **Agent 操作指引**（工具契约/实验识别/验证清单，自动加载） |
-| 🔬 设计调研 | `docs/research/` | 00-24/26/27（决策依据；关键：22-issue5-alert-notify-design.md） |
-| 📦 历史计划 | `docs/plan/` | PLAN-v1.1/1.3/1.4.5 归档 |
-| ⚠️ 已知问题 | `docs/research/18-known-issues.md` | 已知问题跟踪 |
+| 🔬 研读复盘 | `docs/研读复盘/` | 过程实录。现行告警设计见 `docs/架构设计/告警通知设计.md` |
+| 📦 历史计划 | `docs/历史归档/` | 计划 v1.1 / v1.3 / v1.4.5，以及 v1.4.5 插件源码 |
+| ⚠️ 已知问题 | `docs/使用手册/已知问题.md` | 已知问题跟踪 |
 
 ## 快速开始（MVP 阶段，已归档）
 
 > **v1.4.5 动态版资产（`plugin/`、`scripts/dev-run.sh`、`lab-monitor.define.json`）已于 2026-08-20
-> 归档至 `docs/archive/v1.4.5-plugin/`**（保留完整相对结构，可回溯）。原组装流程（D4-1 concat 六文件 +
+> 归档至 `docs/历史归档/v1-4-5插件源码/`**（保留完整相对结构，可回溯）。原组装流程（D4-1 concat 六文件 +
 > host/index.js → code.host、client/index.js → code.client，经 dev-run.sh 组装 + node --check 后
 > `cordis_define` → `cordis_run` 激活）仅供历史参考，V2 正式插件安装见下方「V2 正式插件」。
 > MVP 期验证流程（`cordis_inspect_self` 确认无 diagnostics；`scripts/verify.sh` CI 自测；P1/P2
-> 状态机端到端实证见 `scripts/e2e-host.js` 与 `docs/research/10-p1-e2e-test.md`）仍适用于 V2 回归。
+> 状态机端到端实证见 `scripts/e2e-host.js` 与 `docs/研读复盘/2026-08-24-端到端测试.md`）仍适用于 V2 回归。
 
 > 红线：禁止 Agent 重启 DSH 进程；动态插件一切副作用在 fiber 内（disposer），`cordis_stop`/`cordis_undefine` 即完全回滚。
 
@@ -171,8 +171,8 @@ src/                # TS 源码
 lib/                # 构建产物（index.js ESM + client.js ModuleLoader bundle + types/）
 cordis.patch.yml    # 插件挂载 patch（dsh plugin add 自动应用）
 scripts/            # verify.sh / verify-host.js / verify-sampler.js / e2e-host.js
-docs/research/12-v2-migration.md   # V2 迁移设计 + KV 缓存证据链
-docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存调研（2026-08-20）
+docs/研读复盘/2026-08-20-版本迁移.md   # V2 迁移设计 + KV 缓存证据链
+docs/研读复盘/2026-08-20-提示词架构.md  # prompt 传递与 KV 缓存调研（2026-08-20）
 ```
 
 ### V2.1 修复与增强（2026-08-20，plugin-specialist 诊断 + 用户需求）
@@ -195,7 +195,7 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 5. **watchProcs 进程注册**（需求）：`LabMonitorConfig.watchProcs: string[]` 静态配置 +
    `lab_ctl watch` 运行时动态注册；命中进程在快照 `watchedPids` 标记（面板置顶高亮预留）。
    `lab_status` 输出附加 `watchlist` 字段。
-6. **KV 缓存调研**（需求）：docs/research/17 结论——当前「promptInjection 默认关 + lab_status 工具」
+6. **KV 缓存调研**（需求）：docs/研读复盘/2026-08-20-提示词架构.md 结论——当前「promptInjection 默认关 + lab_status 工具」
    已是 KV 最优；如开启注入须「静态前缀 + 动态尾部(order 990) + 变化限频」三条约束。
 7. **诊断命令误报**（已知项）：`curl | python3 -c` 等管道命令命中 `python -c` 训练特征生成假实验，
    属检测策略权衡（收紧可能漏真实训练），待用户决策是否加管道排除规则。
@@ -304,14 +304,14 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
      `thresholds.pollMs`（1000–60000 钳制）驱动，`lab_ctl set-threshold pollMs=3000` 或面板改值即实时生效，
      无需改配置重启（此前 pollMs 是无处可配的死字段，排查发现）；
    - 顺带清理：`promptInjection`/`sampleMs` 确认在插件形态下不可配（无 config 槽位），维持现状记录在案。
-3. **使用文档（A1）**：`docs/usage/usage.md`——lab_status/lab_advice/lab_ctl 三工具完整用法手册（含 schema 实测）、
+3. **使用文档（A1）**：`docs/使用手册/使用指南.md`——lab_status/lab_advice/lab_ctl 三工具完整用法手册（含 schema 实测）、
    面板 UI 指引、阈值与告警语义表、多轨跟踪语义、watchlist/标签、settings.yaml 持久化说明、HTTP 数据面与
    鉴权警示、变更记录。
 4. **测试配套**：verify-host 新增 P1 断言段（ended[] 初始空/协议完整性/done/crashed/runId 精确匹配/
    aborted 归档/thresholds 透出 memWarn=80/pollMs=3000/enabled pause↔resume，13 断言）+ **修复 cap 场景测试盲区**
    （此前 FAKE.psLines 每循环覆盖导致 crash 抢先，上限 aborted 分支从未被覆盖——累积 pid 后真正触发）；
    mock-test 新增 5 条 P1 渲染断言（实验历史折叠头/轮询周期/启停状态/清除告警计数/保存按钮）；
-   `docs/reference/protocol.md` 升级 1.4（ended/thresholds/enabled 三字段契约）。
+   `docs/架构设计/协议契约.md` 升级 1.4（ended/thresholds/enabled 三字段契约）。
 
 > 注意：本段 **host 半改动（协议字段/状态机归档）需 DSH 重启生效**；client 半（实验历史块/控制面板/pollMs 驱动）浏览器刷新即生效。
 
@@ -360,7 +360,7 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 1. **实验历史管理（issue #10）**：`machine.removeRun/clearHistory`（splice 修复空洞 bug）+
    `rpcHistoryManage`（list/delete/clear+keep 最近 N）+ `lab_ctl history-manage` action +
    HTTP `/lab-monitor/api/historyManage` + 设置页「实验历史管理」块（列表/单删/清空保留 N）；删除/清空显式持久化。
-2. **M2 实验类型识别（issue #6，docs/research/22 §3）**：
+2. **M2 实验类型识别（issue #6，docs/架构设计/告警通知设计.md §3）**：
    - 新增 `src/core/exp-type.ts` `classifyExpType` **三层识别**：配置层（experimentTypes 规则）→ 自动层
      （EXP_TYPE_PATTERNS 8 类保守正则 + TRAIN_PATTERNS 门控 gpu-train）→ 学习层（fingerprint 历史时长 p90 ≥3600s → long）
      → 兜底 unknown 不猜；
@@ -374,7 +374,7 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 
 ### V2.9 M3 通知链路闭环（#7）+ 实测修复（2026-08-24）
 
-> 触发：issue #7（M3 子代理路由/权限/消息链）——issue #5 全链路最后阶段。docs/research/22 §4/§5 设计落地。
+> 触发：issue #7（M3 子代理路由/权限/消息链）——issue #5 全链路最后阶段。docs/架构设计/告警通知设计.md §4/§5 设计落地。
 
 1. **① 路由**（§4）：`RunRecord.agentId/agentRole/parentId` + pre-execute 读 `exec.agent`（session.id + header 判主/子）
    + agentDir 运行时索引（agent/created|disposed|status + rootAncestors 根祖先链 + isSubagentAgent）；
@@ -426,8 +426,8 @@ docs/research/17-kv-cache-prompt-architecture.md  # prompt 传递与 KV 缓存�
 
 | # | 未完成项 | 文档依据 | 现状 |
 |---|---|---|---|
-| A1 | ~~指挥层 Agent 预设 lab-commander~~ → **使用文档**（lab_status/lab_advice/lab_ctl 用法手册） | PLAN §0 三层组合第 2 层、§1 目录树 | ✅ **2026-08-22 落地（V2.5）**：`docs/usage/usage.md`——工具用法手册 + 面板 UI + 阈值/标签/多轨语义 + 持久化说明；用户决策不做 Agent 预设（插件功能未完善时预设无收益）；prompt 注入增强待讨论（KV 缓存影响） |
-| A1.5 | **告警通知闭环（issue #5 方案 M1→M3）** | docs/research/22-issue5-alert-notify-design.md（设计）+ 23 评审 + 25 架构 | ✅ **M1（2026-08-23，V2.7→V2.8）**：告警严格分级（Alert 8 扩展字段 severity/urgency/trend/sustainedMs/resource/origin/notifyLevel/escalate + rule 权重表 + warn 升级）+ 通知策略引擎（effectiveLevel→档位→resolveAction 全格→投递；节流/指纹去重/预算守卫/clear 重置）+ 配置面（settings 六键 + lab_ctl set-notify + 设置页 NotifyCard）+ TRAIN_PATTERNS 精度修复。**M2（#6）+ M3（#7）（2026-08-24，V2.8→V2.9）**：实验类型三层识别（配置>自动>学习>unknown 不猜）+ 类型×通知矩阵接线（gpu-train warn→wake 等）+ 子代理路由（发起者优先/根祖先知情/absent 升根）+ 权限（subagentPolicy + guard 拒 lab_ctl + lab_status_ro）+ 消息链兜底（异常结算/未领取超时升根）。**issue #5 全链路闭环**（剩余「prompt 注入形式」与 KV 缓存冲突，维持工具按需查询——17-kv-cache 决策） |
+| A1 | ~~指挥层 Agent 预设 lab-commander~~ → **使用文档**（lab_status/lab_advice/lab_ctl 用法手册） | PLAN §0 三层组合第 2 层、§1 目录树 | ✅ **2026-08-22 落地（V2.5）**：`docs/使用手册/使用指南.md`——工具用法手册 + 面板 UI + 阈值/标签/多轨语义 + 持久化说明；用户决策不做 Agent 预设（插件功能未完善时预设无收益）；prompt 注入增强待讨论（KV 缓存影响） |
+| A1.5 | **告警通知闭环（issue #5 方案 M1→M3）** | docs/架构设计/告警通知设计.md（设计）+ 23 评审 + 25 架构 | ✅ **M1（2026-08-23，V2.7→V2.8）**：告警严格分级（Alert 8 扩展字段 severity/urgency/trend/sustainedMs/resource/origin/notifyLevel/escalate + rule 权重表 + warn 升级）+ 通知策略引擎（effectiveLevel→档位→resolveAction 全格→投递；节流/指纹去重/预算守卫/clear 重置）+ 配置面（settings 六键 + lab_ctl set-notify + 设置页 NotifyCard）+ TRAIN_PATTERNS 精度修复。**M2（#6）+ M3（#7）（2026-08-24，V2.8→V2.9）**：实验类型三层识别（配置>自动>学习>unknown 不猜）+ 类型×通知矩阵接线（gpu-train warn→wake 等）+ 子代理路由（发起者优先/根祖先知情/absent 升根）+ 权限（subagentPolicy + guard 拒 lab_ctl + lab_status_ro）+ 消息链兜底（异常结算/未领取超时升根）。**issue #5 全链路闭环**（剩余「prompt 注入形式」与 KV 缓存冲突，维持工具按需查询——17-kv-cache 决策） |
 | A2 | **多实验并行跟踪**（R-2「多轨并存留 v2」） | 风险 11 | ✅ **2026-08-20 实施完成（V2.3）**：多轨（上限 4 + per-run 判定 + runId 归属）+ 标签分组（规则式打标 + lab_ctl tag + tags 聚合 + UI 分组展示）；verify-host [B3]/[E2] 全绿 |
 | A3 | webServer 自托管面板（出口④） | 风险 14 + §3.2.4（「v2 前置」） | 仅实现 HTTP 数据面 `/lab-monitor/api/*`；自托管 HTML 面板未实现 |
 | A4 | SSE `/lab/events` 远端扩展 | README v2 演进表「webServer SSE /lab/events（手机端/对接 monitor-panel）」 | 源码无 SSE/EventSource 实现 |

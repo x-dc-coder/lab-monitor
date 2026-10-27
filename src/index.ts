@@ -82,7 +82,7 @@ export interface LabMonitorConfig {
    * （crash 严格判定）。来源：settings.yaml 静态基线 + lab_ctl track 运行时动态合并。
    */
   trackRules: TrackRule[]
-  // ── M1（issue#5 告警通知，docs/research/22 §6）：──
+  // ── M1（issue#5 告警通知，docs/架构设计/告警通知设计.md §6）：──
   /**
    * 告警通知通道 fallback（off|notice|wake）：仅无实验上下文/unknown 类型时作为兜底档位；
    * 实际档位由策略引擎按「有效级别 × 实验状态 × 归属」计算（M1 实现 unknown/无实验上下文部分）。
@@ -102,7 +102,7 @@ export interface LabMonitorConfig {
   notifyTimeoutMs: number
   /** 是否广播 critical 实验级告警到全部 agent（默认关；M1 阶段仅对 roots() 生效） */
   broadcast: boolean
-  // ── M2（issue#6 实验类型识别，docs/research/22 §6.1）：──
+  // ── M2（issue#6 实验类型识别，docs/架构设计/告警通知设计.md §6.1）：──
   /**
    * 实验类型配置规则（pattern→type→notify 覆盖；复用 TagRule 形态）：
    * 优先级最高的识别层（用户意图 > 自动正则 > 学习历史）。notify 覆盖出厂类型矩阵（EXP_TYPE_DEFAULT_NOTIFY）。
@@ -112,7 +112,7 @@ export interface LabMonitorConfig {
   expTypeDefault: ExpType
   /** 是否启用学习层（按 fingerprint 历史时长归类 long；默认 true） */
   expTypeLearning: boolean
-  // ── M3（issue#7 子代理权限，docs/research/22 §5.2）：──
+  // ── M3（issue#7 子代理权限，docs/架构设计/告警通知设计.md §5.2）：──
   /**
    * 子代理对 lab_ctl 的控制权限：readonly（默认，只读查询）/ restricted（白名单动作）/ full（等同主代理）。
    * 安全边界：子代理默认只读——guard 执行期拒绝 lab_ctl，仅 lab_status/lab_advice 可调。
@@ -353,7 +353,7 @@ function promptLine(snap: MonitorSnapshot): string {
   return '[Lab Monitor] ' + parts.join(' · ')
 }
 
-// ── M1（issue#5，docs/research/22 §2.5）：动作解析纯函数 ─────────────────────
+// ── M1（issue#5，docs/架构设计/告警通知设计.md §2.5）：动作解析纯函数 ─────────────────────
 // 策略层只表达 notifyLevel（off/notice/wake）× 目标；具体投递动作按目标实时状态解析。
 // 全格语义（M1 单元测试覆盖）：
 //   off                → 'off'          （不推送，仅 UI/工具可见）
@@ -620,7 +620,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     }),
   })
 
-  // ── M3（issue#7，docs/research/22 §5.4）：agent 目录（路由+权限共用的运行时索引）──
+  // ── M3（issue#7，docs/架构设计/告警通知设计.md §5.4）：agent 目录（路由+权限共用的运行时索引）──
   // agent/created|disposed|status + subagent/start|end 维护；roots() 非持久化、冷 child 无事件、
   // 跨进程不协调——目录缺失时路由回退 roots()/alertTargets（设计 §5.4 限制）。
   interface AgentEntry {
@@ -688,7 +688,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     if (e && ev.status) e.status = String(ev.status)
   }
 
-  // ── M1（issue#5，docs/research/22 §2）：告警通知策略引擎 ─────────────────────
+  // ── M1（issue#5，docs/架构设计/告警通知设计.md §2）：告警通知策略引擎 ─────────────────────
   // 输入：lab/alert 事件（balancer.evaluate 规则告警 + pushExternal 外部告警，全部经 emitLab 总线）
   // 输出：按「有效级别 × 归属 × 实验状态」计算 notifyLevel → resolveAction(目标状态) → 投递
   // M1 范围注记（完整矩阵见设计 §2.2）：
@@ -812,7 +812,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           /* 回写失败不阻塞投递 */
         }
       }
-      // ── M3（issue#7，docs/research/22 §4.2）+ #18 修复：目标路由决策树 ──
+      // ── M3（issue#7，docs/架构设计/告警通知设计.md §4.2）+ #18 修复：目标路由决策树 ──
       //   1. 若配置了显式接收目标 alertTargets（如用户配置唤醒指定的 sessionId）：
       //      严格只投递给 alertTargets 中存活的 agent，绝不广播全网 roots，防止跨会话打扰；
       //   2. 默认路由：告警 runId → RunRecord.agentId（发起者）：
@@ -994,7 +994,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
     })
   }
 
-  // ── M3（issue#7，docs/research/22 §4.3）：消息链兜底——仅在链断裂证据时触发 ──
+  // ── M3（issue#7，docs/架构设计/告警通知设计.md §4.3）：消息链兜底——仅在链断裂证据时触发 ──
   // 明确不做「无 report/settle 活动即转发」（B1：静默处理是主通道常态路径，静默 ≠ 链断裂）。
   // 证据1：wake 档 followup 投递后 notifyTimeoutMs 内无 agent/inbox/claimed（未领取=未送达）→ 升根
   const claimedTargets = new Set<string>() // notifyTimeoutMs 窗口内领取过消息的 agent
@@ -1595,14 +1595,14 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
             deviceId: Schema.any(),
             swanlab: Schema.any(),
           })).default([]),
-          // ── M1（issue#5 告警通知，docs/research/22 §6.1）──
+          // ── M1（issue#5 告警通知，docs/架构设计/告警通知设计.md §6.1）──
           alertNotify: Schema.union([Schema.const('off'), Schema.const('notice'), Schema.const('wake')]).default('notice'),
           alertTargets: Schema.array(Schema.string()).default([]),
           notifyThrottleMs: Schema.number().default(60000),
           escalateAfterSec: Schema.number().default(600),
           notifyTimeoutMs: Schema.number().default(600000),
           broadcast: Schema.boolean().default(false),
-          // ── M2（issue#6 实验类型识别，docs/research/22 §6.1）──
+          // ── M2（issue#6 实验类型识别，docs/架构设计/告警通知设计.md §6.1）──
           experimentTypes: Schema.array(Schema.object({
             type: Schema.string(),
             patterns: Schema.array(Schema.string()),
@@ -2528,7 +2528,7 @@ export function apply(ctx: Context, config: Partial<LabMonitorConfig> = {}) {
           }),
         ),
       )
-      // ── M3（issue#7，docs/research/22 §5.3）：子代理权限 guard + 只读工具注入 + agent 目录事件 ──
+      // ── M3（issue#7，docs/架构设计/告警通知设计.md §5.3）：子代理权限 guard + 只读工具注入 + agent 目录事件 ──
       // ① host 全局 guard：谓词读策略存储（不写死拒绝）——子代理按 subagentPolicy 拒 lab_ctl
       const LAB_CTL_RESTRICTED_WHITELIST = ['watch', 'tag', 'history-manage']
       try {

@@ -1,69 +1,71 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.index
+  kind: reference
+  status: active
+  authority: canonical
+  topics:
+    - lab-monitor
+    - documentation
+  created_at: 2026-08-24
+  updated_at: 2026-10-27
+  relations:
+    - type: depends_on
+      target: docs.usage.guide
+      reason: 索引把使用者带到现行使用手册
+    - type: depends_on
+      target: docs.architecture.core
+      reason: 索引把架构读者带到现行系统架构
+---
+
 # Lab Monitor 文档索引
 
-> 本文件是 docs/ 的导航中心：按**分类**组织，人读与 Agent 查阅共用。
-> 项目内 Agent 另自动加载根目录 `AGENTS.md`（操作速查，本文档的精简版）。
-> 使用手册完整版：`docs/usage/usage.md`。
+知识库按 mdlineage 的目录规范组织。现行结论在使用手册和架构设计里。带日期的实录在研读复盘，审查在质量审查，已被替代的计划在历史归档。
 
-## 快速导航（按需求找文档）
-
-| 我想… | 看这份 |
-|---|---|
-| 知道 lab-monitor 怎么工作（架构） | `architecture/core.md`（引擎/出口/V2/M1-M3） |
-| 看独立 daemon 拆分设计（多 Agent / sink 扩展） | `architecture/standalone-daemon.md`（2026-10-27 已落地独立进程） |
-| 理解告警/通知/路由/权限设计 | `architecture/alert-notify.md` + `research/22-issue5-alert-notify-design.md` |
-| 用工具/面板/配置（人读完整手册） | `usage/usage.md` |
-| Agent 在项目内干活（速查） | `AGENTS.md`（项目根） |
-| 查数据结构（RunRecord/Alert/快照字段） | `reference/data-model.md` |
-| 查 RPC/工具/事件契约 | `reference/protocol.md` |
-| 查验收清单/里程碑 | `reference/milestones.md` |
-| 了解设计决策依据（调研/评审） | `research/`（00-24/26/27） |
-| 看历史计划 | `plan/`（PLAN-v1.1/1.3/1.4.5 归档） |
-| 查已知问题 | `research/18-known-issues.md` |
-
-## 分类清单
-
-### 📐 architecture/ —— 架构设计（怎么造的）
+## 使用手册
 
 | 文档 | 内容 |
 |---|---|
-| `core.md` | 核心引擎 7 模块（sampler/ring/state-machine/balancer/proc-aggregator/exp-type）+ UI 出口四出口 + V2 形态 + **§12 M1/M2/M3 架构** |
-| `alert-notify.md` | 告警架构：严格分级（severity/urgency/trend/sustainedMs）+ 通知引擎 + 类型矩阵 + agentDir 路由 + 权限 guard + 消息链兜底 |
-| `ui-adapters.md` | 出口注册策略 / 优先级 / 互斥规则 / 能力降级矩阵 |
-| `standalone-daemon.md` | 守护进程化拆分：DSH 薄适配 + HTTP MCP + 两类 sink（实验平台 / 监控站点）。glm-5.3 起草，Atria 审阅，2026-10-26 |
+| [使用指南](使用手册/使用指南.md) | 工具、面板、配置和变更记录 |
+| [已知问题](使用手册/已知问题.md) | 仍需留意的问题 |
+| [工坊投稿](使用手册/工坊投稿.md) | DSH Workshop 安装与合规说明 |
 
-### 📖 reference/ —— 参考说明（协议/数据/里程碑）
-
-| 文档 | 内容 |
-|---|---|
-| `data-model.md` | 指标枚举 / 快照 / ring buffer / 状态机转移表 / RunRecord+Alert 字段（含 V2.8/V2.9 增补） |
-| `protocol.md` | RPC 契约 + 工具契约 + 事件信封（冻结版） |
-| `milestones.md` | P0/P1/P2 验收清单（勾选制） |
-
-### 📗 usage/ —— 使用说明（怎么用）
+## 架构设计
 
 | 文档 | 内容 |
 |---|---|
-| `usage.md` | 完整使用手册：工具契约（lab_status/lab_advice/lab_ctl/lab_status_ro）+ 面板 UI + 阈值/告警/类型/通知语义 + 持久化 + HTTP 数据面 + 变更记录（V2.4-V2.9） |
+| [系统架构](架构设计/系统架构.md) | 采样、状态机、平衡引擎、V2 形态 |
+| [告警通知](架构设计/告警通知.md) | 分级、通知矩阵、路由和权限 |
+| [告警通知设计](架构设计/告警通知设计.md) | 告警方案的设计定稿 |
+| [界面适配](架构设计/界面适配.md) | 面板出口、优先级和降级 |
+| [独立守护进程](架构设计/独立守护进程.md) | 脱离 DSH 启动的进程、HTTP 与 MCP |
+| [协议契约](架构设计/协议契约.md) | HTTP、工具和事件 |
+| [数据模型](架构设计/数据模型.md) | 快照、实验和告警字段 |
 
-### 🔬 research/ —— 调研与设计（决策依据）
+## 迭代计划
 
-- **00-19**：架构基线 / 外部基准 / 内部资产 / 契约调研 / 采样实证 / e2e 记录 / KV 缓存 / 已知问题 / UI 集成
-- **20-24**：issue #5 系列设计（20 方案 F / 21 T2 分级+类型 / **22 综合设计定稿** / 23 评审 / 24 T1 agent 调研）
-- **26-28**：prompt 注入替代性分析 + #4/#5 验收审查 + **28 issue #18 根因复盘与真实会话端到端测试方案（2026-09-09）**
-- 关键入口：`22-issue5-alert-notify-design.md`（M1/M2/M3 设计事实源）
+| 文档 | 内容 |
+|---|---|
+| [验收里程碑](迭代计划/验收里程碑.md) | P0 / P1 / P2 验收清单 |
+| [差异化阈值讨论](迭代计划/差异化阈值讨论.md) | 按实验类型覆盖阈值的数值，尚未拍板 |
 
-### 📦 plan/ —— 历史实施计划（归档）
+## 质量审查
 
-- `PLAN-v1.1.md` / `PLAN-v1.3.md` / `PLAN-v1.4.5.md`：MVP→v2 演进的历史计划（现行状态以 README 与 architecture/ 为准）
+已结项的审查，状态为 archived：
 
-### 🗄 archive/ —— 旧资产归档
+- [2026-08-24 计划评审](质量审查/2026-08-24-计划评审.md)
+- [2026-08-24 计划复审](质量审查/2026-08-24-计划复审.md)
+- [2026-08-24 跟踪实现审查](质量审查/2026-08-24-跟踪实现审查.md)
+- [2026-08-23 告警设计审查](质量审查/2026-08-23-告警设计审查.md)
+- [2026-08-24 验收审查](质量审查/2026-08-24-验收审查.md)
 
-- `v1.4.5-plugin/`：v1.4.5 动态插件版源码快照（2026-08-20 归档，仅供查档）
+## 研读复盘
 
-## Agent 查阅指引
+过程实录和实证。篇目见 [阅读看板](研读复盘/README.md)。
 
-1. **操作速查** → 项目根 `AGENTS.md`（工具契约 / 实验识别规则 / 验证清单 / 配置键）
-2. **架构理解** → `architecture/core.md` §12（M1/M2/M3）+ `architecture/alert-notify.md`
-3. **设计决策** → `research/22-issue5-alert-notify-design.md`（综合设计）+ `research/26`（prompt 注入替代）
-4. **契约细节** → `reference/protocol.md` + `reference/data-model.md`
-5. **变更历史** → `usage/usage.md` §8 变更记录 + README V2.x 演进段
+## 历史归档
+
+- [计划 v1.1](历史归档/2026-08-24-计划v1-1.md)、[v1.3](历史归档/2026-08-24-计划v1-3.md)、[v1.4.5](历史归档/2026-08-24-计划v1-4-5.md)
+- [监控面板对接方案](历史归档/2026-08-25-监控面板对接方案.md)
+- [v1.4.5 插件源码](历史归档/v1-4-5插件源码/说明.md)

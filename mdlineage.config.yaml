@@ -1,0 +1,71 @@
+# lab-monitor 知识库。目录意图对齐 mdlineage「全场景通用知识库目录规范」。
+# 根目录 README.md / AGENTS.md 不是知识库正文，不要求前置元数据。
+
+configVersion: 1
+
+metadata:
+  required: true
+
+vocabulary:
+  kinds: [policy, guide, architecture, reference, spec, report, plan, vision]
+  statuses: [draft, active, deprecated, archived]
+  authorities: [canonical, supporting]
+
+layout:
+  - match: '**/*.md'
+    require:
+      frontmatter: optional
+  - match: 'docs/**'
+    require:
+      frontmatter: required
+  - match: 'docs/使用手册/**'
+    intent:
+      description: '面向使用者的现行中文手册'
+      kinds: [guide, reference]
+      forbidStatus: [draft]
+      maxDepth: 2
+  - match: 'docs/架构设计/**'
+    require:
+      authority: canonical
+    intent:
+      description: '现行架构、协议与数据模型'
+      kinds: [architecture, spec, policy]
+      authority: [canonical]
+      forbidStatus: [draft]
+  - match: 'docs/迭代计划/**'
+    intent:
+      description: '进行中的计划与仍待拍板的讨论'
+      kinds: [plan, report, vision]
+  - match: 'docs/质量审查/**'
+    intent:
+      description: '已完成的审查与验收报告'
+      kinds: [report]
+      statuses: [archived]
+  - match: 'docs/历史归档/**'
+    intent:
+      description: '已结项或被新设计替代的档案'
+      statuses: [archived]
+  - match: 'docs/研读复盘/README.md'
+    require:
+      authority: supporting
+    intent:
+      description: '阅读看板'
+      kinds: [reference]
+      authority: [supporting]
+      forbidStatus: [draft, archived]
+  - match: 'docs/研读复盘/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.md'
+    require:
+      authority: supporting
+    intent:
+      description: '单次研读、实证或设计输入'
+      kinds: [report]
+      authority: [supporting]
+      forbidStatus: [archived]
+      maxDepth: 1
+
+lifecycle:
+  staleAfterDays: 180
+  staleStatuses: [active]
+  exempt:
+    - 'docs/历史归档/**'
+    - 'docs/质量审查/**'

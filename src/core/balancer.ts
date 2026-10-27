@@ -97,7 +97,7 @@ interface Rule {
   check(w: SamplePoint, thr: Thresholds): RuleCheckResult
   msg: string
   actions: string[]
-  // ── M1（issue#5 严格分级，docs/research/22 §1.3 rule 语义权重表）──
+  // ── M1（issue#5 严格分级，docs/架构设计/告警通知设计.md §1.3 rule 语义权重表）──
   /** 严重度 1-5（静态来源） */
   severity: 1 | 2 | 3 | 4 | 5
   /** 紧迫性基准 1-3（trend=rising 时 +1 由 evaluate 推导） */

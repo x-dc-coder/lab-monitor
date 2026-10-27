@@ -3,7 +3,7 @@
 // verify-m1.js —— M1（issue#5 告警通知）单元验证：resolveAction 全格 + metricOf 指标提取
 // ----------------------------------------------------------------------------
 // 运行：node scripts/verify-m1.js（verify.sh [5b] 收录）
-// 覆盖（设计 docs/research/22-issue5-alert-notify-design.md §2.5 resolveAction + §1 trend）：
+// 覆盖（设计 docs/架构设计/告警通知设计.md §2.5 resolveAction + §1 trend）：
 //   1. resolveAction 全格（3 level × 3 targetState = 9 格）—— 策略层与动作层解耦的契约
 //   2. metricOf 各 rule 触发指标提取（oom/other-occupancy 显存%、thermal 温度、
 //      io-bottleneck GPU util、imbalance 多卡 util 差）—— trend=falling 判定的输入

@@ -51,7 +51,7 @@ export declare const THRESH_KEYS: readonly ["utilWarn", "memWarn", "tempWarn", "
  * 训练命令识别表（T4-1 + 2026-08-23 精度修复）
  * 误报实证（T2 §2.4，~/.dsh/settings.yaml history）：grep 模式串含 "torchrun" 被命中、
  * gh issue heredoc 含 torchrun 字样命中、python3 -c "import zipfile" 工具脚本全被记为实验。
- * 修复原则（docs/research/21-t2 §2.4 + 22-issue5 §3.3）：
+ * 修复原则（docs/研读复盘/2026-08-24-告警分级输入.md §2.4 + 22-issue5 §3.3）：
  *   - torchrun/deepspeed 不再裸词匹配：要求后跟 脚本文件 或 训练器句式（-m torch.distributed 等）
  *   - python -c/-m 增加排除特征：常见工具/检查形态（import zipfile/docx 检查、打印环境等）不命中
  *   - 未命中 = null（不猜），防误报优先
@@ -62,7 +62,7 @@ export declare const TRAIN_PATTERNS: {
 }[];
 export declare function matchTrainFeature(cmdStr: string | null | undefined): string | null;
 /**
- * M2（issue#6，docs/research/22 §3.3）：实验类型自动层识别正则（保守，未命中不猜）。
+ * M2（issue#6，docs/架构设计/告警通知设计.md §3.3）：实验类型自动层识别正则（保守，未命中不猜）。
  * 判定顺序（classifyExpType）：smoke/regression/full 明确形态 → gpu-train（matchTrainFeature 门控）
  * → gpu-calc（推理/渲染/仿真，非 train）→ long（serve/batch 类长驻）。gpu-train 不在本表，
  * 由 TRAIN_PATTERNS（2026-08-23 精度修复，11/11 验证）门控，避免与 calc 关键字冲突。
@@ -72,7 +72,7 @@ export declare const EXP_TYPE_PATTERNS: {
     re: RegExp;
 }[];
 /**
- * M2（issue#6，docs/research/22 §3.4）：类型 × notifyLevel 出厂默认矩阵。
+ * M2（issue#6，docs/架构设计/告警通知设计.md §3.4）：类型 × notifyLevel 出厂默认矩阵。
  * 语义：类型矩阵 = 配置（experimentTypes 可覆盖），本表只是出厂建议值，不硬编码代码分支。
  * unknown 走全局 fallback（critical→notice 起点，不给类型特权）。
  */
@@ -80,7 +80,7 @@ export declare const EXP_TYPE_DEFAULT_NOTIFY: Record<ExpType, {
     critical: NotifyLevel;
     warn: NotifyLevel;
 }>;
-/** M2：学习层长任务归类阈值——同 fingerprint 历史时长 p90 ≥ 3600s → long（docs/research/22 §3.2 S5） */
+/** M2：学习层长任务归类阈值——同 fingerprint 历史时长 p90 ≥ 3600s → long（docs/架构设计/告警通知设计.md §3.2 S5） */
 export declare const LONG_LEARN_SEC = 3600;
 /**
  * 命令指纹：ps 关联 / result 配对用的特征串（T1-1/T1-2）

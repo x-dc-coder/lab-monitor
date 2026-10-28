@@ -1,0 +1,2 @@
+# lib/ 为 tsc + tsdown 构建产物（随包分发），不计入 GitHub 语言统计
+lib/** linguist-generated
